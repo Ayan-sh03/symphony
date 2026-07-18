@@ -23,7 +23,6 @@ export function renderDashboard(initial: SnapshotView): string {
 </head>
 <body>
 <div id="app" aria-busy="false"></div>
-<div id="drawer-root"></div>
 <div id="toast-root" aria-live="polite"></div>
 <script>window.__SYMPHONY__ = ${bootstrap};</script>
 <script>${JS}</script>
@@ -33,48 +32,48 @@ export function renderDashboard(initial: SnapshotView): string {
 
 const CSS = String.raw`
 :root {
-  --bg: oklch(0.17 0.012 264);
-  --panel: oklch(0.205 0.013 264);
-  --panel-2: oklch(0.235 0.015 264);
-  --border: oklch(0.30 0.016 264);
-  --border-strong: oklch(0.40 0.02 264);
-  --ink: oklch(0.965 0.004 264);
-  --muted: oklch(0.72 0.012 264);
-  --faint: oklch(0.58 0.012 264);
-  --accent: oklch(0.72 0.13 250);
-  --accent-ink: oklch(0.20 0.03 250);
-  --accent-soft: oklch(0.72 0.13 250 / 0.13);
-  --ok: oklch(0.76 0.15 158);
-  --ok-soft: oklch(0.76 0.15 158 / 0.15);
-  --warn: oklch(0.83 0.13 85);
-  --warn-soft: oklch(0.83 0.13 85 / 0.15);
-  --danger: oklch(0.70 0.19 24);
-  --danger-soft: oklch(0.70 0.19 24 / 0.15);
-  --shadow: 0 10px 40px -12px oklch(0.08 0.02 264 / 0.6);
+  --bg: oklch(0.165 0.008 66);
+  --panel: oklch(0.198 0.009 66);
+  --panel-2: oklch(0.232 0.010 66);
+  --border: oklch(0.295 0.011 66);
+  --border-strong: oklch(0.40 0.014 66);
+  --ink: oklch(0.965 0.006 80);
+  --muted: oklch(0.735 0.012 74);
+  --faint: oklch(0.585 0.012 74);
+  --accent: oklch(0.80 0.128 74);
+  --accent-ink: oklch(0.24 0.04 74);
+  --accent-soft: oklch(0.80 0.128 74 / 0.15);
+  --ok: oklch(0.77 0.15 158);
+  --ok-soft: oklch(0.77 0.15 158 / 0.15);
+  --warn: oklch(0.74 0.145 52);
+  --warn-soft: oklch(0.74 0.145 52 / 0.16);
+  --danger: oklch(0.685 0.19 24);
+  --danger-soft: oklch(0.685 0.19 24 / 0.15);
+  --shadow: 0 10px 40px -12px oklch(0.06 0.02 66 / 0.6);
   --radius: 10px;
   --mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
   --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
 :root[data-theme="light"] {
-  --bg: oklch(0.975 0.004 264);
+  --bg: oklch(0.985 0.005 84);
   --panel: oklch(1 0 0);
-  --panel-2: oklch(0.975 0.005 264);
-  --border: oklch(0.90 0.006 264);
-  --border-strong: oklch(0.82 0.01 264);
-  --ink: oklch(0.26 0.02 264);
-  --muted: oklch(0.48 0.02 264);
-  --faint: oklch(0.62 0.015 264);
-  --accent: oklch(0.52 0.15 250);
-  --accent-ink: oklch(0.99 0.01 250);
-  --accent-soft: oklch(0.52 0.15 250 / 0.10);
-  --ok: oklch(0.52 0.15 158);
-  --ok-soft: oklch(0.52 0.15 158 / 0.12);
-  --warn: oklch(0.62 0.13 78);
-  --warn-soft: oklch(0.62 0.13 78 / 0.14);
+  --panel-2: oklch(0.975 0.006 80);
+  --border: oklch(0.905 0.007 76);
+  --border-strong: oklch(0.83 0.011 72);
+  --ink: oklch(0.255 0.014 66);
+  --muted: oklch(0.475 0.018 70);
+  --faint: oklch(0.60 0.016 72);
+  --accent: oklch(0.60 0.125 66);
+  --accent-ink: oklch(0.99 0.01 84);
+  --accent-soft: oklch(0.60 0.125 66 / 0.12);
+  --ok: oklch(0.53 0.14 158);
+  --ok-soft: oklch(0.53 0.14 158 / 0.12);
+  --warn: oklch(0.58 0.14 50);
+  --warn-soft: oklch(0.58 0.14 50 / 0.14);
   --danger: oklch(0.55 0.20 24);
   --danger-soft: oklch(0.55 0.20 24 / 0.12);
-  --shadow: 0 10px 40px -12px oklch(0.5 0.02 264 / 0.18);
+  --shadow: 0 10px 40px -12px oklch(0.5 0.02 66 / 0.16);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -99,7 +98,9 @@ header.bar {
 }
 .bar-inner { max-width: 1180px; margin: 0 auto; padding: 14px 24px;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto;
+  background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 .brand .glyph { display: inline-flex; color: var(--accent); }
 .brand .glyph svg { display: block; }
 .brand h1 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
@@ -226,21 +227,32 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .bar-track { height: 6px; border-radius: 6px; background: var(--panel-2); overflow: hidden; width: 160px; margin-top: 4px; }
 .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; transition: width .4s var(--ease); }
 
-/* Drawer */
-#drawer-root { position: fixed; inset: 0; z-index: 60; display: none; }
-#drawer-root.open { display: block; }
-.scrim { position: absolute; inset: 0; background: oklch(0.08 0.02 264 / 0.42); backdrop-filter: blur(2px); opacity: 0; transition: opacity .18s var(--ease); }
-#drawer-root.open .scrim { opacity: 1; }
-.drawer { position: absolute; top: 0; right: 0; height: 100%; width: min(416px, 92vw);
-  background: var(--panel); border-left: 1px solid var(--border-strong);
-  box-shadow: -24px 0 60px -24px oklch(0.05 0.02 264 / 0.66);
-  transform: translateX(100%); transition: transform .22s var(--ease); display: flex; flex-direction: column; }
-#drawer-root.open .drawer { transform: translateX(0); }
-.drawer-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
-.drawer-head h3 { margin: 0; font-size: 15px; font-weight: 640; }
-.drawer-head .btn { margin-left: auto; }
-.drawer-body { padding: 18px; overflow-y: auto; }
-.kv { display: grid; grid-template-columns: 120px 1fr; gap: 8px 14px; font-size: 13px; }
+/* Focused page (detail / new / integrate) */
+.page { animation: pagein .2s var(--ease); }
+@keyframes pagein { from { opacity: 0; transform: translateY(6px); } }
+.back { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 6px 0;
+  color: var(--faint); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; transition: color .12s var(--ease); }
+.back:hover { color: var(--ink); }
+.back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.page-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding-bottom: 16px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }
+.page-head h1 { font-size: 22px; font-weight: 660; letter-spacing: -0.02em; margin: 0; }
+.page-head .pkey { font-family: var(--mono); font-size: 13px; color: var(--faint); }
+.page-head .spacer { margin-left: auto; }
+.page-lead { color: var(--muted); font-size: 13.5px; max-width: 68ch; margin: -8px 0 24px; line-height: 1.6; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 22px; }
+.fact { display: inline-flex; align-items: baseline; gap: 6px; font-size: 12.5px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; }
+.fact b { color: var(--faint); font-weight: 550; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.fact .mono { font-family: var(--mono); color: var(--ink); font-size: 12px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 288px; gap: 22px; align-items: start; }
+@media (max-width: 860px) { .detail-grid { grid-template-columns: 1fr; } }
+.aside-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+.aside-card + .aside-card { margin-top: 16px; }
+.page-form { max-width: 620px; }
+.page code { font-family: var(--mono); font-size: 11.5px; background: var(--panel-2); border: 1px solid var(--border);
+  padding: 0 5px; border-radius: 5px; color: var(--ink); }
+.kv { display: grid; grid-template-columns: 108px 1fr; gap: 9px 14px; font-size: 13px; }
 .kv dt { color: var(--faint); }
 .kv dd { margin: 0; word-break: break-word; }
 .kv dd.mono { font-family: var(--mono); color: var(--ink); font-size: 12px; }
@@ -268,8 +280,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   font-weight: 650; font-size: 12px; display: flex; align-items: center; justify-content: center; }
 .istep .ititle { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
 .istep .idesc { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
-.drawer-body code { font-family: var(--mono); font-size: 11.5px; background: var(--panel-2); border: 1px solid var(--border);
-  padding: 0 5px; border-radius: 5px; color: var(--ink); }
 
 /* Form */
 .form { display: flex; flex-direction: column; gap: 14px; }
@@ -430,32 +440,48 @@ const JS = String.raw`
       .catch(function () { toast("Could not queue poll", "err"); })
       .then(function () { if (btn) { btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; } });
   }
-  var openId = null;
-  function openDetail(identifier) {
-    openId = identifier;
-    var root = $("#drawer-root");
-    root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Issue detail">'
-      + '<div class="drawer-head"><h3>' + esc(identifier) + '</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
-      + '<div class="drawer-body"><p class="sub">Loading…</p></div></aside>';
-    root.classList.add("open");
-    loadDetail(identifier, true);
+  // ---- routing (hash-based full-page views; no overlay) ----
+  // route: { name: "board" | "detail" | "new" | "integrate", id?: string }
+  var route = { name: "board" };
+  var detailData = null;   // cached detail payload for the open issue
+  var detailErr = null;    // error string if the detail fetch failed
+
+  function parseHash() {
+    var h = (location.hash || "").replace(/^#\/?/, "");
+    if (h.indexOf("issue/") === 0) return { name: "detail", id: decodeURIComponent(h.slice(6)) };
+    if (h === "new") return { name: "new" };
+    if (h === "integrate") return { name: "integrate" };
+    return { name: "board" };
   }
-  function loadDetail(identifier, showErr) {
-    var root = $("#drawer-root");
+  function navigate(hash) { if (location.hash === hash) applyRoute(); else location.hash = hash; }
+  function goBoard() { navigate("#/"); }
+  function applyRoute() {
+    var next = parseHash();
+    var changed = next.name !== route.name || next.id !== route.id;
+    route = next;
+    if (route.name === "detail") {
+      if (changed) { detailData = null; detailErr = null; loadDetail(route.id); }
+    } else { detailData = null; detailErr = null; }
+    render();
+    if (changed) window.scrollTo(0, 0);
+  }
+  function loadDetail(identifier) {
     return fetch("/api/v1/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
-        var body = $(".drawer-body", root);
-        if (!body || openId !== identifier) return;
-        if (res.ok) body.innerHTML = detailHtml(res.j);
-        else if (showErr) body.innerHTML = '<p class="sub">' + esc((res.j.error && res.j.error.message) || "Not found") + "</p>";
+        if (route.name !== "detail" || route.id !== identifier) return;
+        if (res.ok) { detailData = res.j; detailErr = null; }
+        else { detailData = null; detailErr = (res.j.error && res.j.error.message) || "Not found"; }
+        render();
       })
-      .catch(function () { if (showErr) { var b = $(".drawer-body", root); if (b) b.innerHTML = '<p class="sub">Failed to load detail.</p>'; } });
+      .catch(function () {
+        if (route.name !== "detail" || route.id !== identifier) return;
+        if (!detailData) { detailErr = "Failed to load detail."; render(); }
+      });
   }
-  function refreshOpenDetail() { if (openId && $("#drawer-root").classList.contains("open")) loadDetail(openId, false); }
+  function refreshOpenDetail() { if (route.name === "detail") loadDetail(route.id); }
 
-  function openIntegrate() {
-    openId = null;
+  function integratePage() {
     var m = (state && state.meta) || {};
     var agents = m.agent_kinds || [m.agent_kind];
     var trackers = m.tracker_kinds || [m.tracker_kind];
@@ -480,30 +506,27 @@ const JS = String.raw`
           return '<option value="' + esc(k) + '"' + (k === defAgent ? " selected" : "") + ">" + esc(k) + "</option>";
         }).join("") + "</select><span class=\"hint\">Runs any task without its own agent set. Applies immediately.</span>"
       : '<div>' + chips(agents, defAgent) + '</div><span class="hint">Register another backend to switch the default per task.</span>';
-    var root = $("#drawer-root");
-    root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Integrate">'
-      + '<div class="drawer-head"><h3>Integrate your own agent</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
-      + '<div class="drawer-body">'
-      + '<p class="sub" style="margin-top:0">Symphony talks to any coding agent through one <code>AgentSession</code> interface. The orchestrator, tracker, workspace, and this console are backend-neutral.</p>'
-      + '<div class="field" style="margin-top:16px"><label>Default agent</label>' + defSelect + "</div>"
-      + '<div class="log-head">Registered trackers</div><div>' + chips(trackers, m.tracker_kind) + "</div>"
+    return pageHead("Integrate your own agent", "")
+      + '<div class="page">'
+      + '<p class="page-lead">Symphony talks to any coding agent through one <code>AgentSession</code> interface. The orchestrator, tracker, workspace, and this console are backend-neutral — adding an agent means writing one class and registering it.</p>'
+      + '<div class="detail-grid"><div>'
       + '<div class="log-head">Add a backend in 5 steps</div><div class="isteps">' + stepHtml + "</div>"
-      + '<p class="sub" style="margin-top:16px">Full walkthrough, the event vocabulary, and the tracker-adapter contract are in <code>INTEGRATION.md</code> in the repo.</p>'
-      + "</div></aside>";
-    root.classList.add("open");
+      + '<p class="sub" style="margin-top:18px">Full walkthrough, the event vocabulary, and the tracker-adapter contract are in <code>INTEGRATION.md</code> in the repo.</p>'
+      + '</div><div>'
+      + '<div class="aside-card"><div class="field" style="margin:0"><label>Default agent</label>' + defSelect + "</div></div>"
+      + '<div class="aside-card"><div class="log-head" style="margin-top:0">Registered agents</div><div>' + chips(agents, defAgent) + "</div>"
+      + '<div class="log-head">Registered trackers</div><div>' + chips(trackers, m.tracker_kind) + "</div></div>"
+      + "</div></div></div>";
   }
-  function closeDrawer() { openId = null; var r = $("#drawer-root"); r.classList.remove("open"); setTimeout(function () { if (!r.classList.contains("open")) r.innerHTML = ""; }, 260); }
 
-  function openCreate() {
+  function createPage() {
     var m = (state && state.meta) || {};
     // Offer backlog states first (new work parks in backlog by default) then active.
     var states = (m.backlog_states || []).concat(m.active_states || ["todo"]);
     if (!states.length) states = ["todo"];
     var opts = states.map(function (s) { return '<option value="' + esc(s) + '">' + esc(s) + "</option>"; }).join("");
-    var root = $("#drawer-root");
-    root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="New issue">'
-      + '<div class="drawer-head"><h3>New issue</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
-      + '<div class="drawer-body"><form class="form" id="newform" autocomplete="off">'
+    return pageHead("New issue", "")
+      + '<div class="page"><form class="form page-form" id="newform" autocomplete="off">'
       + '<div class="field"><label for="f-id">Identifier <span class="req">*</span></label>'
         + '<input class="input" id="f-id" name="identifier" placeholder="SYM-3" required></div>'
       + '<div class="field"><label for="f-title">Title <span class="req">*</span></label>'
@@ -520,12 +543,9 @@ const JS = String.raw`
       + '<div class="field"><label for="f-labels">Labels</label>'
         + '<input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>'
       + '<div class="field-err" id="f-err" hidden></div>'
-      + '<div class="form-actions"><button type="button" class="btn" data-close>Cancel</button>'
+      + '<div class="form-actions"><button type="button" class="btn" data-nav="#/">Cancel</button>'
         + '<button type="submit" class="btn primary">Create &amp; dispatch</button></div>'
-      + "</form></div></aside>";
-    root.classList.add("open");
-    setTimeout(function () { var el = $("#f-id"); if (el) el.focus(); }, 60);
-    $("#newform").addEventListener("submit", submitCreate);
+      + "</form></div>";
   }
 
   function agentField(m) {
@@ -561,30 +581,44 @@ const JS = String.raw`
       .then(function (res) {
         if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "create failed");
         toast("Created " + payload.identifier + " · dispatching", "ok");
-        closeDrawer();
-        return fetchState();
+        goBoard();
+        return Promise.all([fetchState(), fetchBoard()]);
       })
       .catch(function (ex) { err.textContent = String(ex.message || ex); err.hidden = false;
         btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
   }
-  function detailHtml(d) {
+  // Look up a human title for an identifier from the loaded board, if any.
+  function detailTitle(identifier) {
+    if (!board || !board.issues) return null;
+    for (var i = 0; i < board.issues.length; i++) if (board.issues[i].identifier === identifier) return board.issues[i].title;
+    return null;
+  }
+  function fact(label, valHtml) { return '<span class="fact"><b>' + esc(label) + "</b>" + valHtml + "</span>"; }
+  function detailPage(d) {
     var run = d.running, ret = d.retry;
     var statusKind = d.status === "running" ? "active" : d.status === "completed" ? "ok" : d.status === "queued" ? "active" : "warn";
-    var rows = [
-      ["Status", badge(d.status, statusKind)],
-      ["Issue id", '<span class="mono">' + esc(d.issue_id) + "</span>"]
-    ];
-    if (d.state && !run) rows.push(["Tracker state", badge(d.state, "")]);
-    if (d.agent) rows.push(["Agent", '<span class="mono">' + esc(d.agent) + "</span>"]);
+    var title = detailTitle(d.issue_identifier);
+
+    // Glanceable facts strip.
+    var facts = badge(d.status, statusKind);
+    if (d.agent) facts += fact("agent", '<span class="mono">' + esc(d.agent) + "</span>");
+    if (run) {
+      facts += fact("turns", '<span class="mono">' + esc(run.turn_count) + "</span>");
+      facts += fact("tokens", '<span class="mono">' + nfmt(run.tokens && run.tokens.total_tokens) + "</span>");
+      facts += fact("elapsed", '<span class="mono">' + esc(dur(run.started_at)) + "</span>");
+    } else if (d.ended_at) {
+      facts += fact("ended", esc(ago(d.ended_at)));
+    }
+
+    // Aside: the full fact table.
+    var rows = [["Issue id", '<span class="mono">' + esc(d.issue_id) + "</span>"]];
+    rows.push(["Tracker state", badge(run ? run.state : d.state, run ? "active" : "")]);
     rows.push(["Workspace", '<span class="mono">' + esc(d.workspace && d.workspace.path) + "</span>"]);
     if (run) {
-      rows.push(["Tracker state", badge(run.state, "active")]);
       rows.push(["Session", '<span class="mono">' + esc(run.session_id || "—") + "</span>"]);
-      rows.push(["Turns", '<span class="mono">' + esc(run.turn_count) + "</span>"]);
       rows.push(["Last event", (run.last_event ? badge(run.last_event, eventKind(run.last_event)) : "—")]);
       rows.push(["Last update", esc(ago(run.last_event_at))]);
-      rows.push(["Elapsed", esc(dur(run.started_at))]);
-      rows.push(["Tokens", '<span class="mono">' + nfmt(run.tokens && run.tokens.total_tokens) + " (" + nfmt(run.tokens && run.tokens.input_tokens) + " in / " + nfmt(run.tokens && run.tokens.output_tokens) + " out)</span>"]);
+      rows.push(["Tokens", '<span class="mono">' + nfmt(run.tokens && run.tokens.input_tokens) + " in / " + nfmt(run.tokens && run.tokens.output_tokens) + " out</span>"]);
       if (run.last_message) rows.push(["Message", esc(run.last_message)]);
     }
     if (ret) {
@@ -592,10 +626,13 @@ const JS = String.raw`
       rows.push(["Due", esc(until(ret.due_at))]);
       rows.push(["Reason", esc(ret.error || "—")]);
     }
-    if (d.ended_at) rows.push(["Ended", esc(ago(d.ended_at))]);
     if (d.last_error && !ret) rows.push(["Last error", esc(d.last_error)]);
-    return '<dl class="kv">' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("")
-      + "</dl>" + logHtml(d.recent_events || []);
+    var kv = '<dl class="kv">' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
+
+    return pageHead(title || d.issue_identifier, title ? d.issue_identifier : "")
+      + '<div class="page"><div class="facts">' + facts + "</div>"
+      + '<div class="detail-grid"><div>' + logHtml(d.recent_events || []) + "</div>"
+      + '<div class="aside-card">' + kv + "</div></div></div>";
   }
   function logKind(ev) {
     if (ev === "agent_message") return "msg";
@@ -638,27 +675,29 @@ const JS = String.raw`
     $(".status .txt").textContent = label + " · updated " + ago(state ? state.generated_at : null);
   }
 
-  function render() {
-    if (!state) return;
-    var m = state.meta || {};
+  function headerHtml(m) {
+    var themeIcon = document.documentElement.getAttribute("data-theme") === "dark" ? "◐" : "◑";
+    var onBoard = route.name === "board";
+    return '<header class="bar"><div class="bar-inner">'
+    +   '<button class="brand" data-nav="#/" aria-label="Symphony home"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></button>'
+    +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
+    +   (m.can_create ? '<button class="btn primary" data-nav="#/new"' + (route.name === "new" ? ' aria-pressed="true"' : "") + '>＋ New issue</button>' : "")
+    +   (onBoard ? '<button class="btn" data-act="poll">▸ Poll now</button>' : "")
+    +   (onBoard ? '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>' : "")
+    +   '<button class="btn" data-nav="#/integrate"' + (route.name === "integrate" ? ' aria-pressed="true"' : "") + '>Integrate</button>'
+    +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
+    +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
+    + '</div></header>';
+  }
+  function pageHead(title, key) {
+    return '<button class="back" data-nav="#/"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg> Board</button>'
+      + '<div class="page-head"><h1>' + esc(title) + "</h1>" + (key ? '<span class="pkey">' + esc(key) + "</span>" : "") + "</div>";
+  }
+  function boardBody(m) {
     var t = state.codex_totals || {};
     var running = state.running || [];
     var retrying = state.retrying || [];
-    var themeIcon = document.documentElement.getAttribute("data-theme") === "dark" ? "◐" : "◑";
-
-    var html = ""
-    + '<header class="bar"><div class="bar-inner">'
-    +   '<div class="brand"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></div>'
-    +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
-    +   (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
-    +   '<button class="btn" data-act="poll">▸ Poll now</button>'
-    +   '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>'
-    +   '<button class="btn" data-act="integrate">Integrate</button>'
-    +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
-    +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
-    + '</div></header>'
-    + '<div class="wrap">'
-    +   '<div class="meta">'
+    return '<div class="meta">'
     +     '<span><b>' + esc(m.tracker_kind || "?") + '</b> tracker</span>'
     +     '<span>agent <b>' + esc(m.default_agent || m.agent_kind || "?") + '</b></span>'
     +     '<span>polling every <b>' + Math.round((m.poll_interval_ms || 0) / 1000) + 's</b></span>'
@@ -674,11 +713,32 @@ const JS = String.raw`
     +   boardSection(m)
     +   section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))
     +   section("Retry queue", retrying.length, retrying.length ? retryTable(retrying) : emptyRetry())
-    +   rateLimit(state.rate_limits)
-    + '</div>';
+    +   rateLimit(state.rate_limits);
+  }
+  function routeBody(m) {
+    if (route.name === "new") return m.can_create ? createPage() : notFoundPage("Creating issues is not supported by this tracker.");
+    if (route.name === "integrate") return integratePage();
+    if (route.name === "detail") {
+      if (detailErr) return notFoundPage(detailErr);
+      if (!detailData) return pageHead(route.id, "") + '<div class="page"><p class="sub">Loading…</p></div>';
+      return detailPage(detailData);
+    }
+    return boardBody(m);
+  }
+  function notFoundPage(msg) {
+    return pageHead("Not found", "") + '<div class="page"><div class="panel empty"><h3>' + esc(msg) + "</h3>"
+      + '<p>The item you were looking at is no longer available.</p>'
+      + '<button class="btn primary" data-nav="#/">Back to board</button></div></div>';
+  }
 
-    $("#app").innerHTML = html;
+  function render() {
+    if (!state) return;
+    var m = state.meta || {};
+    // Never rebuild the create form out from under the user mid-typing.
+    if (route.name === "new" && $("#newform")) { paintStatus(); return; }
+    $("#app").innerHTML = headerHtml(m) + '<div class="wrap">' + routeBody(m) + "</div>";
     paintStatus();
+    if (route.name === "new") { var el = $("#f-id"); if (el && el !== document.activeElement && !el.value) el.focus(); }
   }
 
   function metric(k, v, u, hot) {
@@ -778,7 +838,7 @@ const JS = String.raw`
       + '<p>Symphony polls the <b>' + esc(m.tracker_kind) + '</b> tracker every ' + secs + 's. Add an issue to <code>issues/</code> '
       + 'or move one into an active state (<code>' + (m.active_states || []).map(esc).join("</code>, <code>") + '</code>), then poll.</p>'
       + '<div style="display:flex;gap:8px;justify-content:center">'
-      + (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
+      + (m.can_create ? '<button class="btn primary" data-nav="#/new">＋ New issue</button>' : "")
       + '<button class="btn" data-act="poll">▸ Poll now</button></div></div>';
   }
   function emptyRetry() {
@@ -801,21 +861,23 @@ const JS = String.raw`
 
   // ---- events (delegated) ----
   document.addEventListener("click", function (e) {
+    var nav = e.target.closest("[data-nav]");
+    if (nav) { e.preventDefault(); navigate(nav.getAttribute("data-nav")); return; }
     var act = e.target.closest("[data-act]");
     if (act) {
       var a = act.getAttribute("data-act");
       if (a === "poll") pollNow(act);
-      else if (a === "integrate") openIntegrate();
-      else if (a === "new") openCreate();
       else if (a === "auto") { auto = !auto; render(); toast(auto ? "Auto-refresh on" : "Auto-refresh paused", "ok"); }
       else if (a === "theme") toggleTheme();
       return;
     }
     var sb = e.target.closest("[data-state-id]");
     if (sb) { setState(sb.getAttribute("data-state-id"), sb.getAttribute("data-state-to"), sb); return; }
-    if (e.target.closest("[data-close]")) { closeDrawer(); return; }
     var row = e.target.closest("[data-open]");
-    if (row) openDetail(row.getAttribute("data-open"));
+    if (row) navigate("#/issue/" + encodeURIComponent(row.getAttribute("data-open")));
+  });
+  document.addEventListener("submit", function (e) {
+    if (e.target && e.target.id === "newform") submitCreate(e);
   });
   document.addEventListener("change", function (e) {
     var da = e.target.closest("[data-default-agent]");
@@ -823,7 +885,8 @@ const JS = String.raw`
     var ia = e.target.closest("[data-issue-agent]");
     if (ia) { setIssueAgent(ia.getAttribute("data-issue-agent"), ia.value, ia); return; }
   });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && route.name !== "board") goBoard(); });
+  window.addEventListener("hashchange", applyRoute);
 
   // Keep relative times honest between fetches without a full re-render.
   function tick() {
@@ -839,7 +902,7 @@ const JS = String.raw`
   }
 
   // ---- loops ----
-  render();
+  applyRoute();
   fetchBoard();
   setInterval(function () { if (auto) { fetchState(); fetchBoard(); refreshOpenDetail(); } }, 2500);
   setInterval(tick, 1000);
