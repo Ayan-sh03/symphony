@@ -95,6 +95,17 @@ export class SymphonyHttpServer {
         void this.setState(decodeURIComponent(stateMatch[1]!), req, res);
         return;
       }
+      const agentMatch = pathname.match(/^\/api\/v1\/issues\/([^/]+)\/agent$/);
+      if (agentMatch) {
+        if (method !== "POST") return this.methodNotAllowed(res);
+        void this.setIssueAgent(decodeURIComponent(agentMatch[1]!), req, res);
+        return;
+      }
+      if (pathname === "/api/v1/default-agent") {
+        if (method !== "POST") return this.methodNotAllowed(res);
+        void this.setDefaultAgent(req, res);
+        return;
+      }
       const m = pathname.match(/^\/api\/v1\/([^/]+)$/);
       if (m) {
         if (method !== "GET") return this.methodNotAllowed(res);
@@ -146,6 +157,38 @@ export class SymphonyHttpServer {
     try {
       const issue = await this.opts.orchestrator.setIssueState(id, state);
       this.json(res, 200, { updated: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
+    } catch (err) {
+      this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
+    }
+  }
+
+  private async setIssueAgent(id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    const agent = typeof body.agent === "string" ? body.agent : "";
+    try {
+      const issue = await this.opts.orchestrator.setIssueAgent(id, agent);
+      this.json(res, 200, { updated: true, issue: { id: issue.id, identifier: issue.identifier, agent: issue.agent } });
+    } catch (err) {
+      this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
+    }
+  }
+
+  private async setDefaultAgent(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    const kind = typeof body.kind === "string" ? body.kind : "";
+    try {
+      this.opts.orchestrator.setDefaultAgent(kind);
+      this.json(res, 200, { updated: true, default_agent: this.opts.orchestrator.effectiveDefaultAgent() });
     } catch (err) {
       this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
     }
