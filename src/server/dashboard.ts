@@ -41,20 +41,20 @@ const CSS = String.raw`
   --ink: oklch(0.965 0.004 264);
   --muted: oklch(0.72 0.012 264);
   --faint: oklch(0.58 0.012 264);
-  --accent: oklch(0.72 0.15 268);
-  --accent-ink: oklch(0.16 0.02 268);
-  --accent-soft: oklch(0.72 0.15 268 / 0.14);
+  --accent: oklch(0.72 0.13 250);
+  --accent-ink: oklch(0.20 0.03 250);
+  --accent-soft: oklch(0.72 0.13 250 / 0.13);
   --ok: oklch(0.76 0.15 158);
   --ok-soft: oklch(0.76 0.15 158 / 0.15);
   --warn: oklch(0.83 0.13 85);
   --warn-soft: oklch(0.83 0.13 85 / 0.15);
   --danger: oklch(0.70 0.19 24);
   --danger-soft: oklch(0.70 0.19 24 / 0.15);
-  --shadow: 0 8px 30px oklch(0.10 0.02 264 / 0.5);
-  --radius: 12px;
+  --shadow: 0 10px 40px -12px oklch(0.08 0.02 264 / 0.6);
+  --radius: 10px;
   --mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
   --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
 }
 :root[data-theme="light"] {
   --bg: oklch(0.975 0.004 264);
@@ -65,16 +65,16 @@ const CSS = String.raw`
   --ink: oklch(0.26 0.02 264);
   --muted: oklch(0.48 0.02 264);
   --faint: oklch(0.62 0.015 264);
-  --accent: oklch(0.55 0.17 268);
-  --accent-ink: oklch(0.99 0.01 268);
-  --accent-soft: oklch(0.55 0.17 268 / 0.10);
+  --accent: oklch(0.52 0.15 250);
+  --accent-ink: oklch(0.99 0.01 250);
+  --accent-soft: oklch(0.52 0.15 250 / 0.10);
   --ok: oklch(0.52 0.15 158);
   --ok-soft: oklch(0.52 0.15 158 / 0.12);
   --warn: oklch(0.62 0.13 78);
   --warn-soft: oklch(0.62 0.13 78 / 0.14);
   --danger: oklch(0.55 0.20 24);
   --danger-soft: oklch(0.55 0.20 24 / 0.12);
-  --shadow: 0 8px 30px oklch(0.5 0.02 264 / 0.14);
+  --shadow: 0 10px 40px -12px oklch(0.5 0.02 264 / 0.18);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -100,7 +100,8 @@ header.bar {
 .bar-inner { max-width: 1180px; margin: 0 auto; padding: 14px 24px;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
-.brand .glyph { font-size: 20px; line-height: 1; }
+.brand .glyph { display: inline-flex; color: var(--accent); }
+.brand .glyph svg { display: block; }
 .brand h1 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
 .brand .tag { color: var(--faint); font-size: 12px; font-weight: 500; }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px;
@@ -115,13 +116,13 @@ header.bar {
 /* Buttons */
 .btn { font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
   border: 1px solid var(--border-strong); background: var(--panel-2); color: var(--ink);
-  padding: 7px 13px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px;
-  transition: background .15s var(--ease), border-color .15s var(--ease), transform .06s var(--ease); }
+  padding: 7px 13px; border-radius: 7px; display: inline-flex; align-items: center; gap: 7px;
+  transition: background .12s var(--ease), border-color .12s var(--ease), transform .05s var(--ease); }
 .btn:hover { background: var(--panel); border-color: var(--faint); }
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
-.btn.primary:hover { background: color-mix(in oklab, var(--accent) 88%, white); }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: transparent; font-weight: 600; }
+.btn.primary:hover { background: color-mix(in oklab, var(--ink) 86%, var(--bg)); }
 .btn.icon { padding: 7px 9px; }
 .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .btn.busy { pointer-events: none; opacity: 0.7; }
@@ -152,8 +153,8 @@ header.bar {
 section { margin-bottom: 32px; }
 .sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
 .sec-head h2 { font-size: 14px; font-weight: 620; letter-spacing: -0.01em; margin: 0; }
-.sec-head .count { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 20px; padding: 1px 9px; }
+.count { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; }
 
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .tscroll { overflow-x: auto; }
@@ -174,7 +175,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 
 /* Badges */
 .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 550;
-  padding: 2px 9px; border-radius: 20px; background: var(--panel-2); color: var(--muted);
+  padding: 2px 8px; border-radius: 6px; background: var(--panel-2); color: var(--muted);
   border: 1px solid var(--border); white-space: nowrap; }
 .badge .bd { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.active { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
@@ -199,7 +200,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .brow .actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
 .run-ind { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; font-weight: 550; white-space: nowrap; }
 .run-ind .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s var(--ease) infinite; }
-.btn.sm { padding: 4px 11px; font-size: 12px; border-radius: 8px; }
+.btn.sm { padding: 4px 11px; font-size: 12px; border-radius: 6px; }
 .agent-tag { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border);
   border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
 .agent-select { font: inherit; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
@@ -210,7 +211,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 
 /* Empty state (teaches the interface) */
 .empty { padding: 40px 24px; text-align: center; }
-.empty .ic { font-size: 26px; opacity: .55; }
+.empty .ic { display: inline-flex; color: var(--faint); margin-bottom: 2px; }
+.empty .ic svg { display: block; }
 .empty h3 { font-size: 14px; font-weight: 600; margin: 10px 0 4px; }
 .empty p { color: var(--muted); max-width: 52ch; margin: 0 auto 14px; font-size: 13px; }
 .empty code { font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--border);
@@ -227,11 +229,12 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 /* Drawer */
 #drawer-root { position: fixed; inset: 0; z-index: 60; display: none; }
 #drawer-root.open { display: block; }
-.scrim { position: absolute; inset: 0; background: oklch(0.1 0.02 264 / 0.5); opacity: 0; transition: opacity .2s var(--ease); }
+.scrim { position: absolute; inset: 0; background: oklch(0.08 0.02 264 / 0.42); backdrop-filter: blur(2px); opacity: 0; transition: opacity .18s var(--ease); }
 #drawer-root.open .scrim { opacity: 1; }
-.drawer { position: absolute; top: 0; right: 0; height: 100%; width: min(440px, 92vw);
-  background: var(--panel); border-left: 1px solid var(--border); box-shadow: var(--shadow);
-  transform: translateX(100%); transition: transform .26s var(--ease); display: flex; flex-direction: column; }
+.drawer { position: absolute; top: 0; right: 0; height: 100%; width: min(416px, 92vw);
+  background: var(--panel); border-left: 1px solid var(--border-strong);
+  box-shadow: -24px 0 60px -24px oklch(0.05 0.02 264 / 0.66);
+  transform: translateX(100%); transition: transform .22s var(--ease); display: flex; flex-direction: column; }
 #drawer-root.open .drawer { transform: translateX(0); }
 .drawer-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
 .drawer-head h3 { margin: 0; font-size: 15px; font-weight: 640; }
@@ -275,8 +278,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .field label .req { color: var(--danger); }
 .field .hint { font-size: 11.5px; color: var(--faint); }
 .input, .select, .textarea { font: inherit; font-size: 13px; color: var(--ink);
-  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 9px;
-  padding: 9px 11px; width: 100%; transition: border-color .15s var(--ease); }
+  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: 9px 11px; width: 100%; transition: border-color .12s var(--ease); }
 .textarea { resize: vertical; min-height: 76px; line-height: 1.5; }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--accent); }
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
@@ -289,7 +292,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 #toast-root { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 80;
   display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .toast { background: var(--panel); border: 1px solid var(--border-strong); color: var(--ink);
-  padding: 9px 15px; border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; font-weight: 500;
+  padding: 9px 15px; border-radius: 8px; box-shadow: var(--shadow); font-size: 13px; font-weight: 500;
   display: flex; align-items: center; gap: 8px;
   animation: rise .22s var(--ease); }
 .toast.ok { border-color: var(--ok); }
@@ -603,7 +606,7 @@ const JS = String.raw`
   }
   function logLabel(ev) { return String(ev || "").replace(/_/g, " "); }
   function logHtml(events) {
-    var head = '<div class="log-head">🪵 Activity log <span class="count">' + events.length + "</span></div>";
+    var head = '<div class="log-head">Activity log <span class="count">' + events.length + "</span></div>";
     if (!events.length) return head + '<div class="log"><div class="log-empty">No agent activity recorded yet.</div></div>';
     var rows = events.slice().reverse().map(function (e) {
       var msg = e.message ? '<span class="evmsg">' + esc(e.message) + "</span>" : "";
@@ -645,12 +648,12 @@ const JS = String.raw`
 
     var html = ""
     + '<header class="bar"><div class="bar-inner">'
-    +   '<div class="brand"><span class="glyph">🎼</span><h1>Symphony</h1><span class="tag">orchestration console</span></div>'
+    +   '<div class="brand"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></div>'
     +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
     +   (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
     +   '<button class="btn" data-act="poll">▸ Poll now</button>'
     +   '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>'
-    +   '<button class="btn" data-act="integrate">⚙ Integrate</button>'
+    +   '<button class="btn" data-act="integrate">Integrate</button>'
     +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
     +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
     + '</div></header>'
@@ -771,7 +774,7 @@ const JS = String.raw`
   }
   function emptyRunning(m) {
     var secs = Math.round((m.poll_interval_ms || 0) / 1000);
-    return '<div class="panel empty"><div class="ic">🎧</div><h3>No agents are running</h3>'
+    return '<div class="panel empty"><div class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 12v2M8 9v6M12 6v9M16 9v6M20 11v3"/></svg></div><h3>No agents are running</h3>'
       + '<p>Symphony polls the <b>' + esc(m.tracker_kind) + '</b> tracker every ' + secs + 's. Add an issue to <code>issues/</code> '
       + 'or move one into an active state (<code>' + (m.active_states || []).map(esc).join("</code>, <code>") + '</code>), then poll.</p>'
       + '<div style="display:flex;gap:8px;justify-content:center">'
@@ -779,7 +782,7 @@ const JS = String.raw`
       + '<button class="btn" data-act="poll">▸ Poll now</button></div></div>';
   }
   function emptyRetry() {
-    return '<div class="panel empty"><div class="ic">✓</div><h3>Retry queue is clear</h3>'
+    return '<div class="panel empty"><div class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div><h3>Retry queue is clear</h3>'
       + '<p>Failed attempts and post-run continuation checks land here with a backoff timer. Nothing is waiting.</p></div>';
   }
   function rateLimit(rl) {
