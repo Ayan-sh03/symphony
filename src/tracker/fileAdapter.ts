@@ -32,7 +32,9 @@ import {
   type ToolContext,
   type ToolResult,
   type ToolSpec,
+  type NewIssueInput,
 } from "./types.ts";
+import { workspaceKey } from "../workspace/manager.ts";
 
 interface FileAdapterOptions {
   dir: string;
@@ -222,6 +224,52 @@ export class FileTrackerAdapter implements TrackerAdapter {
 
   secretEnvironmentNames(): string[] {
     return []; // file adapter uses no credentials
+  }
+
+  // ---- create capability (extension) ----
+
+  supportsCreate(): boolean {
+    return true;
+  }
+
+  /** Create a new issue as a JSON file in the tracker directory. */
+  async createIssue(input: NewIssueInput): Promise<Issue> {
+    const identifier = str(input.identifier);
+    const title = str(input.title);
+    if (!identifier) throw new AdapterError("invalid_tracker_config", "identifier is required");
+    if (!title) throw new AdapterError("invalid_tracker_config", "title is required");
+
+    this.ensureDir();
+    // Filename derives from the sanitized identifier so it is filesystem-safe and
+    // stable; a colliding id is rejected rather than silently overwritten.
+    const fileName = `${workspaceKey(identifier)}.json`;
+    const file = path.join(this.dir, fileName);
+    for (const existing of this.listFiles()) {
+      const raw = this.readRaw(existing);
+      const id = raw ? str(raw.id) || str(raw.identifier) : "";
+      if (id === identifier) throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
+    }
+
+    const record: Record<string, unknown> = {
+      id: identifier,
+      identifier,
+      title,
+      description: typeof input.description === "string" && input.description.trim() !== "" ? input.description : null,
+      state: str(input.state) || "todo",
+      priority: normalizePriority(input.priority),
+      labels: normalizeLabels(input.labels),
+      dispatchable: true,
+      url: `symphony://issues/${identifier}`,
+      created_at: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", "utf8");
+    } catch (err) {
+      throw new AdapterError("tracker_request", `failed to write issue ${identifier}: ${(err as Error).message}`);
+    }
+    const issue = this.normalize(record);
+    if (!issue) throw new AdapterError("tracker_response", "created record failed normalization");
+    return issue;
   }
 
   async executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {

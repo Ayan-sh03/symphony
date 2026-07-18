@@ -43,6 +43,16 @@ export interface ToolContext {
   issue: Issue;
 }
 
+/** Input for creating a new work item (OPTIONAL adapter capability). */
+export interface NewIssueInput {
+  identifier: string;
+  title: string;
+  description?: string | null;
+  state?: string | null;
+  priority?: number | null;
+  labels?: string[];
+}
+
 export interface TrackerAdapter {
   readonly kind: string;
 
@@ -56,4 +66,11 @@ export interface TrackerAdapter {
   agentToolSpecs(): ToolSpec[];
   secretEnvironmentNames(): string[];
   executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult>;
+
+  /**
+   * OPTIONAL create capability (extension beyond the read kernel). When present,
+   * the console and API can add work items. Not all trackers support this.
+   */
+  supportsCreate?(): boolean;
+  createIssue?(input: NewIssueInput): Promise<Issue>;
 }
