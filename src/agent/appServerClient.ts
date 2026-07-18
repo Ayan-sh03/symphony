@@ -391,7 +391,7 @@ export class CodexAppServerClient implements AgentSession {
           if (text.trim()) this.emit("agent_message", { message: text.trim().slice(0, 800) });
         } else if (type === "commandExecution") {
           const cmd = typeof item?.command === "string" ? item.command : (item?.parsedCmd as string) || "";
-          this.emit("command", { message: cmd ? String(cmd).slice(0, 200) : "command executed" });
+          this.emit("command", { message: cmd ? cleanCommand(cmd).slice(0, 200) : "command executed" });
         } else if (type === "fileChange") {
           this.emit("file_change", { message: summarizeFileChange(item) });
         } else if (type === "reasoning") {
@@ -429,6 +429,23 @@ export class CodexAppServerClient implements AgentSession {
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Trim a raw command string down to the meaningful part for the activity log:
+ * unwrap a `<shell> -Command/-c/-lc '<payload>'` invocation, or reduce a leading
+ * quoted executable path to its basename (e.g. the full pwsh.exe path).
+ */
+function cleanCommand(raw: string): string {
+  const s = raw.trim();
+  const wrapped = s.match(/-(?:Command|lc|c)\s+(['"])([\s\S]+?)\1\s*$/i);
+  if (wrapped) return wrapped[2]!.trim();
+  const leadingQuoted = s.match(/^"([^"]+)"(.*)$/);
+  if (leadingQuoted) {
+    const base = leadingQuoted[1]!.split(/[\\/]/).pop() || leadingQuoted[1]!;
+    return (base + leadingQuoted[2]!).trim();
+  }
+  return s;
 }
 
 function summarizeFileChange(item: Record<string, unknown> | undefined): string {
