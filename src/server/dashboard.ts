@@ -16,6 +16,9 @@ export function renderDashboard(initial: SnapshotView): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Symphony · console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
 <style>${CSS}</style>
 </head>
 <body>
@@ -49,8 +52,8 @@ const CSS = String.raw`
   --danger-soft: oklch(0.70 0.19 24 / 0.15);
   --shadow: 0 8px 30px oklch(0.10 0.02 264 / 0.5);
   --radius: 12px;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  --sans: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 :root[data-theme="light"] {
@@ -213,6 +216,23 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .kv dd { margin: 0; word-break: break-word; }
 .kv dd.mono { font-family: var(--mono); color: var(--ink); font-size: 12px; }
 
+/* Form */
+.form { display: flex; flex-direction: column; gap: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12px; font-weight: 550; color: var(--muted); }
+.field label .req { color: var(--danger); }
+.field .hint { font-size: 11.5px; color: var(--faint); }
+.input, .select, .textarea { font: inherit; font-size: 13px; color: var(--ink);
+  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 9px;
+  padding: 9px 11px; width: 100%; transition: border-color .15s var(--ease); }
+.textarea { resize: vertical; min-height: 76px; line-height: 1.5; }
+.input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--accent); }
+.input::placeholder, .textarea::placeholder { color: var(--faint); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-actions { display: flex; gap: 8px; margin-top: 4px; }
+.form-actions .btn { flex: 1; justify-content: center; }
+.field-err { color: var(--danger); font-size: 12px; }
+
 /* Toasts */
 #toast-root { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 80;
   display: flex; flex-direction: column; gap: 8px; align-items: center; }
@@ -319,6 +339,63 @@ const JS = String.raw`
       .catch(function () { $(".drawer-body", root).innerHTML = '<p class="sub">Failed to load detail.</p>'; });
   }
   function closeDrawer() { var r = $("#drawer-root"); r.classList.remove("open"); setTimeout(function () { if (!r.classList.contains("open")) r.innerHTML = ""; }, 260); }
+
+  function openCreate() {
+    var m = (state && state.meta) || {};
+    var states = m.active_states || ["todo"];
+    var opts = states.map(function (s) { return '<option value="' + esc(s) + '">' + esc(s) + "</option>"; }).join("");
+    var root = $("#drawer-root");
+    root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="New issue">'
+      + '<div class="drawer-head"><h3>New issue</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
+      + '<div class="drawer-body"><form class="form" id="newform" autocomplete="off">'
+      + '<div class="field"><label for="f-id">Identifier <span class="req">*</span></label>'
+        + '<input class="input" id="f-id" name="identifier" placeholder="SYM-3" required></div>'
+      + '<div class="field"><label for="f-title">Title <span class="req">*</span></label>'
+        + '<input class="input" id="f-title" name="title" placeholder="Short summary of the work" required></div>'
+      + '<div class="field"><label for="f-desc">Description</label>'
+        + '<textarea class="textarea" id="f-desc" name="description" placeholder="Tell the agent exactly what to do. It works in an isolated workspace, so include everything it needs, and how to know it is done."></textarea>'
+        + '<span class="hint">This becomes the agent prompt via {{ issue.description }}.</span></div>'
+      + '<div class="row2"><div class="field"><label for="f-state">State</label>'
+        + '<select class="select" id="f-state" name="state">' + opts + "</select></div>"
+      + '<div class="field"><label for="f-prio">Priority</label>'
+        + '<select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>'
+      + '<div class="field"><label for="f-labels">Labels</label>'
+        + '<input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>'
+      + '<div class="field-err" id="f-err" hidden></div>'
+      + '<div class="form-actions"><button type="button" class="btn" data-close>Cancel</button>'
+        + '<button type="submit" class="btn primary">Create &amp; dispatch</button></div>'
+      + "</form></div></aside>";
+    root.classList.add("open");
+    setTimeout(function () { var el = $("#f-id"); if (el) el.focus(); }, 60);
+    $("#newform").addEventListener("submit", submitCreate);
+  }
+
+  function submitCreate(e) {
+    e.preventDefault();
+    var f = e.target, err = $("#f-err");
+    err.hidden = true;
+    var payload = {
+      identifier: f.identifier.value.trim(),
+      title: f.title.value.trim(),
+      description: f.description.value.trim() || null,
+      state: f.state.value || null,
+      priority: f.priority.value ? Number(f.priority.value) : null,
+      labels: f.labels.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+    };
+    if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }
+    var btn = f.querySelector('button[type=submit]');
+    btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Creating';
+    fetch("/api/v1/issues", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "create failed");
+        toast("Created " + payload.identifier + " · dispatching", "ok");
+        closeDrawer();
+        return fetchState();
+      })
+      .catch(function (ex) { err.textContent = String(ex.message || ex); err.hidden = false;
+        btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
+  }
   function detailHtml(d) {
     var run = d.running, ret = d.retry;
     var rows = [
@@ -373,7 +450,8 @@ const JS = String.raw`
     + '<header class="bar"><div class="bar-inner">'
     +   '<div class="brand"><span class="glyph">🎼</span><h1>Symphony</h1><span class="tag">orchestration console</span></div>'
     +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
-    +   '<button class="btn primary" data-act="poll">▸ Poll now</button>'
+    +   (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
+    +   '<button class="btn" data-act="poll">▸ Poll now</button>'
     +   '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>'
     +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
     +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
@@ -448,7 +526,9 @@ const JS = String.raw`
     return '<div class="panel empty"><div class="ic">🎧</div><h3>No agents are running</h3>'
       + '<p>Symphony polls the <b>' + esc(m.tracker_kind) + '</b> tracker every ' + secs + 's. Add an issue to <code>issues/</code> '
       + 'or move one into an active state (<code>' + (m.active_states || []).map(esc).join("</code>, <code>") + '</code>), then poll.</p>'
-      + '<button class="btn primary" data-act="poll">▸ Poll now</button></div>';
+      + '<div style="display:flex;gap:8px;justify-content:center">'
+      + (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
+      + '<button class="btn" data-act="poll">▸ Poll now</button></div></div>';
   }
   function emptyRetry() {
     return '<div class="panel empty"><div class="ic">✓</div><h3>Retry queue is clear</h3>'
@@ -474,6 +554,7 @@ const JS = String.raw`
     if (act) {
       var a = act.getAttribute("data-act");
       if (a === "poll") pollNow(act);
+      else if (a === "new") openCreate();
       else if (a === "auto") { auto = !auto; render(); toast(auto ? "Auto-refresh on" : "Auto-refresh paused", "ok"); }
       else if (a === "theme") toggleTheme();
       return;
