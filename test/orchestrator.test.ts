@@ -40,6 +40,29 @@ function makeFakeFactory(behavior: "done" | "fail"): AgentFactory {
   };
 }
 
+/** Fake backend that records which issue it ran for, then completes with a done result. */
+function makeRecordingFactory(kind: string, ran: Record<string, string>): AgentFactory {
+  return {
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      ran[opts.issue.id] = kind;
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: `ran ${kind}` }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+}
+
 function setup(behavior: "done" | "fail") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-"));
   const issuesDir = path.join(dir, "issues");
@@ -133,6 +156,64 @@ body`));
   } finally {
     orch.stop();
   }
+});
+
+test("per-issue agent override wins; others use the default agent", async () => {
+  const ran: Record<string, string> = {};
+  registerAgentFactory(makeRecordingFactory("rec-a", ran));
+  registerAgentFactory(makeRecordingFactory("rec-b", ran));
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-multi-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  // A-1 has no override → default (rec-a). A-2 pins rec-b.
+  fs.writeFileSync(path.join(issuesDir, "A-1.json"),
+    JSON.stringify({ id: "A-1", identifier: "A-1", title: "one", description: "x", state: "todo", dispatchable: true }));
+  fs.writeFileSync(path.join(issuesDir, "A-2.json"),
+    JSON.stringify({ id: "A-2", identifier: "A-2", title: "two", description: "x", state: "todo", dispatchable: true, agent: "rec-b" }));
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 200
+workspace:
+  root: ./ws
+agent:
+  kind: rec-a
+  max_turns: 1
+---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const done = await waitFor(() => ran["A-1"] != null && ran["A-2"] != null);
+    assert.ok(done, "both issues should be dispatched");
+    assert.equal(ran["A-1"], "rec-a", "no override → default agent");
+    assert.equal(ran["A-2"], "rec-b", "per-issue override selects that backend");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("runtime default-agent override changes the effective default", async () => {
+  registerAgentFactory(makeRecordingFactory("rec-a", {}));
+  registerAgentFactory(makeRecordingFactory("rec-b", {}));
+  const { wfPath, workflow, config } = setup("done");
+  // config default is fake-done; switch it to rec-b at runtime.
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  assert.equal(orch.effectiveDefaultAgent(), "fake-done");
+  orch.setDefaultAgent("rec-b");
+  assert.equal(orch.effectiveDefaultAgent(), "rec-b");
+  assert.throws(() => orch.setDefaultAgent("no-such-agent"));
+  assert.equal(orch.snapshot().meta.default_agent, "rec-b");
 });
 
 test("failing agent schedules a backoff retry", async () => {

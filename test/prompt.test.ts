@@ -7,7 +7,7 @@ function issue(over: Partial<Issue> = {}): Issue {
   return {
     id: "1", native_ref: null, identifier: "ABC-1", title: "Do a thing", description: "details",
     priority: 2, state: "todo", branch_name: null, url: null, assignee_id: null,
-    labels: ["bug", "urgent"], blocked_by: [], dispatchable: true, created_at: null, updated_at: null,
+    labels: ["bug", "urgent"], blocked_by: [], dispatchable: true, agent: null, created_at: null, updated_at: null,
     ...over,
   };
 }
