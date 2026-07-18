@@ -20,6 +20,12 @@ export interface TrackerConfig {
   required_labels: string[];
   active_states: string[];
   terminal_states: string[];
+  /**
+   * OPTIONAL parking states that are neither dispatched nor terminal (e.g. "backlog").
+   * The scheduler already ignores any state not in active_states; listing them here
+   * only tells the console which states to offer and where new issues should land.
+   */
+  backlog_states: string[];
 }
 
 export interface HooksConfig {
@@ -105,6 +111,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     required_labels: coerceStringList(trackerRaw.required_labels),
     active_states: coerceStringList(trackerRaw.active_states),
     terminal_states: coerceStringList(trackerRaw.terminal_states),
+    backlog_states: coerceStringList(trackerRaw.backlog_states),
   };
 
   const polling = asObject(cfg.polling);
