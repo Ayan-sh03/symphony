@@ -26,6 +26,10 @@ grouped by state (backlog, active, done — completed work stays visible), the l
 sessions, a detail drawer, and CTAs: **＋ New issue**, per-issue **Start** / **Hold** /
 **Reopen**, and **Poll now**.
 
+Click any issue to open its detail drawer with a timestamped **activity log** — the agent's
+messages, shell commands, file edits, and turn lifecycle. Logs stream while a run is active
+and are retained after it finishes (also at `GET /api/v1/<identifier>` as `recent_events`).
+
 New work lands in a `backlog` state and does **not** run until you move it to an active
 state (`todo`) — click **Start**, or `POST /api/v1/issues/<id>/state {"state":"todo"}`.
 
