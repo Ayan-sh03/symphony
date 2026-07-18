@@ -136,6 +136,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       labels,
       blocked_by: normalizeBlockers(raw.blocked_by),
       dispatchable,
+      agent: typeof raw.agent === "string" && raw.agent.trim() !== "" ? raw.agent.trim() : null,
       created_at: strOrNull(raw.created_at),
       updated_at: strOrNull(raw.updated_at),
     };
@@ -197,7 +198,17 @@ export class FileTrackerAdapter implements TrackerAdapter {
   async setIssueState(id: string, state: string): Promise<Issue> {
     const target = str(state);
     if (!target) throw new AdapterError("invalid_tracker_config", "state is required");
-    const res = this.mutate(id, (rec) => { rec.state = target; }, { state: target });
+    return this.patch(id, (rec) => { rec.state = target; }, { state: target });
+  }
+
+  /** Assign (or clear, with empty string) the per-task agent backend. */
+  async setIssueAgent(id: string, agent: string): Promise<Issue> {
+    const target = str(agent);
+    return this.patch(id, (rec) => { if (target) rec.agent = target; else delete rec.agent; }, { agent: target || null });
+  }
+
+  private async patch(id: string, fn: (rec: Record<string, unknown>) => void, ok: Record<string, unknown>): Promise<Issue> {
+    const res = this.mutate(id, fn, ok);
     if (!res.success) throw new AdapterError("tracker_response", String((res.output as { error?: string }).error ?? "update failed"));
     const refreshed = await this.fetchIssuesByIds([id]);
     if (refreshed.length === 0) throw new AdapterError("tracker_response", `issue ${id} not found after update`);
@@ -289,6 +300,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       url: `symphony://issues/${identifier}`,
       created_at: new Date().toISOString(),
     };
+    if (typeof input.agent === "string" && input.agent.trim() !== "") record.agent = input.agent.trim();
     try {
       fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", "utf8");
     } catch (err) {

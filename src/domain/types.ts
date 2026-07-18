@@ -24,6 +24,11 @@ export interface Issue {
   labels: string[];
   blocked_by: BlockerRef[];
   dispatchable: boolean;
+  /**
+   * OPTIONAL per-task agent backend override (extension). When set to a registered
+   * agent kind, this issue runs on that backend instead of the effective default.
+   */
+  agent: string | null;
   created_at: string | null;
   updated_at: string | null;
 }

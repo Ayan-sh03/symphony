@@ -51,6 +51,8 @@ export interface NewIssueInput {
   state?: string | null;
   priority?: number | null;
   labels?: string[];
+  /** OPTIONAL per-task agent backend override. */
+  agent?: string | null;
 }
 
 export interface TrackerAdapter {
@@ -81,4 +83,6 @@ export interface TrackerAdapter {
   supportsBoard?(): boolean;
   listAllIssues?(): Promise<Issue[]>;
   setIssueState?(id: string, state: string): Promise<Issue>;
+  /** OPTIONAL: assign/clear the per-task agent backend (empty string clears). */
+  setIssueAgent?(id: string, agent: string): Promise<Issue>;
 }
