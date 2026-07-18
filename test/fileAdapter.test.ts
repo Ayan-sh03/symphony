@@ -98,6 +98,25 @@ test("unsupported tool returns structured failure, not throw", async () => {
   assert.equal(res.success, false);
 });
 
+test("createIssue writes a dispatchable file and rejects duplicates", async () => {
+  const dir = mkDir({});
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  assert.equal(a.supportsCreate(), true);
+  const issue = await a.createIssue({ identifier: "NEW-1", title: "do it", state: "todo", priority: 2, labels: ["X", "x"] });
+  assert.equal(issue.identifier, "NEW-1");
+  assert.equal(issue.dispatchable, true);
+  assert.deepEqual(issue.labels, ["x"]);
+  const fetched = await a.fetchIssuesByStates(["todo"]);
+  assert.equal(fetched.length, 1);
+  await assert.rejects(() => a.createIssue({ identifier: "NEW-1", title: "again" }), (e) => e instanceof AdapterError);
+});
+
+test("createIssue requires identifier and title", async () => {
+  const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
+  await assert.rejects(() => a.createIssue({ identifier: "", title: "t" }), (e) => e instanceof AdapterError);
+  await assert.rejects(() => a.createIssue({ identifier: "X-1", title: "" }), (e) => e instanceof AdapterError);
+});
+
 test("secretEnvironmentNames is empty for file adapter", () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   assert.deepEqual(a.secretEnvironmentNames(), []);
