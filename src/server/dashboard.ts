@@ -594,12 +594,13 @@ const JS = String.raw`
     return null;
   }
   function fact(label, valHtml) { return '<span class="fact"><b>' + esc(label) + "</b>" + valHtml + "</span>"; }
-  function detailPage(d) {
+  // The three parts of the detail page that change on each poll, built separately so
+  // a live refresh can patch them in place instead of re-rendering (and re-animating)
+  // the whole page — that full rebuild every 2.5s is what made the page blink.
+  function detailFragments(d) {
     var run = d.running, ret = d.retry;
     var statusKind = d.status === "running" ? "active" : d.status === "completed" ? "ok" : d.status === "queued" ? "active" : "warn";
-    var title = detailTitle(d.issue_identifier);
 
-    // Glanceable facts strip.
     var facts = badge(d.status, statusKind);
     if (d.agent) facts += fact("agent", '<span class="mono">' + esc(d.agent) + "</span>");
     if (run) {
@@ -610,7 +611,6 @@ const JS = String.raw`
       facts += fact("ended", esc(ago(d.ended_at)));
     }
 
-    // Aside: the full fact table.
     var rows = [["Issue id", '<span class="mono">' + esc(d.issue_id) + "</span>"]];
     rows.push(["Tracker state", badge(run ? run.state : d.state, run ? "active" : "")]);
     rows.push(["Workspace", '<span class="mono">' + esc(d.workspace && d.workspace.path) + "</span>"]);
@@ -628,11 +628,24 @@ const JS = String.raw`
     }
     if (d.last_error && !ret) rows.push(["Last error", esc(d.last_error)]);
     var kv = '<dl class="kv">' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
-
+    return { facts: facts, kv: kv, log: logHtml(d.recent_events || []) };
+  }
+  function detailPage(d) {
+    var f = detailFragments(d);
+    var title = detailTitle(d.issue_identifier);
     return pageHead(title || d.issue_identifier, title ? d.issue_identifier : "")
-      + '<div class="page"><div class="facts">' + facts + "</div>"
-      + '<div class="detail-grid"><div>' + logHtml(d.recent_events || []) + "</div>"
-      + '<div class="aside-card">' + kv + "</div></div></div>";
+      + '<div class="page"><div class="facts" id="d-facts">' + f.facts + "</div>"
+      + '<div class="detail-grid"><div id="d-log">' + f.log + "</div>"
+      + '<div class="aside-card" id="d-kv">' + f.kv + "</div></div></div>";
+  }
+  // Update only the changing fragments if the detail shell is already mounted.
+  // Returns false when there is no shell yet (first paint), so the caller full-renders.
+  function patchDetail(d) {
+    var fa = $("#d-facts"), lo = $("#d-log"), kv = $("#d-kv");
+    if (!fa || !lo || !kv) return false;
+    var f = detailFragments(d);
+    fa.innerHTML = f.facts; lo.innerHTML = f.log; kv.innerHTML = f.kv;
+    return true;
   }
   function logKind(ev) {
     if (ev === "agent_message") return "msg";
@@ -736,6 +749,9 @@ const JS = String.raw`
     var m = state.meta || {};
     // Never rebuild the create form out from under the user mid-typing.
     if (route.name === "new" && $("#newform")) { paintStatus(); return; }
+    // On a live refresh, patch the detail page in place — a full rebuild replays the
+    // page-entrance animation every poll, which reads as a blink.
+    if (route.name === "detail" && detailData && !detailErr && patchDetail(detailData)) { paintStatus(); return; }
     $("#app").innerHTML = headerHtml(m) + '<div class="wrap">' + routeBody(m) + "</div>";
     paintStatus();
     if (route.name === "new") { var el = $("#f-id"); if (el && el !== document.activeElement && !el.value) el.focus(); }
