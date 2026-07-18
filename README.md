@@ -21,11 +21,18 @@ npm start                 # runs ./WORKFLOW.md
 node src/index.ts ./WORKFLOW.md --port 7878
 ```
 
-Open <http://127.0.0.1:7878> for the live console — running sessions, a detail drawer,
-**Poll now**, and **＋ New issue** (a form that creates a work item and dispatches it).
-Or drive it over HTTP: `GET /api/v1/state`, `POST /api/v1/refresh`, and
-`POST /api/v1/issues` with `{ "identifier": "SYM-3", "title": "...", "description": "..." }`.
-Adding a JSON file to `issues/` by hand still works too.
+Open <http://127.0.0.1:7878> for the live console. It shows a **Board** of every issue
+grouped by state (backlog, active, done — completed work stays visible), the live running
+sessions, a detail drawer, and CTAs: **＋ New issue**, per-issue **Start** / **Hold** /
+**Reopen**, and **Poll now**.
+
+New work lands in a `backlog` state and does **not** run until you move it to an active
+state (`todo`) — click **Start**, or `POST /api/v1/issues/<id>/state {"state":"todo"}`.
+
+HTTP API: `GET /api/v1/state`, `GET /api/v1/issues` (board), `POST /api/v1/issues`
+(`{ "identifier": "SYM-3", "title": "...", "state": "backlog" }`),
+`POST /api/v1/issues/<id>/state`, `POST /api/v1/refresh`. Editing JSON files in `issues/`
+by hand still works too.
 
 Run the conformance tests:
 
