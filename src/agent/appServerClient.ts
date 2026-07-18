@@ -382,7 +382,27 @@ export class CodexAppServerClient implements AgentSession {
         this.emit("turn_ended_with_error", { message: JSON.stringify(params).slice(0, 500) });
         return;
       }
-      case "item/completed":
+      case "item/completed": {
+        // Turn item output into readable activity-log events (SPEC §13.6).
+        const item = params.item as Record<string, unknown> | undefined;
+        const type = typeof item?.type === "string" ? item.type : "";
+        if (type === "agentMessage") {
+          const text = typeof item?.text === "string" ? item.text : "";
+          if (text.trim()) this.emit("agent_message", { message: text.trim().slice(0, 800) });
+        } else if (type === "commandExecution") {
+          const cmd = typeof item?.command === "string" ? item.command : (item?.parsedCmd as string) || "";
+          this.emit("command", { message: cmd ? String(cmd).slice(0, 200) : "command executed" });
+        } else if (type === "fileChange") {
+          this.emit("file_change", { message: summarizeFileChange(item) });
+        } else if (type === "reasoning") {
+          const text = typeof item?.text === "string" ? item.text : "";
+          if (text.trim()) this.emit("reasoning", { message: text.trim().slice(0, 300) });
+        } else if (type === "mcpToolCall") {
+          const name = typeof item?.toolName === "string" ? item.toolName : "tool";
+          this.emit("tool_call", { message: String(name).slice(0, 120) });
+        }
+        return;
+      }
       case "item/started":
         return; // low-value item lifecycle noise
       default:
@@ -409,4 +429,16 @@ export class CodexAppServerClient implements AgentSession {
 
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function summarizeFileChange(item: Record<string, unknown> | undefined): string {
+  const changes = item?.changes;
+  if (Array.isArray(changes)) {
+    const names = changes
+      .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).path : null))
+      .filter((p): p is string => typeof p === "string")
+      .map((p) => p.split(/[\\/]/).pop());
+    if (names.length) return `edited ${names.slice(0, 4).join(", ")}${names.length > 4 ? " …" : ""}`;
+  }
+  return "applied file changes";
 }
