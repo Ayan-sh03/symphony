@@ -188,6 +188,23 @@ export class Orchestrator {
     }, delayMs);
   }
 
+  /** Whether the active adapter supports creating issues (console Add-issue CTA). */
+  canCreateIssues(): boolean {
+    return typeof this.adapter.supportsCreate === "function" && this.adapter.supportsCreate();
+  }
+
+  /** Create a work item via the adapter, then poll promptly so it dispatches. */
+  async createIssue(input: import("../tracker/types.ts").NewIssueInput): Promise<Issue> {
+    if (!this.canCreateIssues() || !this.adapter.createIssue) {
+      throw new Error("the active tracker does not support creating issues");
+    }
+    const issue = await this.adapter.createIssue(input);
+    this.logger.info("issue created", { issue_id: issue.id, issue_identifier: issue.identifier });
+    this.scheduleTick(0);
+    this.notify();
+    return issue;
+  }
+
   /** Force an out-of-band poll+reconcile cycle (SPEC §13.7.2 /refresh). */
   requestRefresh(): { queued: boolean; coalesced: boolean } {
     if (this.refreshQueued) return { queued: true, coalesced: true };
@@ -630,6 +647,7 @@ export class Orchestrator {
         max_concurrent_agents: this.config.max_concurrent_agents,
         active_states: this.config.tracker.active_states,
         workspace_root: this.config.workspace_root,
+        can_create: this.canCreateIssues(),
       },
     };
   }
@@ -697,6 +715,7 @@ export interface SnapshotView {
     max_concurrent_agents: number;
     active_states: string[];
     workspace_root: string;
+    can_create: boolean;
   };
 }
 
