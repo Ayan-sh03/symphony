@@ -9,8 +9,8 @@ import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import { WorkspaceManager } from "../workspace/manager.ts";
-import { createAdapter, validateTracker } from "../tracker/registry.ts";
-import { isSupportedAgentKind } from "../agent/registry.ts";
+import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
+import { isSupportedAgentKind, supportedAgentKinds } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 
@@ -755,7 +755,9 @@ export class Orchestrator {
       rate_limits: this.codex_rate_limits,
       meta: {
         tracker_kind: this.config.tracker.kind,
+        tracker_kinds: [...TRACKER_KINDS],
         agent_kind: this.config.agent_kind,
+        agent_kinds: supportedAgentKinds(),
         poll_interval_ms: this.config.poll_interval_ms,
         max_concurrent_agents: this.config.max_concurrent_agents,
         active_states: this.config.tracker.active_states,
@@ -844,7 +846,9 @@ export interface SnapshotView {
   rate_limits: unknown;
   meta: {
     tracker_kind: string;
+    tracker_kinds: string[];
     agent_kind: string;
+    agent_kinds: string[];
     poll_interval_ms: number;
     max_concurrent_agents: number;
     active_states: string[];
