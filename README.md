@@ -21,7 +21,11 @@ npm start                 # runs ./WORKFLOW.md
 node src/index.ts ./WORKFLOW.md --port 7878
 ```
 
-Open <http://127.0.0.1:7878> for the live dashboard, or `GET /api/v1/state` for JSON.
+Open <http://127.0.0.1:7878> for the live console — running sessions, a detail drawer,
+**Poll now**, and **＋ New issue** (a form that creates a work item and dispatches it).
+Or drive it over HTTP: `GET /api/v1/state`, `POST /api/v1/refresh`, and
+`POST /api/v1/issues` with `{ "identifier": "SYM-3", "title": "...", "description": "..." }`.
+Adding a JSON file to `issues/` by hand still works too.
 
 Run the conformance tests:
 
