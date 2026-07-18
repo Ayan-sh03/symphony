@@ -58,6 +58,11 @@ export interface AgentFactory {
 
 - **`start()`** — Launch the backend in `opts.workspacePath`, establish a thread/session,
   and return its id. Emit `session_started` on success or `startup_failed` then throw.
+  *Lazy-id backends:* if your backend has no thread id until the first turn runs (e.g. a
+  per-turn CLI that mints the id on first invocation), `start()` may just prepare and return
+  a placeholder `{ threadId: "" }` — the runner does not consume the return value, it reads
+  identity only from the `thread_id` you attach to updates. In that case, adopt the real id
+  and emit `session_started` from the first `runTurn` once the backend reports it.
 - **`runTurn(input, title)`** — Run exactly one turn to completion and resolve with the
   outcome. `input` is the full rendered prompt on the first turn and short continuation
   guidance on later turns (Symphony decides when to continue; you just run the turn you're
