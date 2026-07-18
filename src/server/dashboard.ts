@@ -191,6 +191,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .group-head .gname.st-terminal { color: var(--ok); }
 .brow { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--border); }
 .brow:last-child { border-bottom: 0; }
+.brow.clk { cursor: pointer; transition: background .12s var(--ease); }
+.brow.clk:hover { background: var(--panel-2); }
 .brow .bkey { font-weight: 600; white-space: nowrap; }
 .brow .btitle { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 40px; }
 .brow .prio { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; }
@@ -232,6 +234,22 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .kv dt { color: var(--faint); }
 .kv dd { margin: 0; word-break: break-word; }
 .kv dd.mono { font-family: var(--mono); color: var(--ink); font-size: 12px; }
+
+/* Activity log */
+.log-head { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); margin: 20px 0 10px; display: flex; align-items: center; gap: 8px; }
+.log { display: flex; flex-direction: column; gap: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.log-row { display: grid; grid-template-columns: 58px 1fr; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.log-row:last-child { border-bottom: 0; }
+.log-row .t { color: var(--faint); font-family: var(--mono); font-size: 11px; white-space: nowrap; padding-top: 2px; }
+.log-row .ev { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.log-row .evname { font-weight: 550; }
+.log-row .evname.ok { color: var(--ok); }
+.log-row .evname.warn { color: var(--warn); }
+.log-row .evname.danger { color: var(--danger); }
+.log-row .evname.msg { color: var(--accent); }
+.log-row .evmsg { color: var(--muted); white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.log-empty { padding: 14px; color: var(--faint); font-size: 12.5px; text-align: center; }
 
 /* Form */
 .form { display: flex; flex-direction: column; gap: 14px; }
@@ -365,18 +383,30 @@ const JS = String.raw`
       .catch(function () { toast("Could not queue poll", "err"); })
       .then(function () { if (btn) { btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; } });
   }
+  var openId = null;
   function openDetail(identifier) {
+    openId = identifier;
     var root = $("#drawer-root");
     root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Issue detail">'
       + '<div class="drawer-head"><h3>' + esc(identifier) + '</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
       + '<div class="drawer-body"><p class="sub">Loading…</p></div></aside>';
     root.classList.add("open");
-    fetch("/api/v1/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) { $(".drawer-body", root).innerHTML = res.ok ? detailHtml(res.j) : '<p class="sub">' + esc((res.j.error && res.j.error.message) || "Not found") + "</p>"; })
-      .catch(function () { $(".drawer-body", root).innerHTML = '<p class="sub">Failed to load detail.</p>'; });
+    loadDetail(identifier, true);
   }
-  function closeDrawer() { var r = $("#drawer-root"); r.classList.remove("open"); setTimeout(function () { if (!r.classList.contains("open")) r.innerHTML = ""; }, 260); }
+  function loadDetail(identifier, showErr) {
+    var root = $("#drawer-root");
+    return fetch("/api/v1/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        var body = $(".drawer-body", root);
+        if (!body || openId !== identifier) return;
+        if (res.ok) body.innerHTML = detailHtml(res.j);
+        else if (showErr) body.innerHTML = '<p class="sub">' + esc((res.j.error && res.j.error.message) || "Not found") + "</p>";
+      })
+      .catch(function () { if (showErr) { var b = $(".drawer-body", root); if (b) b.innerHTML = '<p class="sub">Failed to load detail.</p>'; } });
+  }
+  function refreshOpenDetail() { if (openId && $("#drawer-root").classList.contains("open")) loadDetail(openId, false); }
+  function closeDrawer() { openId = null; var r = $("#drawer-root"); r.classList.remove("open"); setTimeout(function () { if (!r.classList.contains("open")) r.innerHTML = ""; }, 260); }
 
   function openCreate() {
     var m = (state && state.meta) || {};
@@ -459,7 +489,33 @@ const JS = String.raw`
       rows.push(["Due", esc(until(ret.due_at))]);
       rows.push(["Reason", esc(ret.error || "—")]);
     }
-    return '<dl class="kv">' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
+    if (d.ended_at) rows.push(["Ended", esc(ago(d.ended_at))]);
+    if (d.last_error && !ret) rows.push(["Last error", esc(d.last_error)]);
+    return '<dl class="kv">' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("")
+      + "</dl>" + logHtml(d.recent_events || []);
+  }
+  function logKind(ev) {
+    if (ev === "agent_message") return "msg";
+    if (/completed|session_started/.test(ev)) return "ok";
+    if (/fail|error|cancel|timeout|stall|unsupported/.test(ev)) return "danger";
+    if (/input_required|startup_failed/.test(ev)) return "warn";
+    return "";
+  }
+  function logLabel(ev) { return String(ev || "").replace(/_/g, " "); }
+  function logHtml(events) {
+    var head = '<div class="log-head">🪵 Activity log <span class="count">' + events.length + "</span></div>";
+    if (!events.length) return head + '<div class="log"><div class="log-empty">No agent activity recorded yet.</div></div>';
+    var rows = events.slice().reverse().map(function (e) {
+      var msg = e.message ? '<span class="evmsg">' + esc(e.message) + "</span>" : "";
+      return '<div class="log-row"><span class="t">' + esc(shortTime(e.at)) + '</span>'
+        + '<span class="ev"><span class="evname ' + logKind(e.event) + '">' + esc(logLabel(e.event)) + "</span>" + msg + "</span></div>";
+    }).join("");
+    return head + '<div class="log">' + rows + "</div>";
+  }
+  function shortTime(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2) + ":" + ("0" + d.getSeconds()).slice(-2);
   }
 
   // ---- toast ----
@@ -557,7 +613,7 @@ const JS = String.raw`
     else if (i.is_terminal) actions = '<button class="btn sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc((b.backlog_states[0] || "backlog")) + '">↺ Reopen</button>';
     else if (i.is_active) actions = '<button class="btn sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc((b.backlog_states[0] || "backlog")) + '">Hold</button>';
     else actions = '<button class="btn primary sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc(b.start_state) + '">▸ Start</button>';
-    return '<div class="brow">' + key + '<span class="btitle">' + esc(i.title) + "</span>" + prio
+    return '<div class="brow clk" data-open="' + esc(i.identifier) + '">' + key + '<span class="btitle">' + esc(i.title) + "</span>" + prio
       + '<div class="actions">' + actions + "</div></div>";
   }
   function stateBadge(st) {
@@ -657,7 +713,7 @@ const JS = String.raw`
   // ---- loops ----
   render();
   fetchBoard();
-  setInterval(function () { if (auto) { fetchState(); fetchBoard(); } }, 2500);
+  setInterval(function () { if (auto) { fetchState(); fetchBoard(); refreshOpenDetail(); } }, 2500);
   setInterval(tick, 1000);
 })();
 `;
