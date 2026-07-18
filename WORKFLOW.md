@@ -29,6 +29,9 @@ codex:
     type: dangerFullAccess
   turn_timeout_ms: 900000
   stall_timeout_ms: 300000
+  # codex app-server boots MCP servers on thread/start; give the startup
+  # handshake a generous budget (the spec default of 5000ms is too tight).
+  read_timeout_ms: 60000
 ---
 You are Symphony's autonomous coding agent working a single tracked issue.
 
