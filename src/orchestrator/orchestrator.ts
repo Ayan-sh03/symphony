@@ -623,6 +623,14 @@ export class Orchestrator {
         seconds_running: round1(this.codex_totals.seconds_running + activeSeconds),
       },
       rate_limits: this.codex_rate_limits,
+      meta: {
+        tracker_kind: this.config.tracker.kind,
+        agent_kind: this.config.agent_kind,
+        poll_interval_ms: this.config.poll_interval_ms,
+        max_concurrent_agents: this.config.max_concurrent_agents,
+        active_states: this.config.tracker.active_states,
+        workspace_root: this.config.workspace_root,
+      },
     };
   }
 
@@ -682,6 +690,14 @@ export interface SnapshotView {
   retrying: unknown[];
   codex_totals: { input_tokens: number; output_tokens: number; total_tokens: number; seconds_running: number };
   rate_limits: unknown;
+  meta: {
+    tracker_kind: string;
+    agent_kind: string;
+    poll_interval_ms: number;
+    max_concurrent_agents: number;
+    active_states: string[];
+    workspace_root: string;
+  };
 }
 
 export interface IssueDetailView {
