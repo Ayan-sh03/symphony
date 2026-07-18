@@ -205,6 +205,64 @@ export class Orchestrator {
     return issue;
   }
 
+  /** Whether the active adapter can list all issues + move them between states. */
+  canBoard(): boolean {
+    return typeof this.adapter.supportsBoard === "function" && this.adapter.supportsBoard();
+  }
+
+  /** Full board view: every issue with its live runtime status, plus state ordering. */
+  async board(): Promise<BoardView> {
+    if (!this.canBoard() || !this.adapter.listAllIssues) {
+      throw new Error("the active tracker does not support a board view");
+    }
+    const all = await this.adapter.listAllIssues();
+    const order = orderedStates(
+      this.config.tracker.backlog_states,
+      this.config.tracker.active_states,
+      this.config.tracker.terminal_states,
+      all.map((i) => i.state),
+    );
+    const issues = all.map((i) => {
+      const run = this.running.get(i.id);
+      const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : "idle";
+      return {
+        id: i.id,
+        identifier: i.identifier,
+        title: i.title,
+        state: i.state,
+        priority: i.priority,
+        labels: i.labels,
+        url: i.url,
+        runtime,
+        turn_count: run ? run.session.turn_count : null,
+        is_active: this.isActiveState(i.state),
+        is_terminal: this.isTerminalState(i.state),
+      };
+    });
+    return {
+      generated_at: new Date().toISOString(),
+      order,
+      active_states: this.config.tracker.active_states,
+      terminal_states: this.config.tracker.terminal_states,
+      backlog_states: this.config.tracker.backlog_states,
+      start_state: this.config.tracker.active_states[0] ?? "todo",
+      issues,
+    };
+  }
+
+  /** Move an issue to a new state, then poll promptly so dispatch reflects it. */
+  async setIssueState(id: string, state: string): Promise<Issue> {
+    if (!this.canBoard() || !this.adapter.setIssueState) {
+      throw new Error("the active tracker does not support changing issue state");
+    }
+    const issue = await this.adapter.setIssueState(id, state);
+    this.logger.info("issue state changed", { issue_id: id, issue_identifier: issue.identifier, state: issue.state });
+    // If it left an active state while running, reconciliation will stop it; poll now.
+    this.scheduleTick(0);
+    this.notify();
+    return issue;
+  }
+
   /** Force an out-of-band poll+reconcile cycle (SPEC §13.7.2 /refresh). */
   requestRefresh(): { queued: boolean; coalesced: boolean } {
     if (this.refreshQueued) return { queued: true, coalesced: true };
@@ -646,8 +704,11 @@ export class Orchestrator {
         poll_interval_ms: this.config.poll_interval_ms,
         max_concurrent_agents: this.config.max_concurrent_agents,
         active_states: this.config.tracker.active_states,
+        backlog_states: this.config.tracker.backlog_states,
+        terminal_states: this.config.tracker.terminal_states,
         workspace_root: this.config.workspace_root,
         can_create: this.canCreateIssues(),
+        can_board: this.canBoard(),
       },
     };
   }
@@ -714,9 +775,47 @@ export interface SnapshotView {
     poll_interval_ms: number;
     max_concurrent_agents: number;
     active_states: string[];
+    backlog_states: string[];
+    terminal_states: string[];
     workspace_root: string;
     can_create: boolean;
+    can_board: boolean;
   };
+}
+
+export interface BoardIssueView {
+  id: string;
+  identifier: string;
+  title: string;
+  state: string;
+  priority: number | null;
+  labels: string[];
+  url: string | null;
+  runtime: "running" | "retrying" | "idle";
+  turn_count: number | null;
+  is_active: boolean;
+  is_terminal: boolean;
+}
+
+export interface BoardView {
+  generated_at: string;
+  order: string[];
+  active_states: string[];
+  terminal_states: string[];
+  backlog_states: string[];
+  start_state: string;
+  issues: BoardIssueView[];
+}
+
+/** Order states for the board: backlog, then active, then terminal, then any others seen. */
+function orderedStates(backlog: string[], active: string[], terminal: string[], seen: string[]): string[] {
+  const out: string[] = [];
+  const push = (s: string) => { if (s && !out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
+  backlog.forEach(push);
+  active.forEach(push);
+  terminal.forEach(push);
+  seen.forEach(push);
+  return out;
 }
 
 export interface IssueDetailView {
