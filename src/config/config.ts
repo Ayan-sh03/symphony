@@ -46,6 +46,18 @@ export interface CodexConfig {
   stall_timeout_ms: number;
 }
 
+/**
+ * opencode backend config (SPEC §10 generalized; see src/agent/opencodeSession.ts).
+ * `command` is the opencode executable base (the ` run …` subcommand + flags are
+ * appended by the session); `model` is an optional `provider/model` override; the
+ * turn timeout bounds a single `opencode run` invocation.
+ */
+export interface OpencodeConfig {
+  command: string;
+  model: string | null;
+  turn_timeout_ms: number;
+}
+
 export interface ServiceConfigValues {
   workflowDir: string;
   tracker: TrackerConfig;
@@ -59,6 +71,7 @@ export interface ServiceConfigValues {
   max_retry_backoff_ms: number;
   max_concurrent_agents_by_state: Record<string, number>;
   codex: CodexConfig;
+  opencode: OpencodeConfig;
   server_port: number | null;
 }
 
@@ -167,6 +180,13 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     stall_timeout_ms: codexRaw.stall_timeout_ms !== undefined ? coerceInt(codexRaw.stall_timeout_ms, "codex.stall_timeout_ms") : 300000,
   };
 
+  const opencodeRaw = asObject(cfg.opencode);
+  const opencode: OpencodeConfig = {
+    command: typeof opencodeRaw.command === "string" && opencodeRaw.command.trim() !== "" ? opencodeRaw.command : "opencode",
+    model: typeof opencodeRaw.model === "string" && opencodeRaw.model.trim() !== "" ? opencodeRaw.model.trim() : null,
+    turn_timeout_ms: opencodeRaw.turn_timeout_ms !== undefined ? coerceInt(opencodeRaw.turn_timeout_ms, "opencode.turn_timeout_ms") : 3600000,
+  };
+
   const server = asObject(cfg.server);
   const server_port = server.port !== undefined ? coerceInt(server.port, "server.port") : null;
 
@@ -182,6 +202,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     max_retry_backoff_ms,
     max_concurrent_agents_by_state,
     codex,
+    opencode,
     server_port,
   };
 }
