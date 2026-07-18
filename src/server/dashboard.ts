@@ -200,6 +200,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .run-ind { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; font-weight: 550; white-space: nowrap; }
 .run-ind .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s var(--ease) infinite; }
 .btn.sm { padding: 4px 11px; font-size: 12px; border-radius: 8px; }
+.agent-tag { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+.agent-select { font: inherit; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 7px; padding: 3px 6px;
+  cursor: pointer; max-width: 150px; transition: border-color .15s var(--ease); }
+.agent-select:hover { border-color: var(--faint); }
+.agent-select:focus { outline: none; border-color: var(--accent); }
 
 /* Empty state (teaches the interface) */
 .empty { padding: 40px 24px; text-align: center; }
@@ -385,6 +392,33 @@ const JS = String.raw`
       })
       .catch(function (ex) { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });
   }
+  function setDefaultAgent(kind, el) {
+    if (el) el.disabled = true;
+    fetch("/api/v1/default-agent", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: kind })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
+        toast("Default agent → " + res.j.default_agent, "ok");
+        return fetchState();
+      })
+      .catch(function (ex) { toast(String(ex.message || ex), "err"); })
+      .then(function () { if (el) el.disabled = false; });
+  }
+  function setIssueAgent(id, agent, el) {
+    if (el) el.disabled = true;
+    fetch("/api/v1/issues/" + encodeURIComponent(id) + "/agent", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agent: agent })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
+        toast(id + " agent → " + (agent || "default"), "ok");
+        return Promise.all([fetchState(), fetchBoard()]);
+      })
+      .catch(function (ex) { toast(String(ex.message || ex), "err"); if (el) el.disabled = false; });
+  }
   function pollNow(btn) {
     if (btn) { btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Polling'; }
     fetch("/api/v1/refresh", { method: "POST" })
@@ -437,12 +471,18 @@ const JS = String.raw`
     var stepHtml = steps.map(function (s, i) {
       return '<div class="istep"><div class="inum">' + (i + 1) + '</div><div><div class="ititle">' + s[0] + '</div><div class="idesc">' + s[1] + "</div></div></div>";
     }).join("");
+    var defAgent = m.default_agent || m.agent_kind;
+    var defSelect = agents.length > 1
+      ? '<select class="select" data-default-agent>' + agents.map(function (k) {
+          return '<option value="' + esc(k) + '"' + (k === defAgent ? " selected" : "") + ">" + esc(k) + "</option>";
+        }).join("") + "</select><span class=\"hint\">Runs any task without its own agent set. Applies immediately.</span>"
+      : '<div>' + chips(agents, defAgent) + '</div><span class="hint">Register another backend to switch the default per task.</span>';
     var root = $("#drawer-root");
     root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Integrate">'
       + '<div class="drawer-head"><h3>Integrate your own agent</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
       + '<div class="drawer-body">'
       + '<p class="sub" style="margin-top:0">Symphony talks to any coding agent through one <code>AgentSession</code> interface. The orchestrator, tracker, workspace, and this console are backend-neutral.</p>'
-      + '<div class="log-head" style="margin-top:16px">Registered agents</div><div>' + chips(agents, m.agent_kind) + "</div>"
+      + '<div class="field" style="margin-top:16px"><label>Default agent</label>' + defSelect + "</div>"
       + '<div class="log-head">Registered trackers</div><div>' + chips(trackers, m.tracker_kind) + "</div>"
       + '<div class="log-head">Add a backend in 5 steps</div><div class="isteps">' + stepHtml + "</div>"
       + '<p class="sub" style="margin-top:16px">Full walkthrough, the event vocabulary, and the tracker-adapter contract are in <code>INTEGRATION.md</code> in the repo.</p>'
@@ -473,6 +513,7 @@ const JS = String.raw`
         + '<span class="hint">Backlog waits; an active state runs now.</span></div>'
       + '<div class="field"><label for="f-prio">Priority</label>'
         + '<select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>'
+      + agentField(m)
       + '<div class="field"><label for="f-labels">Labels</label>'
         + '<input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>'
       + '<div class="field-err" id="f-err" hidden></div>'
@@ -482,6 +523,18 @@ const JS = String.raw`
     root.classList.add("open");
     setTimeout(function () { var el = $("#f-id"); if (el) el.focus(); }, 60);
     $("#newform").addEventListener("submit", submitCreate);
+  }
+
+  function agentField(m) {
+    var kinds = m.agent_kinds || [m.default_agent];
+    // Only worth choosing when more than one backend is registered.
+    if (kinds.length < 2) return '<input type="hidden" id="f-agent" name="agent" value="">';
+    var def = m.default_agent;
+    var opts = '<option value="">Default (' + esc(def) + ")</option>"
+      + kinds.map(function (k) { return '<option value="' + esc(k) + '">' + esc(k) + "</option>"; }).join("");
+    return '<div class="field"><label for="f-agent">Agent</label>'
+      + '<select class="select" id="f-agent" name="agent">' + opts + "</select>"
+      + '<span class="hint">Which coding agent runs this task.</span></div>';
   }
 
   function submitCreate(e) {
@@ -494,6 +547,7 @@ const JS = String.raw`
       description: f.description.value.trim() || null,
       state: f.state.value || null,
       priority: f.priority.value ? Number(f.priority.value) : null,
+      agent: (f.agent && f.agent.value) ? f.agent.value : null,
       labels: f.labels.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
     };
     if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }
@@ -600,7 +654,7 @@ const JS = String.raw`
     + '<div class="wrap">'
     +   '<div class="meta">'
     +     '<span><b>' + esc(m.tracker_kind || "?") + '</b> tracker</span>'
-    +     '<span>agent <b>' + esc(m.agent_kind || "?") + '</b></span>'
+    +     '<span>agent <b>' + esc(m.default_agent || m.agent_kind || "?") + '</b></span>'
     +     '<span>polling every <b>' + Math.round((m.poll_interval_ms || 0) / 1000) + 's</b></span>'
     +     '<span>concurrency <b>' + esc(m.max_concurrent_agents) + '</b></span>'
     +     '<span>active states <code>' + esc((m.active_states || []).join(", ") || "—") + '</code></span>'
@@ -639,7 +693,7 @@ const JS = String.raw`
       if (!items.length) return "";
       var lc = st.toLowerCase();
       var cls = backlog.indexOf(lc) >= 0 ? "st-backlog" : terminal.indexOf(lc) >= 0 ? "st-terminal" : "st-active";
-      var rows = items.map(function (i) { return boardRow(i, board); }).join("");
+      var rows = items.map(function (i) { return boardRow(i, board, m); }).join("");
       return '<div class="board-group"><div class="group-head"><span class="gname ' + cls + '">' + esc(st) + '</span>'
         + '<span class="count">' + items.length + '</span></div><div class="panel">' + rows + "</div></div>";
     }).join("");
@@ -648,7 +702,7 @@ const JS = String.raw`
     }
     return section("Board", total, groupsHtml);
   }
-  function boardRow(i, b) {
+  function boardRow(i, b, m) {
     var key = i.url ? '<a class="bkey" href="' + esc(i.url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' + esc(i.identifier) + "</a>" : '<span class="bkey">' + esc(i.identifier) + "</span>";
     var prio = i.priority != null ? '<span class="prio">P' + esc(i.priority) + "</span>" : "";
     var actions = "";
@@ -658,7 +712,24 @@ const JS = String.raw`
     else if (i.is_active) actions = '<button class="btn sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc((b.backlog_states[0] || "backlog")) + '">Hold</button>';
     else actions = '<button class="btn primary sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc(b.start_state) + '">▸ Start</button>';
     return '<div class="brow clk" data-open="' + esc(i.identifier) + '">' + key + '<span class="btitle">' + esc(i.title) + "</span>" + prio
+      + agentControl(i, m)
       + '<div class="actions">' + actions + "</div></div>";
+  }
+  // Effective backend for a board row: a live select when a choice exists and the
+  // task is not already running, otherwise a static badge.
+  function agentControl(i, m) {
+    var kinds = (m && m.agent_kinds) || [];
+    var editable = m && m.can_set_agent && kinds.length > 1 && i.runtime === "idle";
+    if (!editable) {
+      var lbl = i.agent + (i.agent_override ? "" : " ·default");
+      return '<span class="agent-tag" title="Agent backend">' + esc(lbl) + "</span>";
+    }
+    var def = m.default_agent;
+    var opts = '<option value=""' + (i.agent_override ? "" : " selected") + ">Default (" + esc(def) + ")</option>"
+      + kinds.map(function (k) {
+          return '<option value="' + esc(k) + '"' + (k === i.agent_override ? " selected" : "") + ">" + esc(k) + "</option>";
+        }).join("");
+    return '<select class="agent-select" data-issue-agent="' + esc(i.id) + '" onclick="event.stopPropagation()" title="Agent backend">' + opts + "</select>";
   }
   function stateBadge(st) {
     var k = /done|complete|closed|merged/i.test(st) ? "ok" : /progress|review|doing/i.test(st) ? "active" : "";
@@ -739,6 +810,12 @@ const JS = String.raw`
     if (e.target.closest("[data-close]")) { closeDrawer(); return; }
     var row = e.target.closest("[data-open]");
     if (row) openDetail(row.getAttribute("data-open"));
+  });
+  document.addEventListener("change", function (e) {
+    var da = e.target.closest("[data-default-agent]");
+    if (da) { setDefaultAgent(da.value, da); return; }
+    var ia = e.target.closest("[data-issue-agent]");
+    if (ia) { setIssueAgent(ia.getAttribute("data-issue-agent"), ia.value, ia); return; }
   });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
 
