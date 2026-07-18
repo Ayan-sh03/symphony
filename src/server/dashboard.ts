@@ -566,11 +566,14 @@ const JS = String.raw`
   }
   function detailHtml(d) {
     var run = d.running, ret = d.retry;
+    var statusKind = d.status === "running" ? "active" : d.status === "completed" ? "ok" : d.status === "queued" ? "active" : "warn";
     var rows = [
-      ["Status", badge(d.status, d.status === "running" ? "active" : "warn")],
-      ["Issue id", '<span class="mono">' + esc(d.issue_id) + "</span>"],
-      ["Workspace", '<span class="mono">' + esc(d.workspace && d.workspace.path) + "</span>"]
+      ["Status", badge(d.status, statusKind)],
+      ["Issue id", '<span class="mono">' + esc(d.issue_id) + "</span>"]
     ];
+    if (d.state && !run) rows.push(["Tracker state", badge(d.state, "")]);
+    if (d.agent) rows.push(["Agent", '<span class="mono">' + esc(d.agent) + "</span>"]);
+    rows.push(["Workspace", '<span class="mono">' + esc(d.workspace && d.workspace.path) + "</span>"]);
     if (run) {
       rows.push(["Tracker state", badge(run.state, "active")]);
       rows.push(["Session", '<span class="mono">' + esc(run.session_id || "—") + "</span>"]);

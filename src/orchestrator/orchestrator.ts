@@ -818,6 +818,38 @@ export class Orchestrator {
     };
   }
 
+  /**
+   * Per-issue detail for GET /api/v1/<identifier> (SPEC §13.7.2). Tries the live/
+   * retrying/finished views synchronously; for an issue that has never run (e.g. one
+   * sitting in backlog) it falls back to the tracker so the console shows an idle
+   * detail instead of a spurious 404. Returns null only when the tracker has no such issue.
+   */
+  async issueDetailFor(identifier: string): Promise<IssueDetailView | null> {
+    const known = this.issueDetail(identifier);
+    if (known) return known;
+    if (!this.canBoard() || !this.adapter.listAllIssues) return null;
+    let all: Issue[];
+    try {
+      all = await this.adapter.listAllIssues();
+    } catch {
+      return null;
+    }
+    const issue = all.find((i) => i.identifier === identifier);
+    if (!issue) return null;
+    return {
+      issue_identifier: identifier,
+      issue_id: issue.id,
+      status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
+      state: issue.state,
+      agent: this.resolveAgentKind(issue),
+      workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+      running: null,
+      retry: null,
+      last_error: null,
+      recent_events: this.history.get(issue.id)?.events ?? [],
+    };
+  }
+
   /** Per-issue detail for GET /api/v1/<identifier> (SPEC §13.7.2). Returns null if unknown. */
   issueDetail(identifier: string): IssueDetailView | null {
     for (const [id, e] of this.running) {
@@ -952,6 +984,10 @@ export interface IssueDetailView {
   issue_identifier: string;
   issue_id: string;
   status: string;
+  /** Tracker state, present for idle/queued issues that are not live. */
+  state?: string;
+  /** Effective agent backend that would run this issue. */
+  agent?: string;
   workspace: { path: string };
   running: unknown;
   retry: unknown;

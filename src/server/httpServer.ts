@@ -110,11 +110,16 @@ export class SymphonyHttpServer {
       if (m) {
         if (method !== "GET") return this.methodNotAllowed(res);
         const identifier = decodeURIComponent(m[1]!);
-        const detail = this.opts.orchestrator.issueDetail(identifier);
-        if (!detail) {
-          return this.json(res, 404, { error: { code: "issue_not_found", message: `unknown issue ${identifier}` } });
-        }
-        return this.json(res, 200, detail);
+        void this.opts.orchestrator
+          .issueDetailFor(identifier)
+          .then((detail) => {
+            if (!detail) {
+              return this.json(res, 404, { error: { code: "issue_not_found", message: `unknown issue ${identifier}` } });
+            }
+            this.json(res, 200, detail);
+          })
+          .catch((err) => this.json(res, 500, { error: { code: "detail_failed", message: String(err) } }));
+        return;
       }
       this.json(res, 404, { error: { code: "not_found", message: "no such route" } });
     } catch (err) {

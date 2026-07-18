@@ -216,6 +216,42 @@ test("runtime default-agent override changes the effective default", async () =>
   assert.equal(orch.snapshot().meta.default_agent, "rec-b");
 });
 
+test("issueDetailFor returns an idle view for a never-run issue instead of null", async () => {
+  registerAgentFactory(makeFakeFactory("done"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-idle-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  // Parked in backlog: never active, so it is never dispatched or tracked in running/history.
+  fs.writeFileSync(path.join(issuesDir, "B-1.json"),
+    JSON.stringify({ id: "B-1", identifier: "B-1", title: "parked", description: "x", state: "backlog", dispatchable: false }));
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  backlog_states: ["backlog"]
+  active_states: ["todo"]
+  terminal_states: ["done"]
+workspace:
+  root: ./ws
+agent:
+  kind: fake-done
+---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  // Not started: nothing dispatches, so B-1 exists only in the tracker.
+  assert.equal(orch.issueDetail("B-1"), null, "sync detail has no live/finished entry");
+  const detail = await orch.issueDetailFor("B-1");
+  assert.ok(detail, "async detail should fall back to the tracker");
+  assert.equal(detail!.state, "backlog");
+  assert.equal(detail!.agent, "fake-done");
+  assert.equal(await orch.issueDetailFor("NOPE-9"), null, "unknown identifier still null");
+});
+
 test("failing agent schedules a backoff retry", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
   const { wfPath, workflow, config } = setup("fail");
