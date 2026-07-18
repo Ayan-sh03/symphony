@@ -69,11 +69,30 @@ export class SymphonyHttpServer {
         });
       }
       if (pathname === "/api/v1/issues") {
+        if (method === "GET") {
+          if (!this.opts.orchestrator.canBoard()) {
+            return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support a board view" } });
+          }
+          void this.opts.orchestrator
+            .board()
+            .then((b) => this.json(res, 200, b))
+            .catch((err) => this.json(res, 500, { error: { code: "board_failed", message: String(err) } }));
+          return;
+        }
         if (method !== "POST") return this.methodNotAllowed(res);
         if (!this.opts.orchestrator.canCreateIssues()) {
           return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support creating issues" } });
         }
         void this.createIssue(req, res);
+        return;
+      }
+      const stateMatch = pathname.match(/^\/api\/v1\/issues\/([^/]+)\/state$/);
+      if (stateMatch) {
+        if (method !== "POST") return this.methodNotAllowed(res);
+        if (!this.opts.orchestrator.canBoard()) {
+          return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support changing state" } });
+        }
+        void this.setState(decodeURIComponent(stateMatch[1]!), req, res);
         return;
       }
       const m = pathname.match(/^\/api\/v1\/([^/]+)$/);
@@ -112,6 +131,23 @@ export class SymphonyHttpServer {
       this.json(res, 201, { created: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
     } catch (err) {
       this.json(res, 400, { error: { code: "create_failed", message: String((err as Error).message ?? err) } });
+    }
+  }
+
+  private async setState(id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    const state = typeof body.state === "string" ? body.state : "";
+    if (!state) return this.json(res, 400, { error: { code: "bad_request", message: "state is required" } });
+    try {
+      const issue = await this.opts.orchestrator.setIssueState(id, state);
+      this.json(res, 200, { updated: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
+    } catch (err) {
+      this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
     }
   }
 
