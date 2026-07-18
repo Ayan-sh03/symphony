@@ -182,6 +182,23 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .badge.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
 .badge.danger { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
 
+/* Board */
+.board-group { margin-bottom: 16px; }
+.group-head { display: flex; align-items: center; gap: 9px; margin: 0 0 8px 2px; }
+.group-head .gname { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.group-head .gname.st-backlog { color: var(--faint); }
+.group-head .gname.st-active { color: var(--accent); }
+.group-head .gname.st-terminal { color: var(--ok); }
+.brow { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--border); }
+.brow:last-child { border-bottom: 0; }
+.brow .bkey { font-weight: 600; white-space: nowrap; }
+.brow .btitle { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 40px; }
+.brow .prio { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; }
+.brow .actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+.run-ind { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; font-weight: 550; white-space: nowrap; }
+.run-ind .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s var(--ease) infinite; }
+.btn.sm { padding: 4px 11px; font-size: 12px; border-radius: 8px; }
+
 /* Empty state (teaches the interface) */
 .empty { padding: 40px 24px; text-align: center; }
 .empty .ic { font-size: 26px; opacity: .55; }
@@ -254,6 +271,7 @@ const JS = String.raw`
   "use strict";
   var $ = function (sel, el) { return (el || document).querySelector(sel); };
   var state = window.__SYMPHONY__ || null;
+  var board = null;
   var auto = true;
   var lastOk = Date.now();
   var conn = "live"; // live | stale | down
@@ -319,6 +337,26 @@ const JS = String.raw`
       .then(function (j) { state = j; lastOk = Date.now(); conn = "live"; render(); })
       .catch(function () { conn = (Date.now() - lastOk > 12000) ? "down" : "stale"; paintStatus(); });
   }
+  function fetchBoard() {
+    if (!state || !state.meta || !state.meta.can_board) return Promise.resolve();
+    return fetch("/api/v1/issues", { headers: { accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(function (j) { board = j; render(); })
+      .catch(function () {});
+  }
+  function setState(id, to, btn) {
+    if (btn) { btn.classList.add("busy"); }
+    fetch("/api/v1/issues/" + encodeURIComponent(id) + "/state", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ state: to })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
+        toast(id + " → " + to, "ok");
+        return Promise.all([fetchState(), fetchBoard()]);
+      })
+      .catch(function (ex) { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });
+  }
   function pollNow(btn) {
     if (btn) { btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Polling'; }
     fetch("/api/v1/refresh", { method: "POST" })
@@ -342,7 +380,9 @@ const JS = String.raw`
 
   function openCreate() {
     var m = (state && state.meta) || {};
-    var states = m.active_states || ["todo"];
+    // Offer backlog states first (new work parks in backlog by default) then active.
+    var states = (m.backlog_states || []).concat(m.active_states || ["todo"]);
+    if (!states.length) states = ["todo"];
     var opts = states.map(function (s) { return '<option value="' + esc(s) + '">' + esc(s) + "</option>"; }).join("");
     var root = $("#drawer-root");
     root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="New issue">'
@@ -356,7 +396,8 @@ const JS = String.raw`
         + '<textarea class="textarea" id="f-desc" name="description" placeholder="Tell the agent exactly what to do. It works in an isolated workspace, so include everything it needs, and how to know it is done."></textarea>'
         + '<span class="hint">This becomes the agent prompt via {{ issue.description }}.</span></div>'
       + '<div class="row2"><div class="field"><label for="f-state">State</label>'
-        + '<select class="select" id="f-state" name="state">' + opts + "</select></div>"
+        + '<select class="select" id="f-state" name="state">' + opts + "</select>"
+        + '<span class="hint">Backlog waits; an active state runs now.</span></div>'
       + '<div class="field"><label for="f-prio">Priority</label>'
         + '<select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>'
       + '<div class="field"><label for="f-labels">Labels</label>'
@@ -470,6 +511,7 @@ const JS = String.raw`
     +     metric("Total tokens", nfmt(t.total_tokens), "")
     +     metric("Agent runtime", humanSecs(t.seconds_running), "")
     +   '</div>'
+    +   boardSection(m)
     +   section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))
     +   section("Retry queue", retrying.length, retrying.length ? retryTable(retrying) : emptyRetry())
     +   rateLimit(state.rate_limits)
@@ -485,6 +527,38 @@ const JS = String.raw`
   }
   function section(title, count, body) {
     return '<section><div class="sec-head"><h2>' + esc(title) + '</h2><span class="count">' + count + "</span></div>" + body + "</section>";
+  }
+  function boardSection(m) {
+    if (!m.can_board) return "";
+    if (!board) return section("Board", "", '<div class="panel empty"><p class="sub">Loading issues…</p></div>');
+    var backlog = (board.backlog_states || []).map(function (s) { return s.toLowerCase(); });
+    var terminal = (board.terminal_states || []).map(function (s) { return s.toLowerCase(); });
+    var total = board.issues.length;
+    var groupsHtml = board.order.map(function (st) {
+      var items = board.issues.filter(function (i) { return i.state.toLowerCase() === st.toLowerCase(); });
+      if (!items.length) return "";
+      var lc = st.toLowerCase();
+      var cls = backlog.indexOf(lc) >= 0 ? "st-backlog" : terminal.indexOf(lc) >= 0 ? "st-terminal" : "st-active";
+      var rows = items.map(function (i) { return boardRow(i, board); }).join("");
+      return '<div class="board-group"><div class="group-head"><span class="gname ' + cls + '">' + esc(st) + '</span>'
+        + '<span class="count">' + items.length + '</span></div><div class="panel">' + rows + "</div></div>";
+    }).join("");
+    if (!total) {
+      groupsHtml = emptyRunning(m);
+    }
+    return section("Board", total, groupsHtml);
+  }
+  function boardRow(i, b) {
+    var key = i.url ? '<a class="bkey" href="' + esc(i.url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' + esc(i.identifier) + "</a>" : '<span class="bkey">' + esc(i.identifier) + "</span>";
+    var prio = i.priority != null ? '<span class="prio">P' + esc(i.priority) + "</span>" : "";
+    var actions = "";
+    if (i.runtime === "running") actions = '<span class="run-ind"><span class="dot"></span>working · turn ' + esc(i.turn_count || 1) + "</span>";
+    else if (i.runtime === "retrying") actions = '<span class="run-ind">retry queued</span>';
+    else if (i.is_terminal) actions = '<button class="btn sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc((b.backlog_states[0] || "backlog")) + '">↺ Reopen</button>';
+    else if (i.is_active) actions = '<button class="btn sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc((b.backlog_states[0] || "backlog")) + '">Hold</button>';
+    else actions = '<button class="btn primary sm" data-state-id="' + esc(i.id) + '" data-state-to="' + esc(b.start_state) + '">▸ Start</button>';
+    return '<div class="brow">' + key + '<span class="btitle">' + esc(i.title) + "</span>" + prio
+      + '<div class="actions">' + actions + "</div></div>";
   }
   function stateBadge(st) {
     var k = /done|complete|closed|merged/i.test(st) ? "ok" : /progress|review|doing/i.test(st) ? "active" : "";
@@ -559,6 +633,8 @@ const JS = String.raw`
       else if (a === "theme") toggleTheme();
       return;
     }
+    var sb = e.target.closest("[data-state-id]");
+    if (sb) { setState(sb.getAttribute("data-state-id"), sb.getAttribute("data-state-to"), sb); return; }
     if (e.target.closest("[data-close]")) { closeDrawer(); return; }
     var row = e.target.closest("[data-open]");
     if (row) openDetail(row.getAttribute("data-open"));
@@ -580,7 +656,8 @@ const JS = String.raw`
 
   // ---- loops ----
   render();
-  setInterval(function () { if (auto) fetchState(); }, 2500);
+  fetchBoard();
+  setInterval(function () { if (auto) { fetchState(); fetchBoard(); } }, 2500);
   setInterval(tick, 1000);
 })();
 `;
