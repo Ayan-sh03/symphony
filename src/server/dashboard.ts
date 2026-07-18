@@ -251,6 +251,16 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .log-row .evmsg { color: var(--muted); white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
 .log-empty { padding: 14px; color: var(--faint); font-size: 12.5px; text-align: center; }
 
+/* Integrate steps */
+.isteps { display: flex; flex-direction: column; gap: 10px; }
+.istep { display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: start; }
+.istep .inum { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+  font-weight: 650; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+.istep .ititle { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.istep .idesc { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.drawer-body code { font-family: var(--mono); font-size: 11.5px; background: var(--panel-2); border: 1px solid var(--border);
+  padding: 0 5px; border-radius: 5px; color: var(--ink); }
+
 /* Form */
 .form { display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
@@ -406,6 +416,39 @@ const JS = String.raw`
       .catch(function () { if (showErr) { var b = $(".drawer-body", root); if (b) b.innerHTML = '<p class="sub">Failed to load detail.</p>'; } });
   }
   function refreshOpenDetail() { if (openId && $("#drawer-root").classList.contains("open")) loadDetail(openId, false); }
+
+  function openIntegrate() {
+    openId = null;
+    var m = (state && state.meta) || {};
+    var agents = m.agent_kinds || [m.agent_kind];
+    var trackers = m.tracker_kinds || [m.tracker_kind];
+    function chips(list, active) {
+      return list.map(function (k) {
+        return '<span class="badge ' + (k === active ? "active" : "") + '">' + (k === active ? '<span class="bd"></span>' : "") + esc(k) + "</span>";
+      }).join(" ");
+    }
+    var steps = [
+      ["Implement <code>AgentSession</code>", "Create <code>src/agent/&lt;your-agent&gt;.ts</code> with <code>start()</code> → <code>runTurn()</code>* → <code>stop()</code>. Launch your backend in the per-issue workspace and drive one turn per <code>runTurn</code>."],
+      ["Emit <code>AgentUpdate</code>s", "Call <code>opts.onUpdate</code> with events like <code>session_started</code>, <code>turn_started</code>, <code>agent_message</code>, <code>command</code>, <code>turn_completed</code>, <code>turn_failed</code>. These feed the metrics and this activity log."],
+      ["Register the backend", "Add a factory in <code>src/agent/registry.ts</code> via <code>registerAgentFactory({ kind, create })</code>."],
+      ["Select it", "Set <code>agent.kind: &lt;your-agent&gt;</code> in <code>WORKFLOW.md</code>. Read your own config from <code>opts.config</code>."],
+      ["Test", "Follow <code>test/orchestrator.test.ts</code> (<code>makeFakeFactory</code>) — register a fake backend and assert dispatch → result → done."]
+    ];
+    var stepHtml = steps.map(function (s, i) {
+      return '<div class="istep"><div class="inum">' + (i + 1) + '</div><div><div class="ititle">' + s[0] + '</div><div class="idesc">' + s[1] + "</div></div></div>";
+    }).join("");
+    var root = $("#drawer-root");
+    root.innerHTML = '<div class="scrim" data-close></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Integrate">'
+      + '<div class="drawer-head"><h3>Integrate your own agent</h3><button class="btn icon" data-close aria-label="Close">✕</button></div>'
+      + '<div class="drawer-body">'
+      + '<p class="sub" style="margin-top:0">Symphony talks to any coding agent through one <code>AgentSession</code> interface. The orchestrator, tracker, workspace, and this console are backend-neutral.</p>'
+      + '<div class="log-head" style="margin-top:16px">Registered agents</div><div>' + chips(agents, m.agent_kind) + "</div>"
+      + '<div class="log-head">Registered trackers</div><div>' + chips(trackers, m.tracker_kind) + "</div>"
+      + '<div class="log-head">Add a backend in 5 steps</div><div class="isteps">' + stepHtml + "</div>"
+      + '<p class="sub" style="margin-top:16px">Full walkthrough, the event vocabulary, and the tracker-adapter contract are in <code>INTEGRATION.md</code> in the repo.</p>'
+      + "</div></aside>";
+    root.classList.add("open");
+  }
   function closeDrawer() { openId = null; var r = $("#drawer-root"); r.classList.remove("open"); setTimeout(function () { if (!r.classList.contains("open")) r.innerHTML = ""; }, 260); }
 
   function openCreate() {
@@ -550,6 +593,7 @@ const JS = String.raw`
     +   (m.can_create ? '<button class="btn primary" data-act="new">＋ New issue</button>' : "")
     +   '<button class="btn" data-act="poll">▸ Poll now</button>'
     +   '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>'
+    +   '<button class="btn" data-act="integrate">⚙ Integrate</button>'
     +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
     +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
     + '</div></header>'
@@ -684,6 +728,7 @@ const JS = String.raw`
     if (act) {
       var a = act.getAttribute("data-act");
       if (a === "poll") pollNow(act);
+      else if (a === "integrate") openIntegrate();
       else if (a === "new") openCreate();
       else if (a === "auto") { auto = !auto; render(); toast(auto ? "Auto-refresh on" : "Auto-refresh paused", "ok"); }
       else if (a === "theme") toggleTheme();
