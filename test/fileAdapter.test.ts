@@ -117,6 +117,22 @@ test("createIssue requires identifier and title", async () => {
   await assert.rejects(() => a.createIssue({ identifier: "X-1", title: "" }), (e) => e instanceof AdapterError);
 });
 
+test("board: listAllIssues returns every state; setIssueState moves an issue", async () => {
+  const dir = mkDir({
+    "a.json": { id: "A", identifier: "A-1", title: "t", state: "backlog" },
+    "b.json": { id: "B", identifier: "B-1", title: "t", state: "done" },
+  });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  assert.equal(a.supportsBoard(), true);
+  const all = await a.listAllIssues();
+  assert.equal(all.length, 2); // includes backlog + done, not filtered by state
+  const moved = await a.setIssueState("A", "todo");
+  assert.equal(moved.state, "todo");
+  const after = await a.fetchIssuesByStates(["todo"]);
+  assert.equal(after.length, 1);
+  assert.equal(after[0]!.identifier, "A-1");
+});
+
 test("secretEnvironmentNames is empty for file adapter", () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   assert.deepEqual(a.secretEnvironmentNames(), []);
