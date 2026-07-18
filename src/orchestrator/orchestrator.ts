@@ -33,6 +33,7 @@ interface RunningEntry {
   terminating: { cleanupWorkspace: boolean } | null;
   workerDone: Promise<void>;
   events: LogEvent[];
+  agent: string;
 }
 
 /** Retained activity log for a finished/terminated run, so logs survive the run. */
@@ -109,6 +110,7 @@ export class Orchestrator {
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
   private completed = new Set<string>();
+  private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
   private codex_rate_limits: unknown = null;
@@ -227,6 +229,44 @@ export class Orchestrator {
     return issue;
   }
 
+  // ---- agent selection ----
+
+  /** The effective default agent backend (runtime override wins over WORKFLOW.md). */
+  effectiveDefaultAgent(): string {
+    if (this.defaultAgentOverride && isSupportedAgentKind(this.defaultAgentOverride)) return this.defaultAgentOverride;
+    return this.config.agent_kind;
+  }
+
+  /** Resolve the backend for one issue: valid per-task override → effective default. */
+  private resolveAgentKind(issue: Issue): string {
+    if (issue.agent && isSupportedAgentKind(issue.agent)) return issue.agent;
+    return this.effectiveDefaultAgent();
+  }
+
+  /** Set the runtime default agent backend (console/API). Must be a registered kind. */
+  setDefaultAgent(kind: string): void {
+    if (!isSupportedAgentKind(kind)) throw new Error(`unknown agent.kind: ${kind}`);
+    this.defaultAgentOverride = kind;
+    this.logger.info("default agent changed", { agent: kind });
+    this.notify();
+  }
+
+  /** Assign/clear an issue's per-task agent, then poll so a pending dispatch uses it. */
+  async setIssueAgent(id: string, agent: string): Promise<Issue> {
+    if (!this.adapter.setIssueAgent) throw new Error("the active tracker does not support assigning agents");
+    if (agent && !isSupportedAgentKind(agent)) throw new Error(`unknown agent.kind: ${agent}`);
+    const issue = await this.adapter.setIssueAgent(id, agent);
+    this.logger.info("issue agent changed", { issue_id: id, issue_identifier: issue.identifier, agent: agent || "(default)" });
+    this.scheduleTick(0);
+    this.notify();
+    return issue;
+  }
+
+  /** Whether the active adapter can persist a per-issue agent assignment. */
+  canSetAgent(): boolean {
+    return typeof this.adapter.setIssueAgent === "function";
+  }
+
   /** Whether the active adapter can list all issues + move them between states. */
   canBoard(): boolean {
     return typeof this.adapter.supportsBoard === "function" && this.adapter.supportsBoard();
@@ -259,6 +299,8 @@ export class Orchestrator {
         turn_count: run ? run.session.turn_count : null,
         is_active: this.isActiveState(i.state),
         is_terminal: this.isTerminalState(i.state),
+        agent: this.resolveAgentKind(i), // effective backend
+        agent_override: i.agent,          // explicit per-task choice, or null
       };
     });
     return {
@@ -374,6 +416,7 @@ export class Orchestrator {
   // ---- dispatch (SPEC §16.4) ----
 
   private dispatch(issue: Issue, attempt: number | null): void {
+    const agentKind = this.resolveAgentKind(issue);
     const entry: RunningEntry = {
       identifier: issue.identifier,
       issue,
@@ -386,12 +429,13 @@ export class Orchestrator {
       terminating: null,
       workerDone: Promise.resolve(),
       events: [],
+      agent: agentKind,
     };
     this.running.set(issue.id, entry);
     this.claimed.add(issue.id);
     this.cancelRetry(issue.id);
 
-    this.logger.info("dispatch", { issue_id: issue.id, issue_identifier: issue.identifier, attempt: attempt ?? "" });
+    this.logger.info("dispatch", { issue_id: issue.id, issue_identifier: issue.identifier, agent: agentKind, attempt: attempt ?? "" });
 
     const childEnv = this.buildChildEnv();
     entry.workerDone = (async () => {
@@ -399,6 +443,7 @@ export class Orchestrator {
       try {
         exit = await runAgentAttempt(issue, attempt, {
           config: this.config,
+          agentKind,
           promptTemplate: this.promptTemplate,
           adapter: this.adapter,
           workspaceManager: this.workspaceManager,
@@ -720,6 +765,7 @@ export class Orchestrator {
         issue_identifier: e.identifier,
         issue_url: e.issue.url,
         state: e.issue.state,
+        agent: e.agent,
         session_id: e.session.session_id,
         turn_count: e.session.turn_count,
         last_event: e.session.last_codex_event,
@@ -758,6 +804,7 @@ export class Orchestrator {
         tracker_kinds: [...TRACKER_KINDS],
         agent_kind: this.config.agent_kind,
         agent_kinds: supportedAgentKinds(),
+        default_agent: this.effectiveDefaultAgent(),
         poll_interval_ms: this.config.poll_interval_ms,
         max_concurrent_agents: this.config.max_concurrent_agents,
         active_states: this.config.tracker.active_states,
@@ -766,6 +813,7 @@ export class Orchestrator {
         workspace_root: this.config.workspace_root,
         can_create: this.canCreateIssues(),
         can_board: this.canBoard(),
+        can_set_agent: this.canSetAgent(),
       },
     };
   }
@@ -783,6 +831,7 @@ export class Orchestrator {
             session_id: e.session.session_id,
             turn_count: e.session.turn_count,
             state: e.issue.state,
+            agent: e.agent,
             started_at: e.started_at,
             last_event: e.session.last_codex_event,
             last_message: e.session.last_codex_message ?? "",
@@ -849,6 +898,7 @@ export interface SnapshotView {
     tracker_kinds: string[];
     agent_kind: string;
     agent_kinds: string[];
+    default_agent: string;
     poll_interval_ms: number;
     max_concurrent_agents: number;
     active_states: string[];
@@ -857,6 +907,7 @@ export interface SnapshotView {
     workspace_root: string;
     can_create: boolean;
     can_board: boolean;
+    can_set_agent: boolean;
   };
 }
 
@@ -872,6 +923,8 @@ export interface BoardIssueView {
   turn_count: number | null;
   is_active: boolean;
   is_terminal: boolean;
+  agent: string;
+  agent_override: string | null;
 }
 
 export interface BoardView {

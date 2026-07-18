@@ -24,6 +24,8 @@ export interface WorkerExit {
 
 export interface RunnerDeps {
   config: ServiceConfigValues;
+  /** Resolved agent backend for this run (per-issue override → default → config). */
+  agentKind: string;
   promptTemplate: string;
   adapter: TrackerAdapter;
   workspaceManager: WorkspaceManager;
@@ -84,7 +86,7 @@ export async function runAgentAttempt(
   const toolSpecs = deps.adapter.agentToolSpecs();
   let session: AgentSession;
   try {
-    session = createAgentSession(deps.config.agent_kind, {
+    session = createAgentSession(deps.agentKind, {
       workspacePath: wsPath,
       issue,
       config: deps.config,
