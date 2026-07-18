@@ -79,6 +79,10 @@ Integration    src/tracker/*               tracker adapters + agent tools
 Observability  src/logger.ts, src/server/* structured logs + HTTP dashboard/API
 ```
 
+> **Integrating your own agent or tracker?** See [INTEGRATION.md](INTEGRATION.md) for the
+> full walkthrough (files to change, the event vocabulary, testing). The console's
+> **⚙ Integrate** button lists registered backends and the checklist.
+
 ### Agent backends are pluggable
 
 The Execution layer talks to a coding agent only through the `AgentSession` interface
