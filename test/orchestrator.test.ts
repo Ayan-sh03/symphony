@@ -96,6 +96,13 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
     // After terminal transition, snapshot should eventually show no running sessions.
     const drained = await waitFor(() => orch.snapshot().counts.running === 0);
     assert.ok(drained, "running set should drain after terminal transition");
+
+    // The activity log is retained after the run finishes (SPEC §13.7.2 recent_events).
+    // The short continuation retry may briefly report "retrying" first; wait it out.
+    const settled = await waitFor(() => orch.issueDetail("T-1")?.status === "completed");
+    assert.ok(settled, "finished issue detail should settle to completed from history");
+    const detail = orch.issueDetail("T-1")!;
+    assert.ok(detail.recent_events.some((e) => e.event === "turn_started"), "log should include turn_started");
   } finally {
     orch.stop();
   }
