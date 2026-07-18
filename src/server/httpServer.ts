@@ -68,6 +68,14 @@ export class SymphonyHttpServer {
           operations: ["poll", "reconcile"],
         });
       }
+      if (pathname === "/api/v1/issues") {
+        if (method !== "POST") return this.methodNotAllowed(res);
+        if (!this.opts.orchestrator.canCreateIssues()) {
+          return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support creating issues" } });
+        }
+        void this.createIssue(req, res);
+        return;
+      }
       const m = pathname.match(/^\/api\/v1\/([^/]+)$/);
       if (m) {
         if (method !== "GET") return this.methodNotAllowed(res);
@@ -85,6 +93,28 @@ export class SymphonyHttpServer {
     }
   }
 
+  private async createIssue(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    try {
+      const issue = await this.opts.orchestrator.createIssue({
+        identifier: String(body.identifier ?? ""),
+        title: String(body.title ?? ""),
+        description: typeof body.description === "string" ? body.description : null,
+        state: typeof body.state === "string" ? body.state : null,
+        priority: typeof body.priority === "number" ? body.priority : body.priority != null ? Number(body.priority) : null,
+        labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
+      });
+      this.json(res, 201, { created: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
+    } catch (err) {
+      this.json(res, 400, { error: { code: "create_failed", message: String((err as Error).message ?? err) } });
+    }
+  }
+
   private json(res: http.ServerResponse, status: number, body: unknown): void {
     res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(body, null, 2));
@@ -92,4 +122,31 @@ export class SymphonyHttpServer {
   private methodNotAllowed(res: http.ServerResponse): void {
     this.json(res, 405, { error: { code: "method_not_allowed", message: "unsupported method" } });
   }
+}
+
+/** Read and JSON-parse a request body, capped to guard against oversized payloads. */
+function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    let tooBig = false;
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > 64 * 1024) {
+        tooBig = true;
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (tooBig) return reject(new Error("body too large"));
+      if (data.trim() === "") return resolve({});
+      try {
+        const parsed = JSON.parse(data);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return reject(new Error("not an object"));
+        resolve(parsed as Record<string, unknown>);
+      } catch (err) {
+        reject(err as Error);
+      }
+    });
+    req.on("error", reject);
+  });
 }
