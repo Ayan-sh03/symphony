@@ -5,6 +5,7 @@
  */
 import type { AgentFactory, AgentSession, AgentSessionOptions } from "./types.ts";
 import { CodexAppServerClient } from "./appServerClient.ts";
+import { OpencodeSession } from "./opencodeSession.ts";
 
 const codexFactory: AgentFactory = {
   kind: "codex",
@@ -13,7 +14,17 @@ const codexFactory: AgentFactory = {
   },
 };
 
-const FACTORIES = new Map<string, AgentFactory>([[codexFactory.kind, codexFactory]]);
+const opencodeFactory: AgentFactory = {
+  kind: "opencode",
+  create(opts: AgentSessionOptions): AgentSession {
+    return new OpencodeSession(opts);
+  },
+};
+
+const FACTORIES = new Map<string, AgentFactory>([
+  [codexFactory.kind, codexFactory],
+  [opencodeFactory.kind, opencodeFactory],
+]);
 
 /** Register an additional agent backend (e.g. from an extension). */
 export function registerAgentFactory(factory: AgentFactory): void {
