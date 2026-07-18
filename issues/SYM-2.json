@@ -3,7 +3,7 @@
   "identifier": "SYM-2",
   "title": "Summarize what Symphony does",
   "description": "Create a file named ABOUT.md in the workspace with a concise 3-5 bullet summary of what the Symphony orchestration service does, based on the issue context. Then mark the issue done.",
-  "state": "todo",
+  "state": "backlog",
   "priority": 3,
   "labels": [
     "docs"

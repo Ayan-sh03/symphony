@@ -6,6 +6,9 @@ tracker:
   provider:
     dir: ./issues
   required_labels: []
+  # `backlog` is a parking state: issues here are NOT dispatched. Move an issue to
+  # `todo` (an active state) — via the console Start button or the API — to run it.
+  backlog_states: ["backlog"]
   active_states: ["todo", "in progress"]
   terminal_states: ["done", "canceled"]
 
