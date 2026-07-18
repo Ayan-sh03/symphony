@@ -14,6 +14,13 @@ import { isSupportedAgentKind } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 
+/** One entry in an agent's activity log (SPEC §13.7.2 recent_events). */
+interface LogEvent {
+  at: string;
+  event: string;
+  message: string;
+}
+
 interface RunningEntry {
   identifier: string;
   issue: Issue;
@@ -25,7 +32,21 @@ interface RunningEntry {
   stopSession: (() => void) | null;
   terminating: { cleanupWorkspace: boolean } | null;
   workerDone: Promise<void>;
+  events: LogEvent[];
 }
+
+/** Retained activity log for a finished/terminated run, so logs survive the run. */
+interface FinishedLog {
+  identifier: string;
+  url: string | null;
+  events: LogEvent[];
+  ended_at: string;
+  last_error: string | null;
+  outcome: string;
+}
+
+const MAX_EVENTS = 80;
+const MAX_HISTORY = 40;
 
 interface RetryEntry {
   issue_id: string;
@@ -88,6 +109,7 @@ export class Orchestrator {
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
   private completed = new Set<string>();
+  private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
   private codex_rate_limits: unknown = null;
 
@@ -363,6 +385,7 @@ export class Orchestrator {
       stopSession: null,
       terminating: null,
       workerDone: Promise.resolve(),
+      events: [],
     };
     this.running.set(issue.id, entry);
     this.claimed.add(issue.id);
@@ -420,6 +443,15 @@ export class Orchestrator {
     if (s.thread_id && s.turn_id) s.session_id = `${s.thread_id}-${s.turn_id}`;
     if (u.event === "turn_started") s.turn_count += 1;
 
+    // Append meaningful events to the activity log (skip pure token/rate-limit pings).
+    const isMetricPing =
+      u.event === "notification" &&
+      ((u as { kind?: string }).kind === "token_usage" || (u as { kind?: string }).kind === "rate_limits");
+    if (!isMetricPing) {
+      entry.events.push({ at: u.timestamp, event: u.event, message: typeof u.message === "string" ? u.message : "" });
+      if (entry.events.length > MAX_EVENTS) entry.events.splice(0, entry.events.length - MAX_EVENTS);
+    }
+
     // Token accounting: absolute totals, dedup via deltas (SPEC §13.5).
     if (u.usage && (u as { absolute?: boolean }).absolute) {
       const inp = u.usage.input_tokens ?? 0;
@@ -450,6 +482,11 @@ export class Orchestrator {
     if (!entry) return;
     this.running.delete(issueId);
     this.addRuntimeSeconds(entry);
+
+    const outcome = entry.terminating ? "canceled" : exit.kind === "normal" ? "completed" : "failed";
+    const lastError = exit.kind === "abnormal" ? exit.reason ?? "worker failed" : null;
+    if (lastError) entry.events.push({ at: new Date().toISOString(), event: "worker_failed", message: lastError });
+    this.archiveLog(issueId, entry, outcome, lastError);
 
     // Terminated by reconciliation: release claim, optional cleanup, no retry.
     if (entry.terminating) {
@@ -605,6 +642,24 @@ export class Orchestrator {
     this.codex_totals.seconds_running += secs;
   }
 
+  /** Retain a finished run's activity log so operators can review it after the fact. */
+  private archiveLog(issueId: string, entry: RunningEntry, outcome: string, lastError: string | null): void {
+    this.history.set(issueId, {
+      identifier: entry.identifier,
+      url: entry.issue.url,
+      events: entry.events.slice(-MAX_EVENTS),
+      ended_at: new Date().toISOString(),
+      last_error: lastError,
+      outcome,
+    });
+    // Bound the history map to the most recent runs.
+    while (this.history.size > MAX_HISTORY) {
+      const oldest = this.history.keys().next().value;
+      if (oldest === undefined) break;
+      this.history.delete(oldest);
+    }
+  }
+
   // ---- startup cleanup (SPEC §8.6) ----
 
   private async startupTerminalCleanup(): Promise<void> {
@@ -738,6 +793,7 @@ export class Orchestrator {
           },
           retry: null,
           last_error: null,
+          recent_events: e.events.slice(-MAX_EVENTS),
         };
       }
     }
@@ -751,6 +807,23 @@ export class Orchestrator {
           running: null,
           retry: { attempt: r.attempt, due_at: new Date(r.due_at_ms).toISOString(), error: r.error },
           last_error: r.error,
+          recent_events: this.history.get(id)?.events ?? [],
+        };
+      }
+    }
+    // Finished/terminated runs: serve the retained log so operators can review it.
+    for (const [id, h] of this.history) {
+      if (h.identifier === identifier) {
+        return {
+          issue_identifier: identifier,
+          issue_id: id,
+          status: h.outcome,
+          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          running: null,
+          retry: null,
+          last_error: h.last_error,
+          recent_events: h.events,
+          ended_at: h.ended_at,
         };
       }
     }
@@ -826,4 +899,6 @@ export interface IssueDetailView {
   running: unknown;
   retry: unknown;
   last_error: string | null;
+  recent_events: { at: string; event: string; message: string }[];
+  ended_at?: string;
 }
