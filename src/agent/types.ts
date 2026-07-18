@@ -61,8 +61,32 @@ export interface AgentSessionOptions {
   env: NodeJS.ProcessEnv;
 }
 
+/** One persisted activity event, shaped like the console's `recent_events` rows. */
+export interface TranscriptEvent {
+  at: string;
+  event: string;
+  message: string;
+}
+
+/** Lookup for reading a backend's own on-disk transcript after the fact. */
+export interface TranscriptQuery {
+  /** Absolute per-issue workspace the run executed in (backends stamp this on disk). */
+  workspacePath: string;
+  /** Backend session/thread id, when Symphony recorded one; helps disambiguate. */
+  sessionId?: string | null;
+  config: ServiceConfigValues;
+  logger: Logger;
+}
+
 /** Factory for one agent backend, selected by `agent.kind`. */
 export interface AgentFactory {
   readonly kind: string;
   create(opts: AgentSessionOptions): AgentSession;
+  /**
+   * Optional capability (SPEC §13.7.2): read the backend's own persisted transcript
+   * for a finished run, so the console can show activity after Symphony's in-memory
+   * history is gone (e.g. a restart). Best-effort — these are internal on-disk formats;
+   * return `[]` (never throw) when nothing is found. Newest-last ordering.
+   */
+  readTranscript?(query: TranscriptQuery): Promise<TranscriptEvent[]>;
 }

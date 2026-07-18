@@ -10,7 +10,7 @@ import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import { WorkspaceManager } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
-import { isSupportedAgentKind, supportedAgentKinds } from "../agent/registry.ts";
+import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 
@@ -826,7 +826,7 @@ export class Orchestrator {
    */
   async issueDetailFor(identifier: string): Promise<IssueDetailView | null> {
     const known = this.issueDetail(identifier);
-    if (known) return known;
+    if (known) return this.withPersistedTranscript(known);
     if (!this.canBoard() || !this.adapter.listAllIssues) return null;
     let all: Issue[];
     try {
@@ -836,7 +836,7 @@ export class Orchestrator {
     }
     const issue = all.find((i) => i.identifier === identifier);
     if (!issue) return null;
-    return {
+    return this.withPersistedTranscript({
       issue_identifier: identifier,
       issue_id: issue.id,
       status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
@@ -847,7 +847,32 @@ export class Orchestrator {
       retry: null,
       last_error: null,
       recent_events: this.history.get(issue.id)?.events ?? [],
-    };
+    });
+  }
+
+  /**
+   * When a finished run has no in-memory activity (Symphony restarted, or the run
+   * predates this process), fall back to the agent backend's own persisted transcript
+   * so the console can still show what happened. Live runs are left untouched.
+   */
+  private async withPersistedTranscript(view: IssueDetailView): Promise<IssueDetailView> {
+    if (view.running) return view;
+    if (view.recent_events && view.recent_events.length) return view;
+    const kind = view.agent ?? this.effectiveDefaultAgent();
+    const workspacePath = view.workspace?.path;
+    if (!kind || !workspacePath) return view;
+    try {
+      const events = await readAgentTranscript(kind, {
+        workspacePath,
+        sessionId: null,
+        config: this.config,
+        logger: this.logger,
+      });
+      if (events.length) view.recent_events = events;
+    } catch (err) {
+      this.logger.warn("persisted transcript read failed", { issue: view.issue_identifier, agent: kind, error: String(err) });
+    }
+    return view;
   }
 
   /** Per-issue detail for GET /api/v1/<identifier> (SPEC §13.7.2). Returns null if unknown. */
