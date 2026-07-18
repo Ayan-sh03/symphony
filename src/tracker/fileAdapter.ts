@@ -177,6 +177,33 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return [...byId.values()];
   }
 
+  // ---- board capability (extension) ----
+
+  supportsBoard(): boolean {
+    return true;
+  }
+
+  /** Every normalized issue in the tracker, regardless of state (malformed omitted). */
+  async listAllIssues(): Promise<Issue[]> {
+    const out: Issue[] = [];
+    for (const file of this.listFiles()) {
+      const issue = this.normalize(this.readRaw(file));
+      if (issue) out.push(issue);
+    }
+    return out;
+  }
+
+  /** Move an issue to a new state (console Start/Reopen/Cancel actions). */
+  async setIssueState(id: string, state: string): Promise<Issue> {
+    const target = str(state);
+    if (!target) throw new AdapterError("invalid_tracker_config", "state is required");
+    const res = this.mutate(id, (rec) => { rec.state = target; }, { state: target });
+    if (!res.success) throw new AdapterError("tracker_response", String((res.output as { error?: string }).error ?? "update failed"));
+    const refreshed = await this.fetchIssuesByIds([id]);
+    if (refreshed.length === 0) throw new AdapterError("tracker_response", `issue ${id} not found after update`);
+    return refreshed[0]!;
+  }
+
   // ---- Provider-native agent tools (SPEC §10.5) ----
 
   agentToolSpecs(): ToolSpec[] {

@@ -73,4 +73,12 @@ export interface TrackerAdapter {
    */
   supportsCreate?(): boolean;
   createIssue?(input: NewIssueInput): Promise<Issue>;
+
+  /**
+   * OPTIONAL board capability: list every work item regardless of state, and move
+   * one between states. Powers the console board (backlog + completed visibility).
+   */
+  supportsBoard?(): boolean;
+  listAllIssues?(): Promise<Issue[]>;
+  setIssueState?(id: string, state: string): Promise<Issue>;
 }
