@@ -1,0 +1,21 @@
+{
+  "id": "T1",
+  "identifier": "T1",
+  "title": "Add Agents.md",
+  "description": "Initialise a new agents.md file with the project context",
+  "state": "done",
+  "priority": 1,
+  "labels": [
+    "docs"
+  ],
+  "dispatchable": true,
+  "url": "symphony://issues/T1",
+  "created_at": "2026-07-19T05:36:59.645Z",
+  "updated_at": "2026-07-19T05:37:59.047Z",
+  "comments": [
+    {
+      "at": "2026-07-19T05:37:59.047Z",
+      "text": "Initialized AGENTS.md with Symphony workspace context, current issue details, agent guidelines, and verification expectations."
+    }
+  ]
+}

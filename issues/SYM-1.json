@@ -3,7 +3,7 @@
   "identifier": "SYM-1",
   "title": "Write a project greeting file",
   "description": "Create a file named GREETING.md in the workspace containing a short, friendly one-paragraph greeting from the Symphony service. Then mark the issue done.",
-  "state": "done",
+  "state": "backlog",
   "priority": 2,
   "labels": [
     "docs"
@@ -11,11 +11,19 @@
   "dispatchable": true,
   "url": "symphony://issues/SYM-1",
   "agent": "opencode",
-  "updated_at": "2026-07-18T14:08:54.197Z",
+  "updated_at": "2026-07-19T05:22:51.949Z",
   "comments": [
     {
       "at": "2026-07-18T14:08:54.197Z",
       "text": "Created GREETING.md with a friendly one-paragraph greeting from the Symphony service."
+    },
+    {
+      "at": "2026-07-18T14:48:20.668Z",
+      "text": "Created GREETING.md with a friendly one-paragraph greeting from the Symphony service."
+    },
+    {
+      "at": "2026-07-19T04:55:48.805Z",
+      "text": "Created GREETING.md in the workspace with a short, friendly one-paragraph greeting from the Symphony service."
     }
   ]
 }
