@@ -63,6 +63,7 @@ export interface ServiceConfigValues {
   tracker: TrackerConfig;
   poll_interval_ms: number;
   workspace_root: string;
+  workspace_repository: string | null;
   hooks: HooksConfig;
   /** Selected agent backend (SPEC §10 generalized). Default "codex". */
   agent_kind: string;
@@ -138,6 +139,10 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     : path.join(os.tmpdir(), "symphony_workspaces");
   rootRaw = expandPath(rootRaw);
   const workspace_root = path.isAbsolute(rootRaw) ? path.normalize(rootRaw) : path.normalize(path.join(workflowDir, rootRaw));
+  const repositoryRaw = typeof workspace.repository === "string" && workspace.repository.trim() !== "" ? expandPath(workspace.repository) : null;
+  const workspace_repository = repositoryRaw === null
+    ? null
+    : path.isAbsolute(repositoryRaw) ? path.normalize(repositoryRaw) : path.normalize(path.join(workflowDir, repositoryRaw));
 
   const hooksRaw = asObject(cfg.hooks);
   const hookStr = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
@@ -199,6 +204,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     tracker,
     poll_interval_ms,
     workspace_root,
+    workspace_repository,
     hooks,
     agent_kind,
     max_concurrent_agents,

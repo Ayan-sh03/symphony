@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import type { Logger } from "../logger.ts";
 import type { HooksConfig } from "../config/config.ts";
 import { runScript } from "../shell.ts";
@@ -37,6 +38,7 @@ export interface WorkspaceManagerOptions {
   root: string;
   hooks: HooksConfig;
   logger: Logger;
+  repository?: string | null;
 }
 
 export class WorkspaceManager {
@@ -46,9 +48,10 @@ export class WorkspaceManager {
   }
 
   /** Update effective hooks/root after a config reload (SPEC §6.2). */
-  update(root: string, hooks: HooksConfig): void {
+  update(root: string, hooks: HooksConfig, repository: string | null): void {
     this.opts.root = root;
     this.opts.hooks = hooks;
+    this.opts.repository = repository;
   }
 
   workspacePathFor(identifier: string): string {
@@ -87,7 +90,17 @@ export class WorkspaceManager {
       // Existing non-directory at the workspace location: fail safely (SPEC §17.2).
       throw new WorkspaceError(`workspace path ${wsPath} exists but is not a directory`);
     }
-    if (!stat) {
+    if (!stat && this.opts.repository) {
+      try {
+        fs.mkdirSync(path.dirname(wsPath), { recursive: true });
+        const branch = `issue/${identifier}`;
+        const existing = this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
+        this.git(this.opts.repository, existing === null ? ["worktree", "add", "-b", branch, wsPath] : ["worktree", "add", wsPath, branch]);
+        created_now = true;
+      } catch (err) {
+        throw new WorkspaceError(`failed to create git worktree ${wsPath}: ${(err as Error).message}`);
+      }
+    } else if (!stat) {
       try {
         fs.mkdirSync(wsPath, { recursive: true });
         created_now = true;
@@ -133,11 +146,37 @@ export class WorkspaceManager {
     if (this.opts.hooks.before_remove) {
       await this.runHook("before_remove", this.opts.hooks.before_remove, wsPath);
     }
+    if (this.opts.repository) {
+      const dirty = this.git(wsPath, ["status", "--porcelain"])!
+        .split(/\r?\n/)
+        .filter((line) => line !== "" && !line.endsWith(" SYMPHONY_ISSUE.json"));
+      if (dirty.length > 0) {
+        this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { issue_identifier: identifier, path: wsPath, changes: dirty.join(", ") });
+        return;
+      }
+      try {
+        this.git(this.opts.repository, ["worktree", "remove", wsPath]);
+        this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch: `issue/${identifier}` });
+      } catch (err) {
+        this.opts.logger.warn("git worktree cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
+      }
+      return;
+    }
     try {
       fs.rmSync(wsPath, { recursive: true, force: true });
       this.opts.logger.info("workspace cleaned", { issue_identifier: identifier, path: wsPath });
     } catch (err) {
       this.opts.logger.warn("workspace cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
+    }
+  }
+
+  private git(cwd: string, args: string[], allowFailure = false): string | null {
+    try {
+      return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      if (allowFailure) return null;
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new WorkspaceError(`git ${args.join(" ")} failed: ${detail}`);
     }
   }
 

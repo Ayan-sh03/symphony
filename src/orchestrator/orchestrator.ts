@@ -142,6 +142,7 @@ export class Orchestrator {
       root: this.config.workspace_root,
       hooks: this.config.hooks,
       logger: this.logger,
+      repository: this.config.workspace_repository,
     });
   }
 
@@ -809,7 +810,7 @@ export class Orchestrator {
 
     this.config = next;
     this.promptTemplate = def.prompt_template;
-    this.workspaceManager.update(next.workspace_root, next.hooks);
+    this.workspaceManager.update(next.workspace_root, next.hooks, next.workspace_repository);
     if (kindChanged || providerChanged) {
       try {
         this.adapter = createAdapter(next.tracker.kind, next.tracker.provider, next.workflowDir, this.logger);
@@ -903,18 +904,24 @@ export class Orchestrator {
    * retrying/finished views synchronously; for an issue that has never run (e.g. one
    * sitting in backlog) it falls back to the tracker so the console shows an idle
    * detail instead of a spurious 404. Returns null only when the tracker has no such issue.
+   * Retrying/halted/finished views carry no tracker state of their own, so those are
+   * enriched with the issue's current tracker state via the same lookup.
    */
   async issueDetailFor(identifier: string): Promise<IssueDetailView | null> {
     const known = this.issueDetail(identifier);
-    if (known) return this.withPersistedTranscript(known);
-    if (!this.canBoard() || !this.adapter.listAllIssues) return null;
+    if (known && (known.running || known.state)) return this.withPersistedTranscript(known);
+    if (!this.canBoard() || !this.adapter.listAllIssues) return known ? this.withPersistedTranscript(known) : null;
     let all: Issue[];
     try {
       all = await this.adapter.listAllIssues();
     } catch {
-      return null;
+      return known ? this.withPersistedTranscript(known) : null;
     }
     const issue = all.find((i) => i.identifier === identifier);
+    if (known) {
+      if (issue) known.state = issue.state;
+      return this.withPersistedTranscript(known);
+    }
     if (!issue) return null;
     return this.withPersistedTranscript({
       issue_identifier: identifier,
@@ -1105,7 +1112,7 @@ export interface IssueDetailView {
   issue_identifier: string;
   issue_id: string;
   status: string;
-  /** Tracker state, present for idle/queued issues that are not live. */
+  /** Tracker state, present when the issue is not live (live runs carry it under `running`). */
   state?: string;
   /** Effective agent backend that would run this issue. */
   agent?: string;
