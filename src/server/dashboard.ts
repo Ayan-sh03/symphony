@@ -6,10 +6,19 @@
  * for correctness.
  */
 import type { SnapshotView } from "../orchestrator/orchestrator.ts";
+import type { ProjectSummary } from "../project/manager.ts";
 
-/** Render the console shell with the initial snapshot inlined (progressive enhancement). */
-export function renderDashboard(initial: SnapshotView): string {
-  const bootstrap = JSON.stringify(initial).replace(/</g, "\\u003c");
+/** Everything the console shell needs to paint the selected project instantly. */
+export interface DashboardBootstrap {
+  projects: ProjectSummary[];
+  can_add: boolean;
+  selected: string;
+  snapshot: SnapshotView | null;
+}
+
+/** Render the console shell with the selected project's snapshot inlined (progressive enhancement). */
+export function renderDashboard(boot: DashboardBootstrap): string {
+  const bootstrap = JSON.stringify(boot).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -152,10 +161,12 @@ header.bar {
 
 /* Sections */
 section { margin-bottom: 32px; }
-.sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .sec-head h2 { font-size: 14px; font-weight: 620; letter-spacing: -0.01em; margin: 0; }
-.count { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; }
+.count { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+  min-width: 21px; height: 21px; padding: 0 6px; font-family: var(--mono); font-size: 11.5px;
+  font-weight: 600; line-height: 1; color: var(--faint); font-variant-numeric: tabular-nums;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; }
 
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .tscroll { overflow-x: auto; }
@@ -186,7 +197,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 
 /* Board */
 .board-group { margin-bottom: 16px; }
-.group-head { display: flex; align-items: center; gap: 9px; margin: 0 0 8px 2px; }
+.group-head { display: flex; align-items: center; gap: 9px; margin: 0 0 8px 16px; }
 .group-head .gname { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
 .group-head .gname.st-backlog { color: var(--faint); }
 .group-head .gname.st-active { color: var(--accent); }
@@ -292,6 +303,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   padding: 9px 11px; width: 100%; transition: border-color .12s var(--ease); }
 .textarea { resize: vertical; min-height: 76px; line-height: 1.5; }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--accent); }
+.select.proj { width: auto; max-width: 190px; padding: 7px 11px; font-size: 13px; font-weight: 550; }
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }
@@ -318,7 +330,17 @@ const JS = String.raw`
 (function () {
   "use strict";
   var $ = function (sel, el) { return (el || document).querySelector(sel); };
-  var state = window.__SYMPHONY__ || null;
+  var boot = window.__SYMPHONY__ || {};
+  var projects = boot.projects || [];
+  var canAdd = !!boot.can_add;
+  var PID_KEY = "symphony.project";
+  function validPid(p) { for (var i = 0; i < projects.length; i++) if (projects[i].id === p) return true; return false; }
+  var pid = boot.selected || (projects[0] && projects[0].id) || "default";
+  try { var savedPid = localStorage.getItem(PID_KEY); if (savedPid && validPid(savedPid)) pid = savedPid; } catch (e) {}
+  function apiBase() { return "/api/v1/projects/" + encodeURIComponent(pid); }
+  function savePid(p) { try { localStorage.setItem(PID_KEY, p); } catch (e) {} }
+  // The server inlines a snapshot for boot.selected; if we restored a different project, fetch fresh.
+  var state = (pid === boot.selected) ? (boot.snapshot || null) : null;
   var board = null;
   var auto = true;
   var lastOk = Date.now();
@@ -379,22 +401,22 @@ const JS = String.raw`
   }
 
   // ---- data ----
-  function fetchState() {
-    return fetch("/api/v1/state", { headers: { accept: "application/json" } })
+  function fetchState(forceRender) {
+    return fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-      .then(function (j) { state = j; lastOk = Date.now(); conn = "live"; render(); })
+      .then(function (j) { state = j; lastOk = Date.now(); conn = "live"; render(forceRender); })
       .catch(function () { conn = (Date.now() - lastOk > 12000) ? "down" : "stale"; paintStatus(); });
   }
   function fetchBoard() {
     if (!state || !state.meta || !state.meta.can_board) return Promise.resolve();
-    return fetch("/api/v1/issues", { headers: { accept: "application/json" } })
+    return fetch(apiBase() + "/issues", { headers: { accept: "application/json" } })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
       .then(function (j) { board = j; render(); })
       .catch(function () {});
   }
   function setState(id, to, btn) {
     if (btn) { btn.classList.add("busy"); }
-    fetch("/api/v1/issues/" + encodeURIComponent(id) + "/state", {
+    fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/state", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ state: to })
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
@@ -407,21 +429,21 @@ const JS = String.raw`
   }
   function setDefaultAgent(kind, el) {
     if (el) el.disabled = true;
-    fetch("/api/v1/default-agent", {
+    fetch(apiBase() + "/default-agent", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: kind })
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
         if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
         toast("Default agent → " + res.j.default_agent, "ok");
-        return fetchState();
+        return fetchState(true);
       })
       .catch(function (ex) { toast(String(ex.message || ex), "err"); })
       .then(function () { if (el) el.disabled = false; });
   }
   function setIssueAgent(id, agent, el) {
     if (el) el.disabled = true;
-    fetch("/api/v1/issues/" + encodeURIComponent(id) + "/agent", {
+    fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/agent", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ agent: agent })
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
@@ -434,30 +456,53 @@ const JS = String.raw`
   }
   function pollNow(btn) {
     if (btn) { btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Polling'; }
-    fetch("/api/v1/refresh", { method: "POST" })
+    fetch(apiBase() + "/refresh", { method: "POST" })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
       .then(function (j) { toast(j.coalesced ? "Poll already queued" : "Poll + reconcile queued", "ok"); return fetchState(); })
       .catch(function () { toast("Could not queue poll", "err"); })
       .then(function () { if (btn) { btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; } });
   }
-  // ---- routing (hash-based full-page views; no overlay) ----
-  // route: { name: "board" | "detail" | "new" | "integrate", id?: string }
+  // ---- routing (hash-based; every route carries the project id: #/<pid>[/...]) ----
+  // route: { name: "board" | "detail" | "new" | "integrate" | "add-project", id?: string }
   var route = { name: "board" };
   var detailData = null;   // cached detail payload for the open issue
   var detailErr = null;    // error string if the detail fetch failed
 
+  function hashFor(name, id) {
+    var base = "#/" + encodeURIComponent(pid);
+    if (name === "detail") return base + "/issue/" + encodeURIComponent(id);
+    if (name === "new") return base + "/new";
+    if (name === "integrate") return base + "/integrate";
+    if (name === "add-project") return base + "/add-project";
+    return base;
+  }
   function parseHash() {
     var h = (location.hash || "").replace(/^#\/?/, "");
-    if (h.indexOf("issue/") === 0) return { name: "detail", id: decodeURIComponent(h.slice(6)) };
-    if (h === "new") return { name: "new" };
-    if (h === "integrate") return { name: "integrate" };
+    var parts = h.split("/").filter(function (x) { return x !== ""; });
+    if (parts.length === 0) return { name: "board" };
+    var p = decodeURIComponent(parts[0]);
+    if (validPid(p)) { pid = p; savePid(p); } else return { name: "board" };
+    var rest = parts.slice(1);
+    if (rest[0] === "issue" && rest[1]) return { name: "detail", id: decodeURIComponent(rest[1]) };
+    if (rest[0] === "new") return { name: "new" };
+    if (rest[0] === "integrate") return { name: "integrate" };
+    if (rest[0] === "add-project") return { name: "add-project" };
     return { name: "board" };
   }
   function navigate(hash) { if (location.hash === hash) applyRoute(); else location.hash = hash; }
-  function goBoard() { navigate("#/"); }
+  function goBoard() { navigate(hashFor("board")); }
+  function switchProject(np) {
+    if (!validPid(np) || np === pid) return;
+    pid = np; savePid(np);
+    state = null; board = null; detailData = null; detailErr = null;
+    navigate(hashFor("board"));
+    fetchState(); fetchBoard();
+  }
   function applyRoute() {
+    var pidBefore = pid;
     var next = parseHash();
     var changed = next.name !== route.name || next.id !== route.id;
+    if (pid !== pidBefore) { state = null; board = null; detailData = null; detailErr = null; fetchState(); fetchBoard(); changed = true; }
     route = next;
     if (route.name === "detail") {
       if (changed) { detailData = null; detailErr = null; loadDetail(route.id); }
@@ -466,7 +511,7 @@ const JS = String.raw`
     if (changed) window.scrollTo(0, 0);
   }
   function loadDetail(identifier) {
-    return fetch("/api/v1/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
+    return fetch(apiBase() + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
         if (route.name !== "detail" || route.id !== identifier) return;
@@ -543,7 +588,7 @@ const JS = String.raw`
       + '<div class="field"><label for="f-labels">Labels</label>'
         + '<input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>'
       + '<div class="field-err" id="f-err" hidden></div>'
-      + '<div class="form-actions"><button type="button" class="btn" data-nav="#/">Cancel</button>'
+      + '<div class="form-actions"><button type="button" class="btn" data-nav="' + hashFor("board") + '">Cancel</button>'
         + '<button type="submit" class="btn primary">Create &amp; dispatch</button></div>'
       + "</form></div>";
   }
@@ -576,7 +621,7 @@ const JS = String.raw`
     if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }
     var btn = f.querySelector('button[type=submit]');
     btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Creating';
-    fetch("/api/v1/issues", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
+    fetch(apiBase() + "/issues", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
         if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "create failed");
@@ -688,22 +733,31 @@ const JS = String.raw`
     $(".status .txt").textContent = label + " · updated " + ago(state ? state.generated_at : null);
   }
 
+  function projectSwitcher() {
+    if (projects.length <= 1 && !canAdd) return "";
+    var opts = projects.map(function (p) {
+      return '<option value="' + esc(p.id) + '"' + (p.id === pid ? " selected" : "") + ">" + esc(p.name) + "</option>";
+    }).join("");
+    if (canAdd) opts += '<option value="__add__">＋ Add project…</option>';
+    return '<select class="select proj" data-project aria-label="Project">' + opts + "</select>";
+  }
   function headerHtml(m) {
     var themeIcon = document.documentElement.getAttribute("data-theme") === "dark" ? "◐" : "◑";
     var onBoard = route.name === "board";
     return '<header class="bar"><div class="bar-inner">'
-    +   '<button class="brand" data-nav="#/" aria-label="Symphony home"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></button>'
+    +   '<button class="brand" data-nav="' + hashFor("board") + '" aria-label="Symphony home"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></button>'
+    +   projectSwitcher()
     +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
-    +   (m.can_create ? '<button class="btn primary" data-nav="#/new"' + (route.name === "new" ? ' aria-pressed="true"' : "") + '>＋ New issue</button>' : "")
+    +   (m.can_create ? '<button class="btn primary" data-nav="' + hashFor("new") + '"' + (route.name === "new" ? ' aria-pressed="true"' : "") + '>＋ New issue</button>' : "")
     +   (onBoard ? '<button class="btn" data-act="poll">▸ Poll now</button>' : "")
     +   (onBoard ? '<button class="btn" data-act="auto" aria-pressed="' + auto + '">' + (auto ? "⏸ Auto: on" : "▷ Auto: off") + '</button>' : "")
-    +   '<button class="btn" data-nav="#/integrate"' + (route.name === "integrate" ? ' aria-pressed="true"' : "") + '>Integrate</button>'
-    +   '<a class="btn" href="/api/v1/state" target="_blank" rel="noopener">{ } API</a>'
+    +   '<button class="btn" data-nav="' + hashFor("integrate") + '"' + (route.name === "integrate" ? ' aria-pressed="true"' : "") + '>Integrate</button>'
+    +   '<a class="btn" href="' + apiBase() + '/state" target="_blank" rel="noopener">{ } API</a>'
     +   '<button class="btn icon" data-act="theme" aria-label="Toggle theme">' + themeIcon + '</button>'
     + '</div></header>';
   }
   function pageHead(title, key) {
-    return '<button class="back" data-nav="#/"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg> Board</button>'
+    return '<button class="back" data-nav="' + hashFor("board") + '"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg> Board</button>'
       + '<div class="page-head"><h1>' + esc(title) + "</h1>" + (key ? '<span class="pkey">' + esc(key) + "</span>" : "") + "</div>";
   }
   function boardBody(m) {
@@ -726,11 +780,12 @@ const JS = String.raw`
     +   boardSection(m)
     +   section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))
     +   section("Retry queue", retrying.length, retrying.length ? retryTable(retrying) : emptyRetry())
-    +   rateLimit(state.rate_limits);
+    +   rateLimit(state.rate_limits, state.rate_limits_agent);
   }
   function routeBody(m) {
     if (route.name === "new") return m.can_create ? createPage() : notFoundPage("Creating issues is not supported by this tracker.");
     if (route.name === "integrate") return integratePage();
+    if (route.name === "add-project") return canAdd ? addProjectPage() : notFoundPage("Adding projects is not enabled on this host.");
     if (route.name === "detail") {
       if (detailErr) return notFoundPage(detailErr);
       if (!detailData) return pageHead(route.id, "") + '<div class="page"><p class="sub">Loading…</p></div>';
@@ -741,14 +796,51 @@ const JS = String.raw`
   function notFoundPage(msg) {
     return pageHead("Not found", "") + '<div class="page"><div class="panel empty"><h3>' + esc(msg) + "</h3>"
       + '<p>The item you were looking at is no longer available.</p>'
-      + '<button class="btn primary" data-nav="#/">Back to board</button></div></div>';
+      + '<button class="btn primary" data-nav="' + hashFor("board") + '">Back to board</button></div></div>';
+  }
+  function addProjectPage() {
+    return pageHead("Add project", "")
+      + '<div class="page"><form class="form page-form" id="addprojform" autocomplete="off">'
+      + '<div class="field"><label for="f-wf">Workflow path <span class="req">*</span></label>'
+        + '<input class="input" id="f-wf" name="workflow" placeholder="../my-app/WORKFLOW.md" required>'
+        + '<span class="hint">Path to a WORKFLOW.md — or a project directory containing one — resolved where Symphony runs. Its issues + workspace stay isolated under that directory.</span></div>'
+      + '<div class="field"><label for="f-name">Name</label>'
+        + '<input class="input" id="f-name" name="name" placeholder="My App"><span class="hint">Optional display name; defaults to the folder name.</span></div>'
+      + '<div class="field-err" id="ap-err" hidden></div>'
+      + '<div class="form-actions"><button type="button" class="btn" data-nav="' + hashFor("board") + '">Cancel</button>'
+        + '<button type="submit" class="btn primary">Add project</button></div>'
+      + "</form></div>";
+  }
+  function submitAddProject(e) {
+    e.preventDefault();
+    var f = e.target, err = $("#ap-err");
+    err.hidden = true;
+    var payload = { workflow: f.workflow.value.trim(), name: f.name.value.trim() || null };
+    if (!payload.workflow) { err.textContent = "Workflow path is required."; err.hidden = false; return; }
+    var btn = f.querySelector('button[type=submit]');
+    btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Adding';
+    fetch("/api/v1/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "add failed");
+        var np = res.j.project;
+        projects.push(np);
+        toast("Added " + np.name, "ok");
+        switchProject(np.id);
+      })
+      .catch(function (ex) { err.textContent = String(ex.message || ex); err.hidden = false;
+        btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
   }
 
-  function render() {
+  function render(forceRender) {
     if (!state) return;
     var m = state.meta || {};
-    // Never rebuild the create form out from under the user mid-typing.
+    // Never rebuild a form out from under the user mid-typing.
     if (route.name === "new" && $("#newform")) { paintStatus(); return; }
+    if (route.name === "add-project" && $("#addprojform")) { paintStatus(); return; }
+    // The integration guide has static content. Keeping it mounted avoids replaying
+    // its page-entry animation on every background state poll.
+    if (!forceRender && route.name === "integrate" && $(".page")) { paintStatus(); return; }
     // On a live refresh, patch the detail page in place — a full rebuild replays the
     // page-entrance animation every poll, which reads as a blink.
     if (route.name === "detail" && detailData && !detailErr && patchDetail(detailData)) { paintStatus(); return; }
@@ -854,20 +946,21 @@ const JS = String.raw`
       + '<p>Symphony polls the <b>' + esc(m.tracker_kind) + '</b> tracker every ' + secs + 's. Add an issue to <code>issues/</code> '
       + 'or move one into an active state (<code>' + (m.active_states || []).map(esc).join("</code>, <code>") + '</code>), then poll.</p>'
       + '<div style="display:flex;gap:8px;justify-content:center">'
-      + (m.can_create ? '<button class="btn primary" data-nav="#/new">＋ New issue</button>' : "")
+      + (m.can_create ? '<button class="btn primary" data-nav="' + hashFor("new") + '">＋ New issue</button>' : "")
       + '<button class="btn" data-act="poll">▸ Poll now</button></div></div>';
   }
   function emptyRetry() {
     return '<div class="panel empty"><div class="ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div><h3>Retry queue is clear</h3>'
       + '<p>Failed attempts and post-run continuation checks land here with a backoff timer. Nothing is waiting.</p></div>';
   }
-  function rateLimit(rl) {
+  function rateLimit(rl, agent) {
     if (!rl) return "";
     var p = rl.primary || {};
     var pct = typeof p.usedPercent === "number" ? p.usedPercent : null;
     var resets = p.resetsAt ? new Date(p.resetsAt * 1000).toLocaleString() : "—";
     var plan = rl.planType ? esc(rl.planType) : "—";
-    return section("Agent rate limits", "", '<div class="panel"><div class="rl">'
+    var head = (agent ? esc(agent) + " " : "") + "rate limits";
+    return section(head, "", '<div class="panel"><div class="rl">'
       + '<div class="item"><span class="k">Plan</span><span class="v">' + plan + "</span></div>"
       + (pct != null ? '<div class="item"><span class="k">Primary window used</span><span class="v">' + pct + '%</span>'
           + '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, pct) + '%"></div></div></div>' : "")
@@ -890,12 +983,19 @@ const JS = String.raw`
     var sb = e.target.closest("[data-state-id]");
     if (sb) { setState(sb.getAttribute("data-state-id"), sb.getAttribute("data-state-to"), sb); return; }
     var row = e.target.closest("[data-open]");
-    if (row) navigate("#/issue/" + encodeURIComponent(row.getAttribute("data-open")));
+    if (row) navigate(hashFor("detail", row.getAttribute("data-open")));
   });
   document.addEventListener("submit", function (e) {
     if (e.target && e.target.id === "newform") submitCreate(e);
+    else if (e.target && e.target.id === "addprojform") submitAddProject(e);
   });
   document.addEventListener("change", function (e) {
+    var pp = e.target.closest("[data-project]");
+    if (pp) {
+      if (pp.value === "__add__") { pp.value = pid; navigate(hashFor("add-project")); return; }
+      switchProject(pp.value);
+      return;
+    }
     var da = e.target.closest("[data-default-agent]");
     if (da) { setDefaultAgent(da.value, da); return; }
     var ia = e.target.closest("[data-issue-agent]");
@@ -918,7 +1018,15 @@ const JS = String.raw`
   }
 
   // ---- loops ----
+  // Normalize the URL so it always carries the active project id (stable, shareable).
+  (function () {
+    var first = decodeURIComponent(((location.hash || "").replace(/^#\/?/, "").split("/")[0]) || "");
+    if (!validPid(first)) location.replace(location.pathname + location.search + hashFor("board"));
+  })();
   applyRoute();
+  // The inlined snapshot is only for boot.selected; fetch the active project's fresh
+  // state so a restored (different) project paints immediately instead of on next poll.
+  fetchState();
   fetchBoard();
   setInterval(function () { if (auto) { fetchState(); fetchBoard(); refreshOpenDetail(); } }, 2500);
   setInterval(tick, 1000);

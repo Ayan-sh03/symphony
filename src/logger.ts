@@ -38,18 +38,27 @@ const SECRET_KEY_RE = /(token|secret|password|api[_-]?key|authorization)/i;
 export class Logger {
   private minLevel: number;
   private failedSinks = new Set<string>();
+  private bound: LogFields;
 
   private sinks: Sink[];
-  constructor(sinks: Sink[] = [new StderrSink()], minLevel: LogLevel = "info") {
+  constructor(sinks: Sink[] = [new StderrSink()], minLevel: LogLevel = "info", bound: LogFields = {}) {
     this.sinks = sinks;
     this.minLevel = LEVEL_ORDER[minLevel];
+    this.bound = bound;
+  }
+
+  /** Derive a logger that stamps `fields` on every line (e.g. per-project context). */
+  child(fields: LogFields): Logger {
+    const c = new Logger(this.sinks, "debug", { ...this.bound, ...fields });
+    c.minLevel = this.minLevel; // preserve the effective level (private, same class)
+    return c;
   }
 
   private emit(level: LogLevel, msg: string, fields: LogFields): void {
     if (LEVEL_ORDER[level] < this.minLevel) return;
     const ts = new Date().toISOString();
     const parts = [`ts=${ts}`, `level=${level}`, `msg=${formatValue(msg)}`];
-    for (const [k, v] of Object.entries(fields)) {
+    for (const [k, v] of Object.entries({ ...this.bound, ...fields })) {
       if (v === undefined) continue;
       const safe = SECRET_KEY_RE.test(k) ? "[redacted]" : formatValue(v);
       parts.push(`${k}=${safe}`);

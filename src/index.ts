@@ -2,24 +2,29 @@
 /**
  * Symphony CLI / host lifecycle (SPEC §5.1, §17.7). Usage:
  *   symphony [path-to-WORKFLOW.md] [--port N]
- * Defaults to ./WORKFLOW.md. Exits nonzero on startup failure.
+ *   symphony --projects <manifest.json> [--port N]   # multi-project (host extension)
+ * With no --projects flag it uses ./symphony.projects.json if present, else falls
+ * back to a single "default" project at ./WORKFLOW.md. Exits nonzero on startup failure.
  */
 import process from "node:process";
+import path from "node:path";
 import fs from "node:fs";
 import { Logger, StderrSink, type LogLevel } from "./logger.ts";
-import { resolveWorkflowPath, loadWorkflow, WorkflowError } from "./workflow/loader.ts";
-import { buildConfig, ConfigError } from "./config/config.ts";
-import { Orchestrator } from "./orchestrator/orchestrator.ts";
-import { WorkflowWatcher } from "./workflow/watcher.ts";
+import { resolveWorkflowPath } from "./workflow/loader.ts";
+import { ProjectManager } from "./project/manager.ts";
 import { SymphonyHttpServer } from "./server/httpServer.ts";
+
+const DEFAULT_MANIFEST = "symphony.projects.json";
 
 interface CliArgs {
   workflowPath: string | null;
+  manifestPath: string | null;
   port: number | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   let workflowPath: string | null = null;
+  let manifestPath: string | null = null;
   let port: number | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -29,14 +34,20 @@ function parseArgs(argv: string[]): CliArgs {
       port = Math.trunc(Number(v));
     } else if (a.startsWith("--port=")) {
       port = Math.trunc(Number(a.slice("--port=".length)));
+    } else if (a === "--projects") {
+      const v = argv[++i];
+      if (v === undefined) throw new Error("--projects requires a path to a manifest JSON file");
+      manifestPath = v;
+    } else if (a.startsWith("--projects=")) {
+      manifestPath = a.slice("--projects=".length);
     } else if (a === "-h" || a === "--help") {
-      process.stdout.write("Usage: symphony [path-to-WORKFLOW.md] [--port N]\n");
+      process.stdout.write("Usage: symphony [path-to-WORKFLOW.md] [--projects <manifest.json>] [--port N]\n");
       process.exit(0);
     } else if (!a.startsWith("-")) {
       workflowPath = a;
     }
   }
-  return { workflowPath, port };
+  return { workflowPath, manifestPath, port };
 }
 
 async function main(): Promise<void> {
@@ -44,54 +55,45 @@ async function main(): Promise<void> {
   const level = (process.env.SYMPHONY_LOG_LEVEL as LogLevel) || "info";
   const logger = new Logger([new StderrSink()], level);
 
-  // Resolve workflow path (SPEC §5.1). Explicit path must exist; default ./WORKFLOW.md must exist.
-  const workflowPath = resolveWorkflowPath(args.workflowPath);
-  if (!fs.existsSync(workflowPath)) {
-    logger.error("workflow file not found", { path: workflowPath });
-    process.exit(1);
-  }
+  // Choose the project source (SPEC §5.1 extended for multi-project):
+  //   1. --projects <manifest>  2. ./symphony.projects.json if present  3. single WORKFLOW.md.
+  const explicitManifest = args.manifestPath ? path.resolve(args.manifestPath) : null;
+  const defaultManifest = path.resolve(process.cwd(), DEFAULT_MANIFEST);
+  const manifestPath = explicitManifest ?? (fs.existsSync(defaultManifest) ? defaultManifest : null);
 
-  let workflow;
-  let config;
+  let manager: ProjectManager;
   try {
-    workflow = loadWorkflow(workflowPath);
-    config = buildConfig(workflow, workflowPath);
+    if (manifestPath) {
+      if (!fs.existsSync(manifestPath)) throw new Error(`projects manifest not found at ${manifestPath}`);
+      manager = ProjectManager.fromManifest(manifestPath, logger);
+    } else {
+      const workflowPath = resolveWorkflowPath(args.workflowPath);
+      if (!fs.existsSync(workflowPath)) throw new Error(`workflow file not found at ${workflowPath}`);
+      manager = ProjectManager.fromSingleWorkflow(workflowPath, logger);
+    }
   } catch (err) {
-    const cls = err instanceof WorkflowError ? err.errorClass : err instanceof ConfigError ? "config_error" : "startup_error";
-    logger.error("startup failed loading workflow/config", { error_class: cls, error: String(err) });
+    logger.error("startup failed building projects", { error: String(err) });
     process.exit(1);
   }
 
   logger.info("symphony starting", {
-    workflow: workflowPath,
-    tracker_kind: config.tracker.kind,
-    agent_kind: config.agent_kind,
-    workspace_root: config.workspace_root,
-    poll_interval_ms: config.poll_interval_ms,
+    mode: manifestPath ? "multi" : "single",
+    manifest: manifestPath ?? "",
+    projects: manager.list().length,
   });
 
-  const orchestrator = new Orchestrator({ config, workflow, workflowPath, logger });
-
   try {
-    await orchestrator.start();
+    await manager.startAll();
   } catch (err) {
-    logger.error("orchestrator startup failed", { error: String(err) });
+    logger.error("project startup failed", { error: String(err) });
     process.exit(1);
   }
 
-  // Dynamic reload (SPEC §6.2).
-  const watcher = new WorkflowWatcher({
-    path: workflowPath,
-    logger,
-    onReload: (def) => orchestrator.reload(def),
-  });
-  watcher.start();
-
-  // OPTIONAL HTTP server: CLI --port overrides server.port (SPEC §13.7).
-  const effectivePort = args.port ?? config.server_port;
+  // OPTIONAL HTTP server: CLI --port overrides per-project server.port (SPEC §13.7).
+  const effectivePort = args.port ?? manager.get(manager.firstId())?.orchestrator.serverPort() ?? null;
   let httpServer: SymphonyHttpServer | null = null;
   if (effectivePort !== null && effectivePort !== undefined) {
-    httpServer = new SymphonyHttpServer({ orchestrator, logger, port: effectivePort });
+    httpServer = new SymphonyHttpServer({ manager, logger, port: effectivePort });
     try {
       await httpServer.listen();
     } catch (err) {
@@ -101,9 +103,8 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string) => {
     logger.info("shutting down", { signal });
-    watcher.stop();
     httpServer?.close();
-    orchestrator.stop();
+    manager.stopAll();
     process.exit(0);
   };
   process.on("SIGINT", () => shutdown("SIGINT"));

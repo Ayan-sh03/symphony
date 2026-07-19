@@ -1,15 +1,21 @@
 /**
  * OPTIONAL HTTP server extension (SPEC §13.7). Observability/control surface only;
  * never required for orchestrator correctness. Binds loopback by default.
+ *
+ * Multi-project (host extension): routes are scoped by project id. `/api/v1/projects`
+ * lists/creates projects; every other endpoint lives under `/api/v1/projects/<pid>/…`
+ * and is dispatched to that project's Orchestrator. The `<pid>` segment namespaces
+ * per-project issue identifiers, which are only unique within a single tracker scope.
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Orchestrator } from "../orchestrator/orchestrator.ts";
+import type { ProjectManager } from "../project/manager.ts";
 import type { Logger } from "../logger.ts";
 import { renderDashboard } from "./dashboard.ts";
 
 export interface HttpServerOptions {
-  orchestrator: Orchestrator;
+  manager: ProjectManager;
   logger: Logger;
   port: number;
   host?: string;
@@ -49,78 +55,47 @@ export class SymphonyHttpServer {
     const method = req.method ?? "GET";
 
     try {
+      // Console shell: embed the project list + the selected project's first snapshot.
       if (pathname === "/" && method === "GET") {
-        const html = renderDashboard(this.opts.orchestrator.snapshot());
+        const selected = this.selectedId(url);
+        const snap = this.opts.manager.get(selected)?.orchestrator.snapshot() ?? null;
+        const html = renderDashboard({
+          projects: this.opts.manager.list(),
+          can_add: this.opts.manager.canAdd(),
+          selected,
+          snapshot: snap,
+        });
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         res.end(html);
         return;
       }
-      if (pathname === "/api/v1/state" && method === "GET") {
-        return this.json(res, 200, this.opts.orchestrator.snapshot());
-      }
-      if (pathname === "/api/v1/refresh") {
-        if (method !== "POST") return this.methodNotAllowed(res);
-        const r = this.opts.orchestrator.requestRefresh();
-        return this.json(res, 202, {
-          queued: r.queued,
-          coalesced: r.coalesced,
-          requested_at: new Date().toISOString(),
-          operations: ["poll", "reconcile"],
-        });
-      }
-      if (pathname === "/api/v1/issues") {
+
+      // Project registry.
+      if (pathname === "/api/v1/projects") {
         if (method === "GET") {
-          if (!this.opts.orchestrator.canBoard()) {
-            return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support a board view" } });
-          }
-          void this.opts.orchestrator
-            .board()
-            .then((b) => this.json(res, 200, b))
-            .catch((err) => this.json(res, 500, { error: { code: "board_failed", message: String(err) } }));
-          return;
+          return this.json(res, 200, {
+            projects: this.opts.manager.list(),
+            can_add: this.opts.manager.canAdd(),
+            default: this.opts.manager.firstId(),
+          });
         }
         if (method !== "POST") return this.methodNotAllowed(res);
-        if (!this.opts.orchestrator.canCreateIssues()) {
-          return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support creating issues" } });
+        void this.addProject(req, res);
+        return;
+      }
+
+      // Everything else is project-scoped: /api/v1/projects/<pid>/<rest>.
+      const scoped = pathname.match(/^\/api\/v1\/projects\/([^/]+)(\/.*)?$/);
+      if (scoped) {
+        const pid = decodeURIComponent(scoped[1]!);
+        const rest = scoped[2] ?? "/";
+        const project = this.opts.manager.get(pid);
+        if (!project) {
+          return this.json(res, 404, { error: { code: "project_not_found", message: `unknown project ${pid}` } });
         }
-        void this.createIssue(req, res);
-        return;
+        return this.routeProject(project.orchestrator, rest, req, res, method);
       }
-      const stateMatch = pathname.match(/^\/api\/v1\/issues\/([^/]+)\/state$/);
-      if (stateMatch) {
-        if (method !== "POST") return this.methodNotAllowed(res);
-        if (!this.opts.orchestrator.canBoard()) {
-          return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support changing state" } });
-        }
-        void this.setState(decodeURIComponent(stateMatch[1]!), req, res);
-        return;
-      }
-      const agentMatch = pathname.match(/^\/api\/v1\/issues\/([^/]+)\/agent$/);
-      if (agentMatch) {
-        if (method !== "POST") return this.methodNotAllowed(res);
-        void this.setIssueAgent(decodeURIComponent(agentMatch[1]!), req, res);
-        return;
-      }
-      if (pathname === "/api/v1/default-agent") {
-        if (method !== "POST") return this.methodNotAllowed(res);
-        void this.setDefaultAgent(req, res);
-        return;
-      }
-      const m = pathname.match(/^\/api\/v1\/([^/]+)$/);
-      if (m) {
-        if (method !== "GET") return this.methodNotAllowed(res);
-        const identifier = decodeURIComponent(m[1]!);
-        void this.opts.orchestrator
-          .issueDetailFor(identifier)
-          .then((detail) => {
-            if (!detail) {
-              return this.json(res, 404, { error: { code: "issue_not_found", message: `unknown issue ${identifier}` } });
-            }
-            this.json(res, 200, detail);
-          })
-          .catch((err) => this.json(res, 500, { error: { code: "detail_failed", message: String(err) } }));
-        return;
-      }
+
       this.json(res, 404, { error: { code: "not_found", message: "no such route" } });
     } catch (err) {
       this.opts.logger.warn("http handler error", { error: String(err) });
@@ -128,7 +103,114 @@ export class SymphonyHttpServer {
     }
   }
 
-  private async createIssue(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  /** Which project the console shell should paint first: ?project=… if valid, else the first. */
+  private selectedId(url: URL): string {
+    const requested = url.searchParams.get("project");
+    if (requested && this.opts.manager.get(requested)) return requested;
+    return this.opts.manager.firstId();
+  }
+
+  /** Dispatch a project-scoped sub-path against one Orchestrator (mirrors the flat v1 API). */
+  private routeProject(
+    orch: Orchestrator,
+    rest: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    method: string,
+  ): void {
+    if (rest === "/state" && method === "GET") {
+      return this.json(res, 200, orch.snapshot());
+    }
+    if (rest === "/refresh") {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      const r = orch.requestRefresh();
+      return this.json(res, 202, {
+        queued: r.queued,
+        coalesced: r.coalesced,
+        requested_at: new Date().toISOString(),
+        operations: ["poll", "reconcile"],
+      });
+    }
+    if (rest === "/issues") {
+      if (method === "GET") {
+        if (!orch.canBoard()) {
+          return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support a board view" } });
+        }
+        void orch
+          .board()
+          .then((b) => this.json(res, 200, b))
+          .catch((err) => this.json(res, 500, { error: { code: "board_failed", message: String(err) } }));
+        return;
+      }
+      if (method !== "POST") return this.methodNotAllowed(res);
+      if (!orch.canCreateIssues()) {
+        return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support creating issues" } });
+      }
+      void this.createIssue(orch, req, res);
+      return;
+    }
+    const stateMatch = rest.match(/^\/issues\/([^/]+)\/state$/);
+    if (stateMatch) {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      if (!orch.canBoard()) {
+        return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support changing state" } });
+      }
+      void this.setState(orch, decodeURIComponent(stateMatch[1]!), req, res);
+      return;
+    }
+    const agentMatch = rest.match(/^\/issues\/([^/]+)\/agent$/);
+    if (agentMatch) {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      void this.setIssueAgent(orch, decodeURIComponent(agentMatch[1]!), req, res);
+      return;
+    }
+    if (rest === "/default-agent") {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      void this.setDefaultAgent(orch, req, res);
+      return;
+    }
+    const m = rest.match(/^\/([^/]+)$/);
+    if (m) {
+      if (method !== "GET") return this.methodNotAllowed(res);
+      const identifier = decodeURIComponent(m[1]!);
+      void orch
+        .issueDetailFor(identifier)
+        .then((detail) => {
+          if (!detail) {
+            return this.json(res, 404, { error: { code: "issue_not_found", message: `unknown issue ${identifier}` } });
+          }
+          this.json(res, 200, detail);
+        })
+        .catch((err) => this.json(res, 500, { error: { code: "detail_failed", message: String(err) } }));
+      return;
+    }
+    this.json(res, 404, { error: { code: "not_found", message: "no such route" } });
+  }
+
+  private async addProject(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.opts.manager.canAdd()) {
+      return this.json(res, 501, { error: { code: "not_supported", message: "adding projects requires a projects manifest" } });
+    }
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    const workflow = typeof body.workflow === "string" ? body.workflow.trim() : "";
+    if (!workflow) return this.json(res, 400, { error: { code: "bad_request", message: "workflow path is required" } });
+    try {
+      const project = await this.opts.manager.add({
+        name: typeof body.name === "string" ? body.name : undefined,
+        workflow,
+      });
+      this.json(res, 201, { created: true, project });
+    } catch (err) {
+      this.json(res, 400, { error: { code: "add_failed", message: String((err as Error).message ?? err) } });
+    }
+  }
+
+  private async createIssue(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
@@ -136,7 +218,7 @@ export class SymphonyHttpServer {
       return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
     }
     try {
-      const issue = await this.opts.orchestrator.createIssue({
+      const issue = await orch.createIssue({
         identifier: String(body.identifier ?? ""),
         title: String(body.title ?? ""),
         description: typeof body.description === "string" ? body.description : null,
@@ -150,7 +232,7 @@ export class SymphonyHttpServer {
     }
   }
 
-  private async setState(id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async setState(orch: Orchestrator, id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
@@ -160,14 +242,14 @@ export class SymphonyHttpServer {
     const state = typeof body.state === "string" ? body.state : "";
     if (!state) return this.json(res, 400, { error: { code: "bad_request", message: "state is required" } });
     try {
-      const issue = await this.opts.orchestrator.setIssueState(id, state);
+      const issue = await orch.setIssueState(id, state);
       this.json(res, 200, { updated: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
     } catch (err) {
       this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
     }
   }
 
-  private async setIssueAgent(id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async setIssueAgent(orch: Orchestrator, id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
@@ -176,14 +258,14 @@ export class SymphonyHttpServer {
     }
     const agent = typeof body.agent === "string" ? body.agent : "";
     try {
-      const issue = await this.opts.orchestrator.setIssueAgent(id, agent);
+      const issue = await orch.setIssueAgent(id, agent);
       this.json(res, 200, { updated: true, issue: { id: issue.id, identifier: issue.identifier, agent: issue.agent } });
     } catch (err) {
       this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
     }
   }
 
-  private async setDefaultAgent(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async setDefaultAgent(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
@@ -192,8 +274,8 @@ export class SymphonyHttpServer {
     }
     const kind = typeof body.kind === "string" ? body.kind : "";
     try {
-      this.opts.orchestrator.setDefaultAgent(kind);
-      this.json(res, 200, { updated: true, default_agent: this.opts.orchestrator.effectiveDefaultAgent() });
+      orch.setDefaultAgent(kind);
+      this.json(res, 200, { updated: true, default_agent: orch.effectiveDefaultAgent() });
     } catch (err) {
       this.json(res, 400, { error: { code: "update_failed", message: String((err as Error).message ?? err) } });
     }

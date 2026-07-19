@@ -231,6 +231,11 @@ export class Orchestrator {
 
   // ---- agent selection ----
 
+  /** This project's configured server.port (SPEC §13.7), or null. Used only for the host's default bind. */
+  serverPort(): number | null {
+    return this.config.server_port;
+  }
+
   /** The effective default agent backend (runtime override wins over WORKFLOW.md). */
   effectiveDefaultAgent(): string {
     if (this.defaultAgentOverride && isSupportedAgentKind(this.defaultAgentOverride)) return this.defaultAgentOverride;
@@ -799,6 +804,9 @@ export class Orchestrator {
         seconds_running: round1(this.codex_totals.seconds_running + activeSeconds),
       },
       rate_limits: this.codex_rate_limits,
+      // Rate limits are reported only by the codex app-server today; attribute the
+      // panel so it never reads as a generic, unowned metric.
+      rate_limits_agent: this.codex_rate_limits ? "codex" : null,
       meta: {
         tracker_kind: this.config.tracker.kind,
         tracker_kinds: [...TRACKER_KINDS],
@@ -950,6 +958,7 @@ export interface SnapshotView {
   retrying: unknown[];
   codex_totals: { input_tokens: number; output_tokens: number; total_tokens: number; seconds_running: number };
   rate_limits: unknown;
+  rate_limits_agent: string | null;
   meta: {
     tracker_kind: string;
     tracker_kinds: string[];

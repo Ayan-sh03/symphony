@@ -14,6 +14,7 @@ It ships with an operational web console. The full contract lives in `SPEC.md`;
 ```bash
 npm start                    # runs ./WORKFLOW.md; add --port N for the console
 node src/index.ts <workflow> --port 8420
+node src/index.ts --projects symphony.projects.json --port 8420   # multi-project
 npm test                     # node --test (the whole suite)
 npm run typecheck            # tsc --noEmit
 ```
@@ -50,10 +51,23 @@ backend by implementing the interface and registering it; no other layer changes
 - **Trackers** — `src/tracker/registry.ts`. Implement the adapter, add its kind.
   Currently `file` (`fileAdapter.ts`).
 
-The console is `src/server/dashboard.ts`: a single `renderDashboard(snapshot)`
-returning self-contained HTML with inlined CSS + a vanilla-JS IIFE (hash-routed:
-`#/`, `#/issue/<id>`, `#/new`, `#/integrate`). It polls `/api/v1/state` and
-`/api/v1/issues`. No framework, no bundler.
+**Projects (multi-project host layer, `src/project/`).** A project is one
+`WORKFLOW.md` anchored at a cwd (its issues + workspace resolve relative to that
+dir, so distinct dirs are isolated). `ProjectManager` (`manager.ts`) owns one
+independent, SPEC-conformant `Orchestrator` + `WorkflowWatcher` per project and
+runs them all concurrently. Projects come from a persistent manifest
+(`manifest.ts`, `symphony.projects.json` = `{id,name,workflow}[]`); the console can
+append one at runtime. With no `--projects` flag / manifest, the host runs a single
+`default` project (back-compat). This is a host extension above the single-workflow
+SPEC — the orchestrator itself is unchanged and unaware of projects.
+
+The console is `src/server/dashboard.ts`: a single `renderDashboard(bootstrap)`
+returning self-contained HTML with inlined CSS + a vanilla-JS IIFE. It is
+project-scoped: routes are hash-routed under a project id (`#/<pid>`,
+`#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`, `#/<pid>/add-project`), a
+header `<select>` switches projects (persisted in `localStorage`), and every fetch
+hits `/api/v1/projects/<pid>/…` (`state`, `issues`, `refresh`, `<identifier>`, …).
+`/api/v1/projects` lists/creates projects. No framework, no bundler.
 
 ## Conventions
 
