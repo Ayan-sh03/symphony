@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import { readCodexTranscript } from "../src/agent/codexTranscript.ts";
@@ -65,28 +66,29 @@ test("readCodexTranscript returns [] when no rollout matches the workspace", asy
   }
 });
 
-test("readOpencodeTranscript maps storage messages+parts onto activity events", async () => {
+test("readOpencodeTranscript maps db messages+parts onto activity events", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "oc-data-"));
+  const dataDir = path.join(root, "opencode");
+  await fs.mkdir(dataDir, { recursive: true });
   const ws = path.join(root, "ws", "SYM-3");
-  const storage = path.join(root, "opencode", "storage");
   const sid = "ses_abc";
   const mid = "msg_1";
-  await fs.mkdir(path.join(storage, "session", "global"), { recursive: true });
-  await fs.mkdir(path.join(storage, "message", sid), { recursive: true });
-  await fs.mkdir(path.join(storage, "part", mid), { recursive: true });
-  await fs.writeFile(path.join(storage, "session", "global", sid + ".json"),
-    JSON.stringify({ id: sid, directory: ws, time: { updated: 2 } }));
-  await fs.writeFile(path.join(storage, "message", sid, mid + ".json"),
-    JSON.stringify({ id: mid, role: "assistant", time: { created: 1000 } }));
-  await fs.writeFile(path.join(storage, "part", mid, "prt_1.json"),
-    JSON.stringify({ type: "text", text: "hi" }));
-  await fs.writeFile(path.join(storage, "part", mid, "prt_2.json"),
-    JSON.stringify({ type: "tool", tool: "bash", state: { input: { command: "ls" } } }));
-  await fs.writeFile(path.join(storage, "part", mid, "prt_3.json"),
-    JSON.stringify({ type: "tool", tool: "write", state: { input: { filePath: path.join(ws, "A.md") } } }));
+
+  const db = new DatabaseSync(path.join(dataDir, "opencode.db"));
+  db.exec("CREATE TABLE session (id TEXT, directory TEXT, time_updated INTEGER)");
+  db.exec("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+  db.exec("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+  db.prepare("INSERT INTO session VALUES (?, ?, ?)").run(sid, ws.replace(/\\/g, "/"), 2);
+  db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run(mid, sid, 1000, JSON.stringify({ id: mid, role: "assistant" }));
+  const part = (id: string, tc: number, data: unknown) =>
+    db.prepare("INSERT INTO part VALUES (?, ?, ?, ?, ?)").run(id, mid, sid, tc, JSON.stringify(data));
+  part("prt_1", 1, { type: "text", text: "hi" });
+  part("prt_2", 2, { type: "tool", tool: "bash", state: { input: { command: "ls" } } });
+  part("prt_3", 3, { type: "tool", tool: "write", state: { input: { filePath: path.join(ws, "A.md") } } });
+  db.close();
 
   const prev = process.env.OPENCODE_DATA_DIR;
-  process.env.OPENCODE_DATA_DIR = path.join(root, "opencode");
+  process.env.OPENCODE_DATA_DIR = dataDir;
   try {
     const events = await readOpencodeTranscript(query(ws));
     assert.deepEqual(events.map((e) => e.event), ["session_started", "agent_message", "command", "file_change"]);

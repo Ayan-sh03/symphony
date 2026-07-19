@@ -1,24 +1,27 @@
 /**
  * Read opencode's own persisted transcript (the `readTranscript` capability for the
- * opencode backend). opencode stores each session under its data dir as
- * `storage/session/<project>/<sessionID>.json` (whose `directory` is our per-issue
- * workspace), with messages in `storage/message/<sessionID>/*.json` and their content
- * in `storage/part/<messageID>/*.json`. We resolve the session for a workspace/session
- * and map its parts onto the console's activity-log vocabulary. Best-effort, never throws.
+ * opencode backend). Recent opencode versions store everything in a single SQLite
+ * database at `<dataDir>/opencode.db` (the older `storage/*.json` tree is abandoned
+ * after the `migration` marker flips). Sessions live in the `session` table (whose
+ * `directory` column is our per-issue workspace), messages in `message.data`, and
+ * their content in `part.data` — each a JSON blob matching the old on-disk shapes.
+ * We resolve the session for a workspace/session id and map its parts onto the
+ * console's activity-log vocabulary. Best-effort, never throws.
  */
-import { promises as fs } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import type { TranscriptEvent, TranscriptQuery } from "./types.ts";
 
-function opencodeStorage(): string {
+/** The opencode data dir; its `opencode.db` holds the migrated transcript store. */
+function opencodeDataDir(): string {
   if (process.env.OPENCODE_DATA_DIR && process.env.OPENCODE_DATA_DIR.trim()) {
-    return path.join(process.env.OPENCODE_DATA_DIR, "storage");
+    return process.env.OPENCODE_DATA_DIR;
   }
   const dataHome = process.env.XDG_DATA_HOME && process.env.XDG_DATA_HOME.trim()
     ? process.env.XDG_DATA_HOME
     : path.join(os.homedir(), ".local", "share");
-  return path.join(dataHome, "opencode", "storage");
+  return path.join(dataHome, "opencode");
 }
 
 function samePath(a: string, b: string): boolean {
@@ -30,51 +33,14 @@ function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
-async function readJson(file: string): Promise<Record<string, unknown> | null> {
+function parseJson(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== "string") return null;
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+    const o = JSON.parse(v);
+    return o && typeof o === "object" ? (o as Record<string, unknown>) : null;
   } catch {
     return null;
   }
-}
-
-async function listFiles(dir: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    return entries.filter((e) => e.isFile() && e.name.endsWith(".json")).map((e) => path.join(dir, e.name));
-  } catch {
-    return [];
-  }
-}
-
-/** Resolve the sessionID whose session record points at this workspace. */
-async function resolveSessionId(storage: string, query: TranscriptQuery): Promise<string | null> {
-  const sessionRoot = path.join(storage, "session");
-  let projects: import("node:fs").Dirent[];
-  try {
-    projects = await fs.readdir(sessionRoot, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const matches: { id: string; updated: number }[] = [];
-  for (const proj of projects) {
-    if (!proj.isDirectory()) continue;
-    for (const file of await listFiles(path.join(sessionRoot, proj.name))) {
-      const rec = await readJson(file);
-      if (!rec) continue;
-      const id = typeof rec.id === "string" ? rec.id : null;
-      if (!id) continue;
-      if (query.sessionId && id === query.sessionId) return id;
-      const dir = typeof rec.directory === "string" ? rec.directory : "";
-      if (dir && samePath(dir, query.workspacePath)) {
-        const time = (rec.time ?? {}) as Record<string, unknown>;
-        matches.push({ id, updated: typeof time.updated === "number" ? time.updated : 0 });
-      }
-    }
-  }
-  if (!matches.length) return null;
-  matches.sort((a, b) => b.updated - a.updated); // newest run for the workspace
-  return matches[0]!.id;
 }
 
 function basename(v: unknown): string {
@@ -98,40 +64,58 @@ function mapPart(part: Record<string, unknown>): { event: string; message: strin
   return null; // step-start, step-finish (tokens)
 }
 
+/** Resolve the session id whose record points at this workspace (newest run wins). */
+function resolveSessionId(db: DatabaseSync, query: TranscriptQuery): string | null {
+  if (query.sessionId) {
+    const row = db.prepare("SELECT id FROM session WHERE id = ?").get(query.sessionId) as { id?: string } | undefined;
+    if (row && typeof row.id === "string") return row.id;
+  }
+  const rows = db
+    .prepare("SELECT id, directory FROM session WHERE directory IS NOT NULL ORDER BY time_updated DESC")
+    .all() as { id: string; directory: string }[];
+  for (const r of rows) {
+    if (samePath(r.directory, query.workspacePath)) return r.id;
+  }
+  return null;
+}
+
 export async function readOpencodeTranscript(query: TranscriptQuery): Promise<TranscriptEvent[]> {
-  const storage = opencodeStorage();
-  const sessionId = await resolveSessionId(storage, query);
-  if (!sessionId) return [];
-
-  const msgFiles = await listFiles(path.join(storage, "message", sessionId));
-  if (!msgFiles.length) return [];
-
-  const messages: { id: string; role: string; created: number }[] = [];
-  for (const f of msgFiles) {
-    const rec = await readJson(f);
-    if (!rec || typeof rec.id !== "string") continue;
-    const time = (rec.time ?? {}) as Record<string, unknown>;
-    messages.push({
-      id: rec.id,
-      role: typeof rec.role === "string" ? rec.role : "",
-      created: typeof time.created === "number" ? time.created : 0,
-    });
+  const dbPath = path.join(opencodeDataDir(), "opencode.db");
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+  } catch {
+    return []; // no db yet (fresh install or still on the file-based layout)
   }
-  messages.sort((a, b) => a.created - b.created);
+  try {
+    const sessionId = resolveSessionId(db, query);
+    if (!sessionId) return [];
 
-  const events: TranscriptEvent[] = [];
-  if (messages.length) events.push({ at: new Date(messages[0]!.created).toISOString(), event: "session_started", message: "" });
+    const messages = db
+      .prepare("SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created")
+      .all(sessionId) as { id: string; time_created: number; data: string }[];
+    if (!messages.length) return [];
 
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue; // the user role carries the prompt, not activity
-    const at = new Date(msg.created).toISOString();
-    const partFiles = (await listFiles(path.join(storage, "part", msg.id))).sort(); // ids are time-ordered
-    for (const pf of partFiles) {
-      const part = await readJson(pf);
-      if (!part) continue;
-      const mapped = mapPart(part);
-      if (mapped) events.push({ at, event: mapped.event, message: mapped.message });
+    const events: TranscriptEvent[] = [];
+    events.push({ at: new Date(messages[0]!.time_created).toISOString(), event: "session_started", message: "" });
+
+    const partsFor = db.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id");
+    for (const msg of messages) {
+      const rec = parseJson(msg.data);
+      if (!rec || rec.role !== "assistant") continue; // the user role carries the prompt, not activity
+      const at = new Date(msg.time_created).toISOString();
+      const parts = partsFor.all(msg.id) as { data: string }[];
+      for (const p of parts) {
+        const part = parseJson(p.data);
+        if (!part) continue;
+        const mapped = mapPart(part);
+        if (mapped) events.push({ at, event: mapped.event, message: mapped.message });
+      }
     }
+    return events;
+  } catch {
+    return [];
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
   }
-  return events;
 }
