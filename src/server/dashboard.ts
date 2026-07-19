@@ -107,7 +107,8 @@ header.bar {
 }
 .bar-inner { max-width: 1180px; margin: 0 auto; padding: 14px 24px;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.brand { display: flex; align-items: center; gap: 10px; margin-right: auto;
+.hgroup { display: flex; align-items: center; gap: 14px; margin-right: auto; min-width: 0; }
+.brand { display: flex; align-items: center; gap: 10px;
   background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; }
 .brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 .brand .glyph { display: inline-flex; color: var(--accent); }
@@ -303,7 +304,39 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   padding: 9px 11px; width: 100%; transition: border-color .12s var(--ease); }
 .textarea { resize: vertical; min-height: 76px; line-height: 1.5; }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--accent); }
-.select.proj { width: auto; max-width: 190px; padding: 7px 11px; font-size: 13px; font-weight: 550; }
+/* Project switcher (custom dropdown so a background poll can't collapse it) */
+.proj-switch { position: relative; min-width: 0; }
+.proj-btn { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; max-width: 240px;
+  display: inline-flex; align-items: center; gap: 8px; color: var(--ink);
+  border: 1px solid var(--border-strong); background: var(--panel-2);
+  padding: 7px 10px 7px 11px; border-radius: 8px;
+  transition: border-color .12s var(--ease), background .12s var(--ease); }
+.proj-btn:hover { border-color: var(--border-strong); background: var(--panel); }
+.proj-btn[aria-expanded="true"] { border-color: var(--accent); background: var(--panel); }
+.proj-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.proj-btn .plabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-btn .caret { color: var(--faint); flex: none; transition: transform .16s var(--ease); }
+.proj-btn[aria-expanded="true"] .caret { transform: rotate(180deg); }
+.pdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.proj-menu { position: absolute; top: calc(100% + 7px); left: 0; z-index: 40; min-width: 232px;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 11px;
+  box-shadow: var(--shadow); padding: 6px; display: none; }
+.proj-menu.open { display: block; animation: popin .15s var(--ease); }
+@keyframes popin { from { opacity: 0; transform: translateY(-5px) scale(.985); } }
+.proj-cap { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--faint); padding: 6px 10px 4px; }
+.proj-item { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+  font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink);
+  background: none; border: 0; padding: 8px 10px; border-radius: 7px; }
+.proj-item:hover, .proj-item:focus-visible { background: var(--panel-2); outline: none; }
+.proj-item[aria-current="true"] { color: var(--accent); font-weight: 600; }
+.proj-item .pdot { background: var(--accent-soft); }
+.proj-item[aria-current="true"] .pdot { background: var(--accent); }
+.proj-item .tick { margin-left: auto; color: var(--accent); opacity: 0; flex: none; }
+.proj-item[aria-current="true"] .tick { opacity: 1; }
+.proj-item.add { color: var(--muted); border-top: 1px solid var(--border); border-radius: 0;
+  margin-top: 5px; padding-top: 11px; }
+.proj-item.add:hover { color: var(--ink); background: none; }
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }
@@ -342,6 +375,7 @@ const JS = String.raw`
   // The server inlines a snapshot for boot.selected; if we restored a different project, fetch fresh.
   var state = (pid === boot.selected) ? (boot.snapshot || null) : null;
   var board = null;
+  var projMenuOpen = false; // custom switcher dropdown; guards render so a poll can't collapse it
   var auto = true;
   var lastOk = Date.now();
   var conn = "live"; // live | stale | down
@@ -735,18 +769,44 @@ const JS = String.raw`
 
   function projectSwitcher() {
     if (projects.length <= 1 && !canAdd) return "";
-    var opts = projects.map(function (p) {
-      return '<option value="' + esc(p.id) + '"' + (p.id === pid ? " selected" : "") + ">" + esc(p.name) + "</option>";
+    var cur = null;
+    for (var i = 0; i < projects.length; i++) if (projects[i].id === pid) cur = projects[i];
+    var label = cur ? cur.name : pid;
+    var items = projects.map(function (p) {
+      return '<button class="proj-item" role="menuitem" data-pick="' + esc(p.id) + '" aria-current="' + (p.id === pid) + '">'
+        + '<span class="pdot"></span><span>' + esc(p.name) + "</span>"
+        + '<svg class="tick" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
+        + "</button>";
     }).join("");
-    if (canAdd) opts += '<option value="__add__">＋ Add project…</option>';
-    return '<select class="select proj" data-project aria-label="Project">' + opts + "</select>";
+    if (canAdd) items += '<button class="proj-item add" role="menuitem" data-pick="__add__">＋ Add project…</button>';
+    return '<div class="proj-switch">'
+      + '<button class="proj-btn" type="button" data-proj-toggle aria-haspopup="menu" aria-expanded="' + projMenuOpen + '" aria-label="Switch project">'
+      +   '<span class="pdot"></span><span class="plabel">' + esc(label) + "</span>"
+      +   '<svg class="caret" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>'
+      + "</button>"
+      + '<div class="proj-menu' + (projMenuOpen ? " open" : "") + '" role="menu">'
+      +   '<div class="proj-cap">Project</div>' + items
+      + "</div></div>";
+  }
+  function closeProjMenu() {
+    if (!projMenuOpen) return;
+    projMenuOpen = false;
+    var m = $(".proj-menu"); if (m) m.classList.remove("open");
+    var b = $("[data-proj-toggle]"); if (b) b.setAttribute("aria-expanded", "false");
+  }
+  function toggleProjMenu() {
+    projMenuOpen = !projMenuOpen;
+    var m = $(".proj-menu"); if (m) m.classList.toggle("open", projMenuOpen);
+    var b = $("[data-proj-toggle]"); if (b) b.setAttribute("aria-expanded", projMenuOpen);
   }
   function headerHtml(m) {
     var themeIcon = document.documentElement.getAttribute("data-theme") === "dark" ? "◐" : "◑";
     var onBoard = route.name === "board";
     return '<header class="bar"><div class="bar-inner">'
-    +   '<button class="brand" data-nav="' + hashFor("board") + '" aria-label="Symphony home"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></button>'
-    +   projectSwitcher()
+    +   '<div class="hgroup">'
+    +     '<button class="brand" data-nav="' + hashFor("board") + '" aria-label="Symphony home"><span class="glyph"><svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10.5v3.5M7 6v8M11 3v12M15 8v6"/></svg></span><h1>Symphony</h1><span class="tag">orchestration console</span></button>'
+    +     projectSwitcher()
+    +   '</div>'
     +   '<span class="status ' + conn + '"><span class="dot"></span><span class="txt"></span></span>'
     +   (m.can_create ? '<button class="btn primary" data-nav="' + hashFor("new") + '"' + (route.name === "new" ? ' aria-pressed="true"' : "") + '>＋ New issue</button>' : "")
     +   (onBoard ? '<button class="btn" data-act="poll">▸ Poll now</button>' : "")
@@ -835,6 +895,9 @@ const JS = String.raw`
   function render(forceRender) {
     if (!state) return;
     var m = state.meta || {};
+    // The switcher menu is open: a background poll must not rebuild the header and
+    // collapse it out from under the user. Skip the rebuild until it closes.
+    if (!forceRender && projMenuOpen && $(".proj-menu")) { paintStatus(); return; }
     // Never rebuild a form out from under the user mid-typing.
     if (route.name === "new" && $("#newform")) { paintStatus(); return; }
     if (route.name === "add-project" && $("#addprojform")) { paintStatus(); return; }
@@ -970,6 +1033,17 @@ const JS = String.raw`
 
   // ---- events (delegated) ----
   document.addEventListener("click", function (e) {
+    // Project switcher: toggle, pick, or dismiss on outside click.
+    var pick = e.target.closest("[data-pick]");
+    if (pick) {
+      var v = pick.getAttribute("data-pick");
+      closeProjMenu();
+      if (v === "__add__") navigate(hashFor("add-project")); else switchProject(v);
+      return;
+    }
+    if (e.target.closest("[data-proj-toggle]")) { toggleProjMenu(); return; }
+    if (projMenuOpen && !e.target.closest(".proj-switch")) closeProjMenu();
+
     var nav = e.target.closest("[data-nav]");
     if (nav) { e.preventDefault(); navigate(nav.getAttribute("data-nav")); return; }
     var act = e.target.closest("[data-act]");
@@ -990,18 +1064,16 @@ const JS = String.raw`
     else if (e.target && e.target.id === "addprojform") submitAddProject(e);
   });
   document.addEventListener("change", function (e) {
-    var pp = e.target.closest("[data-project]");
-    if (pp) {
-      if (pp.value === "__add__") { pp.value = pid; navigate(hashFor("add-project")); return; }
-      switchProject(pp.value);
-      return;
-    }
     var da = e.target.closest("[data-default-agent]");
     if (da) { setDefaultAgent(da.value, da); return; }
     var ia = e.target.closest("[data-issue-agent]");
     if (ia) { setIssueAgent(ia.getAttribute("data-issue-agent"), ia.value, ia); return; }
   });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && route.name !== "board") goBoard(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (projMenuOpen) { closeProjMenu(); return; }
+    if (route.name !== "board") goBoard();
+  });
   window.addEventListener("hashchange", applyRoute);
 
   // Keep relative times honest between fetches without a full re-render.
