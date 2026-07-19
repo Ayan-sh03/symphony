@@ -79,13 +79,13 @@ export function setIssueAgent(id, agent, el) {
     .catch((ex) => { toast(String(ex.message || ex), "err"); if (el) el.disabled = false; });
 }
 
-export function stopRetry(id, btn) {
+export function stopIssue(id, btn) {
   if (btn) btn.classList.add("busy");
   fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/stop", { method: "POST" })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
     .then((res) => {
       if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
-      toast(res.j.issue_identifier + " retries stopped — change its state when ready", "ok");
+      toast(res.j.issue_identifier + " stopped — held until you change its state", "ok");
       return Promise.all([fetchState(), fetchBoard()]);
     })
     .catch((ex) => { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });

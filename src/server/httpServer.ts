@@ -185,9 +185,9 @@ export class SymphonyHttpServer {
     if (stopMatch) {
       if (method !== "POST") return this.methodNotAllowed(res);
       const id = decodeURIComponent(stopMatch[1]!);
-      const halt = orch.stopRetry(id);
+      const halt = orch.stopIssue(id);
       if (!halt) {
-        return this.json(res, 404, { error: { code: "no_pending_retry", message: `issue ${id} has no pending retry to stop` } });
+        return this.json(res, 404, { error: { code: "nothing_to_stop", message: `issue ${id} has no running session or pending retry to stop` } });
       }
       return this.json(res, 200, { stopped: true, issue_id: id, issue_identifier: halt.identifier, attempts: halt.attempts, reason: halt.reason });
     }

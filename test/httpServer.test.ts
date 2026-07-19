@@ -117,12 +117,12 @@ test("/ui/ rejects unknown assets, foreign extensions, and path traversal", asyn
   });
 });
 
-test("POST /issues/<id>/stop 404s when no retry is pending", async () => {
+test("POST /issues/<id>/stop 404s when nothing is running or retrying", async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/v1/projects/a/issues/A-1/stop`, { method: "POST" });
     assert.equal(res.status, 404);
     const body = (await res.json()) as any;
-    assert.equal(body.error.code, "no_pending_retry");
+    assert.equal(body.error.code, "nothing_to_stop");
 
     assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1/stop`)).status, 405);
   });

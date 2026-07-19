@@ -303,7 +303,7 @@ test("retries stop at max_retry_attempts and the issue halts until its state cha
   }
 });
 
-test("stopRetry cancels a pending retry and holds the issue for the operator", async () => {
+test("stopIssue cancels a pending retry and holds the issue for the operator", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
   const { wfPath, workflow, config } = setup("fail");
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
@@ -311,19 +311,71 @@ test("stopRetry cancels a pending retry and holds the issue for the operator", a
   try {
     const retried = await waitFor(() => orch.snapshot().counts.retrying >= 1);
     assert.ok(retried, "precondition: a retry is pending");
-    const halt = orch.stopRetry("T-1");
-    assert.ok(halt, "stopRetry should report the halted entry");
+    const halt = orch.stopIssue("T-1");
+    assert.ok(halt, "stopIssue should report the halted entry");
     assert.equal(halt!.reason, "stopped by operator");
     assert.equal(orch.snapshot().counts.retrying, 0, "pending retry is canceled");
     assert.equal(orch.snapshot().counts.halted, 1, "issue is held for the operator");
-    assert.equal(orch.stopRetry("T-1")!.reason, "stopped by operator", "stop is idempotent");
-    assert.equal(orch.stopRetry("NOPE-9"), null, "unknown issue → null");
+    assert.equal(orch.stopIssue("T-1")!.reason, "stopped by operator", "stop is idempotent");
+    assert.equal(orch.stopIssue("NOPE-9"), null, "unknown issue → null");
 
     // Held: refresh must not re-dispatch while the issue is still active.
     orch.requestRefresh();
     await new Promise((r) => setTimeout(r, 600));
     assert.equal(orch.snapshot().counts.running, 0, "stopped issue is not re-dispatched");
     assert.equal(orch.snapshot().counts.halted, 1);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("stopIssue terminates a running session and holds the issue for the operator", async () => {
+  // Agent whose turn never finishes on its own — only stop() settles it.
+  let release: (() => void) | null = null;
+  registerAgentFactory({
+    kind: "fake-hang",
+    create(opts: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() {
+          opts.onUpdate({ event: "session_started", timestamp: new Date().toISOString(), thread_id: "t1", turn_id: null });
+          return { threadId: "t1" };
+        },
+        runTurn() {
+          return new Promise((resolve) => {
+            release = () => resolve({ status: "failed", error: "session stopped" });
+          });
+        },
+        stop() { release?.(); },
+      };
+    },
+  });
+  const { wfPath } = setup("fail");
+  const src = fs.readFileSync(wfPath, "utf8").replace("kind: fake-fail", "kind: fake-hang");
+  fs.writeFileSync(wfPath, src);
+  const orch = new Orchestrator({ config: buildConfig(parseWorkflow(src), wfPath), workflow: parseWorkflow(src), workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const started = await waitFor(() => orch.snapshot().counts.running >= 1);
+    assert.ok(started, "precondition: a session is running");
+
+    const halt = orch.stopIssue("T-1");
+    assert.ok(halt, "stopIssue should report the halted entry");
+    assert.equal(halt!.reason, "stopped by operator");
+    const exited = await waitFor(() => orch.snapshot().counts.running === 0);
+    assert.ok(exited, "the running worker terminates");
+    assert.equal(orch.snapshot().counts.retrying, 0, "a stopped run schedules no retry");
+    assert.equal(orch.snapshot().counts.halted, 1, "issue is held for the operator");
+
+    // Held: refresh must not re-dispatch while the issue is still active.
+    orch.requestRefresh();
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(orch.snapshot().counts.running, 0, "stopped issue is not re-dispatched");
+
+    // A manual state change releases the hold.
+    await orch.setIssueState("T-1", "backlog");
+    assert.equal(orch.snapshot().counts.halted, 0, "state change clears the hold");
   } finally {
     orch.stop();
   }

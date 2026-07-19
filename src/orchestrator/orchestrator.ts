@@ -558,11 +558,17 @@ export class Orchestrator {
     if (lastError) entry.events.push({ at: new Date().toISOString(), event: "worker_failed", message: lastError });
     this.archiveLog(issueId, entry, outcome, lastError);
 
-    // Terminated by reconciliation: release claim, optional cleanup, no retry.
+    // Terminated: optional cleanup, no retry. An operator Stop halted the issue
+    // before terminating — keep its claim so it waits for a manual state change;
+    // a reconciliation terminate releases the claim as before.
     if (entry.terminating) {
       if (entry.terminating.cleanupWorkspace) void this.workspaceManager.cleanupForIssue(entry.identifier);
-      this.claimed.delete(issueId);
-      this.logger.info("run canceled by reconciliation", { issue_id: issueId, issue_identifier: entry.identifier });
+      if (this.halted.has(issueId)) {
+        this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
+      } else {
+        this.claimed.delete(issueId);
+        this.logger.info("run canceled by reconciliation", { issue_id: issueId, issue_identifier: entry.identifier });
+      }
       this.notify();
       return;
     }
@@ -623,10 +629,20 @@ export class Orchestrator {
     this.notify();
   }
 
-  /** Operator Stop (console/API): cancel a pending retry and hold the issue for a manual state change. */
-  stopRetry(issueId: string): HaltedEntry | null {
+  /**
+   * Operator Stop (console/API): terminate a running session or cancel a pending
+   * retry, then hold the issue for a manual state change.
+   */
+  stopIssue(issueId: string): HaltedEntry | null {
     const existing = this.halted.get(issueId);
     if (existing) return existing; // idempotent
+    const run = this.running.get(issueId);
+    if (run) {
+      // Halt before terminating so onWorkerExit sees the hold and keeps the claim.
+      this.halt(issueId, run.identifier, "stopped by operator", run.retry_attempt ?? 0);
+      this.terminateRunning(issueId, false);
+      return this.halted.get(issueId) ?? null;
+    }
     const r = this.retry_attempts.get(issueId);
     if (!r) return null;
     this.halt(issueId, r.identifier, "stopped by operator", r.attempt);

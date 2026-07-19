@@ -49,7 +49,7 @@ You see:
 
 ### Retries
 
-A failed run retries with exponential backoff. Retries stop after `agent.max_retry_attempts` (default 3; `0` = unlimited). Press **Stop** to cancel a pending retry early. A stopped issue is held — it does not re-dispatch until you change its state (**Hold** or **Retry**).
+A failed run retries with exponential backoff. Retries stop after `agent.max_retry_attempts` (default 3; `0` = unlimited). Press **Stop** to end a running session or cancel a pending retry. A stopped issue is held — it does not re-dispatch until you change its state (**Hold** or **Retry**). **Hold** on a running issue stops the session and parks it in the backlog.
 
 Click any issue to open its detail drawer. It shows a timestamped **activity log**. The log includes agent messages, shell commands, file edits, and turn lifecycle. Logs stream while a run is active. They are kept after the run finishes.
 
@@ -70,7 +70,7 @@ All issue routes are scoped by project id: `/api/v1/projects/<pid>/…`. A singl
 | `/api/v1/projects/<pid>/issues` | GET | Get all issues (board) |
 | `/api/v1/projects/<pid>/issues` | POST | Create issue: `{ "identifier": "SYM-3", "title": "...", "state": "backlog" }` |
 | `/api/v1/projects/<pid>/issues/<id>/state` | POST | Change state: `{"state":"todo"}` |
-| `/api/v1/projects/<pid>/issues/<id>/stop` | POST | Cancel a pending retry; hold the issue for a manual state change |
+| `/api/v1/projects/<pid>/issues/<id>/stop` | POST | Stop a running session or pending retry; hold the issue for a manual state change |
 | `/api/v1/projects/<pid>/refresh` | POST | Poll now |
 
 Hand-editing JSON files in `issues/` also works.

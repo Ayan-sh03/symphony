@@ -43,7 +43,9 @@ function boardRow(i, b, m) {
     ? html`<a class="bkey" href=${i.url} target="_blank" rel="noopener" @click=${stop}>${i.identifier}</a>`
     : html`<span class="bkey">${i.identifier}</span>`;
   let actions;
-  if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>`;
+  if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>
+    <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"} title="Stop the session and park this issue in the backlog">Hold</button>
+    <button class="btn sm" data-stop-id=${i.id} title="Stop the running session and hold this issue">■ Stop</button>`;
   else if (i.runtime === "retrying") actions = html`<span class="run-ind">retry queued</span>
     <button class="btn sm" data-stop-id=${i.id} title="Cancel the pending retry and hold this issue">■ Stop</button>`;
   else if (i.runtime === "halted") actions = html`<span class="run-ind" title=${i.halt_reason || ""}>■ stopped</span>
@@ -80,7 +82,7 @@ function boardSection(m) {
 
 function runningTable(rows) {
   return html`<div class="panel tscroll"><table><thead><tr>
-    <th>Issue</th><th>State</th><th>Last event</th><th class="num">Turns</th><th class="num">Tokens</th><th>Elapsed</th><th>Updated</th>
+    <th>Issue</th><th>State</th><th>Last event</th><th class="num">Turns</th><th class="num">Tokens</th><th>Elapsed</th><th>Updated</th><th></th>
     </tr></thead><tbody>${repeat(rows, (r) => r.issue_identifier, (r) => {
       const tok = r.tokens || {};
       return html`<tr class="clk" data-open=${r.issue_identifier}>
@@ -92,7 +94,8 @@ function runningTable(rows) {
         <td class="num">${r.turn_count}</td>
         <td class="num">${nfmt(tok.total_tokens)}</td>
         <td class="sub">${dur(r.started_at)}</td>
-        <td class="sub">${ago(r.last_event_at)}</td></tr>`;
+        <td class="sub">${ago(r.last_event_at)}</td>
+        <td><button class="btn sm" data-stop-id=${r.issue_id} title="Stop the running session and hold this issue">■ Stop</button></td></tr>`;
     })}</tbody></table></div>`;
 }
 
