@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { WorkspaceManager, workspaceKey, WorkspaceError } from "../src/workspace/manager.ts";
 import { Logger } from "../src/logger.ts";
 
@@ -77,3 +78,29 @@ test("cleanup removes workspace", async () => {
   await wm.cleanupForIssue("CL-1");
   assert.ok(!fs.existsSync(ws.path));
 });
+function initRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "sym-repo-"));
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Symphony test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n");
+  execFileSync("git", ["-C", repo, "add", "README.md"]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "initial"]);
+  return repo;
+}
+
+test("git worktree cleanup retains the issue branch and its committed work", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("DELIVERY-1");
+  assert.equal(execFileSync("git", ["-C", ws.path, "branch", "--show-current"], { encoding: "utf8" }).trim(), "issue/DELIVERY-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "kept by the branch\n");
+  execFileSync("git", ["-C", ws.path, "add", "delivered.txt"]);
+  execFileSync("git", ["-C", ws.path, "commit", "-qm", "deliver issue work"]);
+  await wm.cleanupForIssue("DELIVERY-1");
+  assert.ok(!fs.existsSync(ws.path), "the disposable worktree is removed");
+  assert.match(execFileSync("git", ["-C", repo, "branch", "--list", "issue/DELIVERY-1"], { encoding: "utf8" }), /issue\/DELIVERY-1/);
+  assert.equal(execFileSync("git", ["-C", repo, "show", "issue/DELIVERY-1:delivered.txt"], { encoding: "utf8" }), "kept by the branch\n");
+});
+
