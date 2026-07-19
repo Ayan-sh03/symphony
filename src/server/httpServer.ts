@@ -8,11 +8,27 @@
  * per-project issue identifiers, which are only unique within a single tracker scope.
  */
 import http from "node:http";
+import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { Orchestrator } from "../orchestrator/orchestrator.ts";
 import type { ProjectManager } from "../project/manager.ts";
 import type { Logger } from "../logger.ts";
 import { renderDashboard } from "./dashboard.ts";
+
+/** Static roots for the console app: our ES modules plus the lit-html package served as-is. */
+const UI_ROOT = fileURLToPath(new URL("./ui/", import.meta.url));
+// `lit-html/directive.js` sits at the package root and is in the exports map (the
+// bare "lit-html" entry resolves to the node/ build, which is the wrong root).
+const LIT_ROOT = path.dirname(createRequire(import.meta.url).resolve("lit-html/directive.js"));
+const UI_TYPES: Record<string, string> = {
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
 
 export interface HttpServerOptions {
   manager: ProjectManager;
@@ -67,6 +83,13 @@ export class SymphonyHttpServer {
         });
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         res.end(html);
+        return;
+      }
+
+      // Console app assets (ES modules + CSS + vendored lit-html).
+      if (pathname.startsWith("/ui/")) {
+        if (method !== "GET") return this.methodNotAllowed(res);
+        void this.serveUi(pathname, res);
         return;
       }
 
@@ -185,6 +208,27 @@ export class SymphonyHttpServer {
       return;
     }
     this.json(res, 404, { error: { code: "not_found", message: "no such route" } });
+  }
+
+  /** Serve a console asset from disk (no caching: dev edits show on refresh; files are tiny). */
+  private async serveUi(pathname: string, res: http.ServerResponse): Promise<void> {
+    const rel = decodeURIComponent(pathname.slice("/ui/".length));
+    const vendor = rel.startsWith("vendor/lit-html/");
+    const root = vendor ? LIT_ROOT : UI_ROOT;
+    const sub = vendor ? rel.slice("vendor/lit-html/".length) : rel;
+    const abs = path.resolve(root, sub);
+    const inside = path.relative(root, abs);
+    const type = UI_TYPES[path.extname(abs).toLowerCase()];
+    if (!type || inside.startsWith("..") || path.isAbsolute(inside)) {
+      return this.json(res, 404, { error: { code: "not_found", message: "no such asset" } });
+    }
+    try {
+      const body = await fs.readFile(abs);
+      res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
+      res.end(body);
+    } catch {
+      this.json(res, 404, { error: { code: "not_found", message: "no such asset" } });
+    }
   }
 
   private async addProject(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

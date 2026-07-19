@@ -27,9 +27,10 @@ npm run typecheck            # tsc --noEmit
   properties (`constructor(private x)`), no namespaces. Declare fields explicitly.
 - ESM only (`"type":"module"`). Import Node builtins as `node:*`.
 - Runtime deps are intentionally minimal: `liquidjs` (prompt rendering,
-  `src/prompt/render.ts`) and `yaml` (workflow parsing, `src/workflow/loader.ts`).
-  Everything else is Node stdlib — prefer stdlib over adding a dependency.
-  Reading agent transcripts uses stdlib `node:sqlite` (`DatabaseSync`).
+  `src/prompt/render.ts`), `yaml` (workflow parsing, `src/workflow/loader.ts`), and
+  `lit-html` (console rendering, served to the browser as-is — never imported
+  server-side). Everything else is Node stdlib — prefer stdlib over adding a
+  dependency. Reading agent transcripts uses stdlib `node:sqlite` (`DatabaseSync`).
 
 ## Architecture
 
@@ -61,13 +62,19 @@ append one at runtime. With no `--projects` flag / manifest, the host runs a sin
 `default` project (back-compat). This is a host extension above the single-workflow
 SPEC — the orchestrator itself is unchanged and unaware of projects.
 
-The console is `src/server/dashboard.ts`: a single `renderDashboard(bootstrap)`
-returning self-contained HTML with inlined CSS + a vanilla-JS IIFE. It is
-project-scoped: routes are hash-routed under a project id (`#/<pid>`,
-`#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`, `#/<pid>/add-project`), a
-header `<select>` switches projects (persisted in `localStorage`), and every fetch
-hits `/api/v1/projects/<pid>/…` (`state`, `issues`, `refresh`, `<identifier>`, …).
-`/api/v1/projects` lists/creates projects. No framework, no bundler.
+The console is a small client-side app in `src/server/ui/` — plain browser ES
+modules rendered with **lit-html** (no bundler, no build step): the server serves
+the files from disk at `/ui/*` (`httpServer.ts`, which also maps
+`/ui/vendor/lit-html/*` onto `node_modules/lit-html`), and
+`src/server/dashboard.ts` is just the HTML shell with the first snapshot inlined.
+All painting goes through one unconditional lit render (`ui/app.js`); lit diffs the
+DOM in place, so background polls never wipe focus, open menus, or form input —
+**don't add render guards or manual DOM patching**, just update `ui/store.js` state
+and call `rerender()`. It is project-scoped: routes are hash-routed under a project
+id (`#/<pid>`, `#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`,
+`#/<pid>/add-project`), a header dropdown switches projects (persisted in
+`localStorage`), and every fetch hits `/api/v1/projects/<pid>/…` (`state`,
+`issues`, `refresh`, `<identifier>`, …). `/api/v1/projects` lists/creates projects.
 
 ## Conventions
 
@@ -80,6 +87,4 @@ hits `/api/v1/projects/<pid>/…` (`state`, `issues`, `refresh`, `<identifier>`,
 ## Windows notes (this is a Windows dev box)
 
 - Primary shell is PowerShell; a Bash tool is also available.
-- The mock/dashboard dev server captures CSS/JS at import — restart it to pick up
-  `dashboard.ts` edits.
 - `agent-browser` must be driven via PowerShell here (the bash node shim is broken).

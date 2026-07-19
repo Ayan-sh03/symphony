@@ -82,6 +82,41 @@ test("project-scoped state hits the right orchestrator; unknown project 404s", a
   });
 });
 
+test("console shell references the static app; /ui/ serves modules, css, and vendored lit-html", async () => {
+  await withServer(async (base) => {
+    const shell = await fetch(`${base}/`);
+    assert.equal(shell.status, 200);
+    const html = await shell.text();
+    assert.ok(html.includes('src="/ui/app.js"'));
+    assert.ok(html.includes('href="/ui/styles.css"'));
+    assert.ok(html.includes("window.__SYMPHONY__"));
+
+    const js = await fetch(`${base}/ui/app.js`);
+    assert.equal(js.status, 200);
+    assert.ok(js.headers.get("content-type")!.startsWith("text/javascript"));
+
+    const css = await fetch(`${base}/ui/styles.css`);
+    assert.equal(css.status, 200);
+    assert.ok(css.headers.get("content-type")!.startsWith("text/css"));
+
+    const lit = await fetch(`${base}/ui/vendor/lit-html/lit-html.js`);
+    assert.equal(lit.status, 200);
+    assert.ok(lit.headers.get("content-type")!.startsWith("text/javascript"));
+    const rep = await fetch(`${base}/ui/vendor/lit-html/directives/repeat.js`);
+    assert.equal(rep.status, 200);
+  });
+});
+
+test("/ui/ rejects unknown assets, foreign extensions, and path traversal", async () => {
+  await withServer(async (base) => {
+    assert.equal((await fetch(`${base}/ui/nope.js`)).status, 404);
+    assert.equal((await fetch(`${base}/ui/store.ts`)).status, 404);
+    assert.equal((await fetch(`${base}/ui/..%2F..%2Fpackage.json`)).status, 404);
+    assert.equal((await fetch(`${base}/ui/vendor/lit-html/..%2F..%2Fyaml/package.json`)).status, 404);
+    assert.equal((await fetch(`${base}/ui/app.js`, { method: "POST" })).status, 405);
+  });
+});
+
 test("board views are isolated per project", async () => {
   await withServer(async (base) => {
     const a = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
