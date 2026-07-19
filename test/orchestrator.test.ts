@@ -126,6 +126,9 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
     assert.ok(settled, "finished issue detail should settle to completed from history");
     const detail = orch.issueDetail("T-1")!;
     assert.ok(detail.recent_events.some((e) => e.event === "turn_started"), "log should include turn_started");
+    // Finished views carry no tracker state of their own; issueDetailFor enriches it.
+    assert.equal(detail.state, undefined, "sync history detail has no state field");
+    assert.equal((await orch.issueDetailFor("T-1"))?.state, "done");
   } finally {
     orch.stop();
   }
@@ -287,6 +290,11 @@ test("retries stop at max_retry_attempts and the issue halts until its state cha
     assert.equal(h.issue_id, "T-1");
     assert.match(h.reason, /retry limit reached/);
     assert.equal(orch.issueDetail("T-1")?.status, "halted");
+    // Halted views carry no tracker state of their own; issueDetailFor enriches it
+    // from the tracker so the console can show the issue's current state.
+    const haltedDetail = await orch.issueDetailFor("T-1");
+    assert.equal(haltedDetail?.status, "halted");
+    assert.equal(haltedDetail?.state, "todo");
 
     // Halted = held: it must not be re-dispatched by subsequent ticks.
     orch.requestRefresh();

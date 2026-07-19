@@ -33,7 +33,8 @@ export function detailPage(d) {
   const statusKind = d.status === "running" ? "active" : d.status === "completed" ? "ok" : d.status === "queued" ? "active" : "warn";
 
   const rows = [["Issue id", mono(d.issue_id)]];
-  rows.push(["Tracker state", badge(run ? run.state : d.state, run ? "active" : "")]);
+  const trackerState = run ? run.state : d.state;
+  rows.push(["Tracker state", trackerState ? badge(trackerState, run ? "active" : "") : "—"]);
   rows.push(["Workspace", mono(d.workspace && d.workspace.path)]);
   if (run) {
     rows.push(["Session", mono(run.session_id || "—")]);
