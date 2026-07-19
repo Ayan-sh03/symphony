@@ -128,6 +128,32 @@ test("POST /issues/<id>/stop 404s when nothing is running or retrying", async ()
   });
 });
 
+test("POST /issues persists the per-task agent override and rejects unknown kinds", async () => {
+  await withServer(async (base) => {
+    // backlog state: parked, so the create-triggered tick never dispatches a real agent.
+    const created = await fetch(`${base}/api/v1/projects/a/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-2", title: "agent override", state: "backlog", agent: "opencode" }),
+    });
+    assert.equal(created.status, 201);
+
+    const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+    const row = board.issues.find((i: { identifier: string }) => i.identifier === "A-2");
+    assert.equal(row.agent_override, "opencode", "override should persist instead of falling back to the default");
+    assert.equal(row.agent, "opencode");
+
+    const bad = await fetch(`${base}/api/v1/projects/a/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-3", title: "bad agent", state: "backlog", agent: "nope" }),
+    });
+    assert.equal(bad.status, 400);
+    const err = (await bad.json()) as any;
+    assert.match(err.error.message, /unknown agent\.kind/);
+  });
+});
+
 test("board views are isolated per project", async () => {
   await withServer(async (base) => {
     const a = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;

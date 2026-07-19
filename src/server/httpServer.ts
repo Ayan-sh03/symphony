@@ -279,6 +279,7 @@ export class SymphonyHttpServer {
         state: typeof body.state === "string" ? body.state : null,
         priority: typeof body.priority === "number" ? body.priority : body.priority != null ? Number(body.priority) : null,
         labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
+        agent: typeof body.agent === "string" && body.agent.trim() !== "" ? body.agent.trim() : null,
       });
       this.json(res, 201, { created: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
     } catch (err) {

@@ -235,6 +235,7 @@ export class Orchestrator {
     if (!this.canCreateIssues() || !this.adapter.createIssue) {
       throw new Error("the active tracker does not support creating issues");
     }
+    if (input.agent && !isSupportedAgentKind(input.agent)) throw new Error(`unknown agent.kind: ${input.agent}`);
     const issue = await this.adapter.createIssue(input);
     this.logger.info("issue created", { issue_id: issue.id, issue_identifier: issue.identifier });
     this.scheduleTick(0);
