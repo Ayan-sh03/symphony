@@ -1,18 +1,26 @@
 # Symphony
 
-A long-running automation service that continuously reads work from a configured issue
-tracker, creates an isolated per-issue workspace, and runs a coding agent session for
-each issue inside that workspace. This is a complete implementation of [`SPEC.md`](./SPEC.md)
-(Symphony Service Specification, Draft v1).
+![ci](https://github.com/Ayan-sh03/symphony/actions/workflows/ci.yml/badge.svg)
 
-Symphony is a scheduler/runner and tracker **reader**. Ticket writes (state transitions,
-comments) are performed by the coding agent through host-side tools / a write-back channel;
-the orchestrator never edits tickets itself.
+## Why Symphony?
 
-## Quick start
+Symphony turns an issue tracker into a queue of work. Autonomous coding agents pull issues, work them, and report results back to the tracker. The system manages its own backlog with no external tools needed.
 
-Requirements: **Node.js ≥ 22.6** (24+ recommended — TypeScript runs directly, no build step)
-and an authenticated **Codex** CLI (`codex app-server` must work).
+## What It Does
+
+Symphony reads work continuously from a configured issue tracker. It creates an isolated workspace for each issue. A coding agent session runs inside that workspace. This implementation follows [`SPEC.md`](./SPEC.md) (Symphony Service Specification, Draft v1).
+
+Symphony reads trackers and runs agents. Agents write ticket updates through host-side tools. The orchestrator never edits tickets itself.
+
+## Quick Start
+
+### Requirements
+
+- **Node.js ≥ 22.6** (24+ recommended)
+- TypeScript runs directly — no build step
+- **Codex** CLI authenticated (`codex app-server` must work)
+
+### Install and Run
 
 ```bash
 npm install
@@ -21,142 +29,238 @@ npm start                 # runs ./WORKFLOW.md
 node src/index.ts ./WORKFLOW.md --port 7878
 ```
 
-Open <http://127.0.0.1:7878> for the live console. It shows a **Board** of every issue
-grouped by state (backlog, active, done — completed work stays visible), the live running
-sessions, a detail drawer, and CTAs: **＋ New issue**, per-issue **Start** / **Hold** /
-**Reopen**, and **Poll now**.
+Open <http://127.0.0.1:7878> to see the live console.
 
-Click any issue to open its detail drawer with a timestamped **activity log** — the agent's
-messages, shell commands, file edits, and turn lifecycle. Logs stream while a run is active
-and are retained after it finishes (also at `GET /api/v1/<identifier>` as `recent_events`).
-
-New work lands in a `backlog` state and does **not** run until you move it to an active
-state (`todo`) — click **Start**, or `POST /api/v1/issues/<id>/state {"state":"todo"}`.
-
-HTTP API: `GET /api/v1/state`, `GET /api/v1/issues` (board), `POST /api/v1/issues`
-(`{ "identifier": "SYM-3", "title": "...", "state": "backlog" }`),
-`POST /api/v1/issues/<id>/state`, `POST /api/v1/refresh`. Editing JSON files in `issues/`
-by hand still works too.
-
-Run the conformance tests:
+### Test and Type-Check
 
 ```bash
 npm test        # node --test test/
 npm run typecheck
 ```
 
-## "It tracks itself"
+## The Console
 
-The shipped `WORKFLOW.md` uses the built-in **`file` tracker** (`tracker.kind: file`),
-whose issues are JSON files in [`./issues`](./issues). Symphony reads those issues,
-dispatches Codex to work each one in an isolated workspace, and the agent reports its
-outcome back into the same issue store — so Symphony manages its own backlog with no
-external tracker or credentials. See the end-to-end path below.
+The web UI shows a **Board** of issues grouped by state (backlog, active, done). Completed work stays visible.
 
-### How the agent transitions a tracked issue
+You see:
+- Live running agent sessions
+- A detail drawer per issue
+- Buttons: **＋ New issue**, **Start** / **Hold** / **Reopen**, **Stop**, **Poll now**
 
-1. The runner writes the normalized issue into the workspace as `SYMPHONY_ISSUE.json`.
-2. The agent does the work in the workspace and writes `SYMPHONY_RESULT.json`
-   (`{ "state": "...", "comment": "...", "pr_url": null }`).
-3. After each turn the runner applies that result to the tracker via the adapter's
-   `set_issue_result` tool, then re-checks state for continuation. A terminal state ends
-   the run and the workspace is cleaned up.
+### Retries
 
-The `file` adapter also advertises provider-native agent tools (`update_issue_state`,
-`add_issue_comment`, `set_issue_result`) that execute **host-side**; if a Codex build
-requests them via `item/tool/call`, they run against the issue store directly.
+A failed run retries with exponential backoff. Retries stop after `agent.max_retry_attempts` (default 3; `0` = unlimited). Press **Stop** to cancel a pending retry early. A stopped issue is held — it does not re-dispatch until you change its state (**Hold** or **Retry**).
+
+Click any issue to open its detail drawer. It shows a timestamped **activity log**. The log includes agent messages, shell commands, file edits, and turn lifecycle. Logs stream while a run is active. They are kept after the run finishes.
+
+Get the same log via `GET /api/v1/<identifier>` → `recent_events`.
+
+### Starting Work
+
+New issues land in the `backlog` state. They do not run until you move them to `todo`. Click **Start** or use `POST /api/v1/issues/<id>/state {"state":"todo"}`.
+
+### HTTP API Routes
+
+All issue routes are scoped by project id: `/api/v1/projects/<pid>/…`. A single-workflow host has one project named `default`.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/v1/projects` | GET / POST | List projects / add a project |
+| `/api/v1/projects/<pid>/state` | GET | Get full state |
+| `/api/v1/projects/<pid>/issues` | GET | Get all issues (board) |
+| `/api/v1/projects/<pid>/issues` | POST | Create issue: `{ "identifier": "SYM-3", "title": "...", "state": "backlog" }` |
+| `/api/v1/projects/<pid>/issues/<id>/state` | POST | Change state: `{"state":"todo"}` |
+| `/api/v1/projects/<pid>/issues/<id>/stop` | POST | Cancel a pending retry; hold the issue for a manual state change |
+| `/api/v1/projects/<pid>/refresh` | POST | Poll now |
+
+Hand-editing JSON files in `issues/` also works.
+
+## It Tracks Itself
+
+The default `WORKFLOW.md` uses the **file tracker** (`tracker.kind: file`). Issues live as JSON files in [`./issues`](./issues).
+
+Symphony reads those issues. It runs Codex to work each issue in an isolated workspace. The agent reports its outcome back to the same store. No external tracker or credentials needed. Symphony manages its own backlog.
+
+### How an Issue Flows Through the System
+
+1. The runner writes the issue into the workspace as `SYMPHONY_ISSUE.json`
+2. The agent works in the workspace
+3. The agent writes `SYMPHONY_RESULT.json`: `{ "state": "...", "comment": "...", "pr_url": null }`
+4. After each turn, the runner applies the result via the adapter's `set_issue_result` tool
+5. The runner re-checks state to decide whether to continue
+6. A terminal state ends the run and cleans up the workspace
+
+The file adapter provides agent tools. These run **host-side**: `update_issue_state`, `add_issue_comment`, `set_issue_result`. When Codex calls them, they directly update the issue store.
 
 ## Architecture
 
-Layered exactly as SPEC §3.2, each layer independently portable:
+Symphony layers cleanly. Each layer is independently portable (SPEC §3.2).
 
+```mermaid
+graph TD
+    A["WORKFLOW.md<br/>(YAML config + Liquid prompt)"]
+    B["Configuration<br/>(typed config, defaults, path norm)"]
+    C["Orchestrator<br/>(single-authority state machine)"]
+    D["Workspace + Agent Session<br/>(codex/opencode)"]
+    E["Tracker Adapter<br/>(file today; pluggable)"]
+    F["HTTP Console + API<br/>(dashboard, observability)"]
+    
+    A --> B
+    B --> C
+    C --> D
+    C --> E
+    C --> F
 ```
-Policy         WORKFLOW.md (YAML front matter + Liquid prompt body)
-Configuration  src/config/config.ts        typed getters, defaults, $VAR, path norm
-Coordination   src/orchestrator/*          single-authority state machine
-Execution      src/workspace/*, src/agent/*  workspaces + agent sessions
-Integration    src/tracker/*               tracker adapters + agent tools
-Observability  src/logger.ts, src/server/* structured logs + HTTP dashboard/API
-```
 
-> **Integrating your own agent or tracker?** See [INTEGRATION.md](INTEGRATION.md) for the
-> full walkthrough (files to change, the event vocabulary, testing). The console's
-> **⚙ Integrate** button lists registered backends and the checklist.
+The layers map to source code:
 
-### Agent backends are pluggable
+| Layer | Code | Purpose |
+|-------|------|---------|
+| Policy | `WORKFLOW.md` | YAML front matter + Liquid prompt body |
+| Configuration | `src/config/config.ts` | Typed getters, defaults, variable expansion, path normalization |
+| Coordination | `src/orchestrator/*` | Single-authority state machine |
+| Execution | `src/workspace/*`, `src/agent/*` | Workspaces and agent sessions |
+| Integration | `src/tracker/*` | Tracker adapters and agent tools |
+| Observability | `src/logger.ts`, `src/server/*` | Structured logs, HTTP dashboard, API |
 
-The Execution layer talks to a coding agent only through the `AgentSession` interface
-(`src/agent/types.ts`). **Codex is one backend** (`src/agent/appServerClient.ts`),
-selected by `agent.kind: codex`. To add another agent:
+### Adding Your Own Agent
 
-1. Implement `AgentSession` (`start` → `runTurn`* → `stop`, emitting `AgentUpdate`s) and an
-   `AgentFactory`.
-2. Register it with `registerAgentFactory(factory)` (`src/agent/registry.ts`).
-3. Select it with `agent.kind: <your-kind>` in `WORKFLOW.md`.
+The Execution layer uses only the `AgentSession` interface (`src/agent/types.ts`). Codex is one backend (`src/agent/appServerClient.ts`), selected by `agent.kind: codex`.
 
-No orchestrator, runner, workspace, or tracker code changes. The runner, retry logic,
-reconciliation, prompt rendering, and observability are all agent-neutral.
+To add another agent:
 
-### Tracker adapters are pluggable
+1. Implement `AgentSession` and `AgentFactory` (lifecycle: `start` → `runTurn`* → `stop`)
+2. Register it: `registerAgentFactory(factory)` in `src/agent/registry.ts`
+3. Select it in `WORKFLOW.md`: `agent.kind: <your-kind>`
 
-Adapters implement `TrackerAdapter` (`src/tracker/types.ts`) and are registered by `kind`
-in `src/tracker/registry.ts`. Ship a new one (Linear, GitHub Projects, Jira, …) by mapping
-provider payloads into the normalized `Issue` and deriving `dispatchable`.
+No orchestrator, runner, workspace, or tracker code changes. The system is agent-neutral.
 
-## Trust & safety posture (SPEC §15.1 — required disclosure)
+### Adding Your Own Tracker
 
-This implementation targets **trusted environments** and runs Codex in a **high-trust**
-configuration by default:
+Adapters implement `TrackerAdapter` (`src/tracker/types.ts`). Register them by kind in `src/tracker/registry.ts`.
 
-- `codex.approval_policy: never` and `codex.thread_sandbox: danger-full-access` /
-  `codex.turn_sandbox_policy: { type: dangerFullAccess }` — no approval round-trips; the
-  agent may run commands and edit files within its workspace unattended.
-- User-input-required turns are treated as a **hard failure** (the run does not stall).
-- Unsupported dynamic tool calls return a structured failure and the session continues.
+Add a new tracker (Linear, GitHub Projects, Jira, etc.) by:
+1. Mapping provider payloads to the normalized `Issue` schema
+2. Deriving the `dispatchable` field
+3. Registering the adapter with a kind name
 
-Baseline controls always enforced (SPEC §9.5, §15.2):
+No orchestrator changes needed. The system is tracker-agnostic.
 
-- The agent's cwd is always the per-issue workspace path.
-- Workspace paths are sanitized (`[A-Za-z0-9._-]`, collision-resistant hash suffix) and
-  are validated to stay inside the configured workspace root.
+### Integration Checklist
 
-To harden (SPEC §15.5): tighten `approval_policy`/sandbox in `WORKFLOW.md`, run under a
-dedicated OS user on a dedicated volume, and restrict which issues are eligible for
-dispatch (states/labels/`dispatchable`).
+See [INTEGRATION.md](INTEGRATION.md) for the full walkthrough. It covers files to change, the event vocabulary, and testing. The console's **⚙ Integrate** button lists registered backends and the checklist.
 
-## `file` tracker adapter profile (SPEC §11.2 — required)
+## Trust & Safety Posture
 
-- **`tracker.kind`**: `file`
-- **`tracker.provider` keys**: `dir` (string path; default `./issues`, relative to the
-  `WORKFLOW.md` directory; supports `~` and `$VAR`). No secret keys;
-  `secret_environment_names()` returns `[]`.
-- **Scope / pagination**: every `*.json` file directly under `dir` is one issue; no paging
-  limit; files are read in sorted order.
-- **`id` / `native_ref` mapping**: `id` defaults to `identifier` when absent; `native_ref`
-  is preserved verbatim when it is a JSON object, else normalized to `null`.
-- **Normalization**: required non-empty strings `id`/`identifier`/`title`/`state`; `labels`
-  trimmed+lowercased+deduped; `priority` integer-or-null (1..4 rank first); `dispatchable`
-  from the file (default `true`); timestamps pass through as strings-or-null.
-- **Malformed record** = missing/blank required field or unreadable/non-object JSON.
-  State-list reads log & omit malformed records; ID-refresh **fails** on a malformed
-  requested record (`tracker_response`). Empty state/id lists return `[]` with no read.
-- **Agent tools** (mutate tracker state): `update_issue_state({state, comment?})`,
-  `add_issue_comment({comment})`, `set_issue_result({state?, comment?, pr_url?})`. Unknown
-  tool names return a structured failure. Results are JSON-safe `{success, output}`.
-- **Error mapping**: `AdapterError{category, message}` where category ∈
-  `invalid_tracker_config | unsupported_tracker_kind | tracker_request | tracker_response`.
+**This is designed for trusted environments.** Symphony runs Codex in a high-trust configuration (SPEC §15.1).
 
-## Configuration cheat sheet
+### Default Configuration (High Trust)
 
-All fields, defaults, and semantics are in SPEC §6.4. The front matter keys are
-`tracker`, `polling`, `workspace`, `hooks`, `agent`, `codex`, and (extension) `server`.
-`agent.kind` (default `codex`) selects the agent backend. `WORKFLOW.md` is watched and
-hot-reloaded; invalid reloads keep the last-good config and log an operator-visible error.
+- `codex.approval_policy: never`
+- `codex.thread_sandbox: danger-full-access` or `codex.turn_sandbox_policy: { type: dangerFullAccess }`
+- No approval round-trips
+- The agent runs commands and edits files in its workspace unattended
+- User-input-required turns cause hard failure (the run does not stall)
+- Unsupported tool calls return structured failure (session continues)
 
-## Conformance
+### Always-Enforced Baseline Controls (SPEC §9.5, §15.2)
 
-`npm test` covers the Core Conformance matrix (SPEC §17): workflow/config parsing and
-reload, strict prompt rendering, workspace sanitization/containment/hooks, tracker
-normalization + malformed handling + empty-list short-circuits + agent tools, and
-orchestrator dispatch/continuation/backoff/retry via a fake agent backend. The Codex
-app-server client is exercised by the real integration run described in "It tracks itself".
+- Agent cwd is always the per-issue workspace path
+- Workspace paths are sanitized: `[A-Za-z0-9._-]` with collision-resistant hash suffix
+- Paths are validated to stay inside the configured workspace root
+
+### Hardening Steps (SPEC §15.5)
+
+To strengthen security:
+- Tighten `approval_policy` and `sandbox` in `WORKFLOW.md`
+- Run under a dedicated OS user on a dedicated volume
+- Restrict eligible issues by state, labels, or `dispatchable` flag
+
+## File Tracker Adapter Profile
+
+Reference: SPEC §11.2.
+
+### Configuration
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `tracker.kind` | `file` | Required |
+| `tracker.provider.dir` | `./issues` (default) | Path to issues directory; relative to `WORKFLOW.md`; supports `~` and `$VAR` |
+| Secret keys | None | `secret_environment_names()` returns `[]` |
+
+### How Issues Are Read
+
+- Every `*.json` file directly under `dir` is one issue
+- No paging limit
+- Files are read in sorted order
+
+### Field Mapping and Normalization
+
+**Mapping**:
+- `id` defaults to `identifier` if absent
+- `native_ref` preserved verbatim if it is a JSON object; otherwise set to `null`
+
+**Required fields** (non-empty strings):
+- `id`, `identifier`, `title`, `state`
+
+**Processing**:
+- `labels`: trimmed, lowercased, deduplicated
+- `priority`: integer 1–4 or null (lower number = higher priority)
+- `dispatchable`: from file (default `true`)
+- Timestamps: pass through as strings or null
+
+### Malformed Records
+
+A malformed record has missing/blank required fields or unreadable/invalid JSON.
+
+- **State-list reads**: log the error and omit the malformed record
+- **ID-refresh**: fail with `tracker_response` error if requested record is malformed
+- **Empty lists**: return `[]` with no file read attempt
+
+### Agent Tools
+
+These tools mutate tracker state (execute host-side):
+
+| Tool | Input | Notes |
+|------|-------|-------|
+| `update_issue_state` | `{state, comment?}` | Update state and optional comment |
+| `add_issue_comment` | `{comment}` | Add comment only |
+| `set_issue_result` | `{state?, comment?, pr_url?}` | Set result fields |
+
+Unknown tool names return structured failure. Results: `{success, output}` (JSON-safe).
+
+### Error Categories
+
+Errors are `AdapterError{category, message}`:
+- `invalid_tracker_config`: Configuration error
+- `unsupported_tracker_kind`: Unknown tracker kind
+- `tracker_request`: Request error (e.g., bad parameter)
+- `tracker_response`: Response error (e.g., malformed data)
+
+## Configuration Reference
+
+All fields, defaults, and semantics live in SPEC §6.4.
+
+**WORKFLOW.md front matter keys**:
+- `tracker`: Which tracker adapter to use
+- `polling`: Poll interval and backoff strategy
+- `workspace`: Workspace directory and structure
+- `hooks`: Lifecycle hooks (before/after actions)
+- `agent`: Which agent backend to use
+- `codex`: Codex-specific settings (approval, sandbox)
+- `server`: HTTP server settings (extension)
+
+Set `agent.kind` to select the agent backend (default: `codex`).
+
+**Reloading**: `WORKFLOW.md` is watched and hot-reloaded. Invalid reloads keep the last-good config and log an error to the operator.
+
+## Testing and Conformance
+
+`npm test` covers the Core Conformance matrix (SPEC §17):
+- Workflow and config parsing and reloading
+- Strict prompt rendering (no variable injection)
+- Workspace sanitization, containment, and hooks
+- Tracker normalization, malformed handling, agent tools
+- Orchestrator dispatch, continuation, backoff, retry
+
+The test suite uses a fake agent backend. The Codex app-server client is exercised by integration tests described in the "It Tracks Itself" section.
