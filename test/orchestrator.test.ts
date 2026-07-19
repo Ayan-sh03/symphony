@@ -267,3 +267,64 @@ test("failing agent schedules a backoff retry", async () => {
     orch.stop();
   }
 });
+
+test("retries stop at max_retry_attempts and the issue halts until its state changes", async () => {
+  registerAgentFactory(makeFakeFactory("fail"));
+  const { issuesDir, wfPath } = setup("fail");
+  // Rebuild config with a tight cap and short backoff so the limit is hit quickly.
+  const src = fs.readFileSync(wfPath, "utf8").replace("max_retry_backoff_ms: 2000", "max_retry_backoff_ms: 100\n  max_retry_attempts: 2");
+  fs.writeFileSync(wfPath, src);
+  const wf = parseWorkflow(src);
+  const config = buildConfig(wf, wfPath);
+  assert.equal(config.max_retry_attempts, 2);
+  const orch = new Orchestrator({ config, workflow: wf, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const haltedSeen = await waitFor(() => orch.snapshot().counts.halted === 1);
+    assert.ok(haltedSeen, "issue should halt after exhausting retries");
+    assert.equal(orch.snapshot().counts.retrying, 0, "no retry stays queued after the halt");
+    const h = (orch.snapshot().halted as Array<{ issue_id: string; reason: string; attempts: number }>)[0]!;
+    assert.equal(h.issue_id, "T-1");
+    assert.match(h.reason, /retry limit reached/);
+    assert.equal(orch.issueDetail("T-1")?.status, "halted");
+
+    // Halted = held: it must not be re-dispatched by subsequent ticks.
+    orch.requestRefresh();
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(orch.snapshot().counts.running, 0, "halted issue is not re-dispatched");
+    assert.equal(orch.snapshot().counts.halted, 1, "halt persists across ticks while still active");
+
+    // A manual state change releases the hold.
+    await orch.setIssueState("T-1", "backlog");
+    assert.equal(orch.snapshot().counts.halted, 0, "state change clears the halt");
+    assert.equal(readState(issuesDir), "backlog");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("stopRetry cancels a pending retry and holds the issue for the operator", async () => {
+  registerAgentFactory(makeFakeFactory("fail"));
+  const { wfPath, workflow, config } = setup("fail");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const retried = await waitFor(() => orch.snapshot().counts.retrying >= 1);
+    assert.ok(retried, "precondition: a retry is pending");
+    const halt = orch.stopRetry("T-1");
+    assert.ok(halt, "stopRetry should report the halted entry");
+    assert.equal(halt!.reason, "stopped by operator");
+    assert.equal(orch.snapshot().counts.retrying, 0, "pending retry is canceled");
+    assert.equal(orch.snapshot().counts.halted, 1, "issue is held for the operator");
+    assert.equal(orch.stopRetry("T-1")!.reason, "stopped by operator", "stop is idempotent");
+    assert.equal(orch.stopRetry("NOPE-9"), null, "unknown issue → null");
+
+    // Held: refresh must not re-dispatch while the issue is still active.
+    orch.requestRefresh();
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(orch.snapshot().counts.running, 0, "stopped issue is not re-dispatched");
+    assert.equal(orch.snapshot().counts.halted, 1);
+  } finally {
+    orch.stop();
+  }
+});

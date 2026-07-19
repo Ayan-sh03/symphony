@@ -58,6 +58,18 @@ interface RetryEntry {
   error: string | null;
 }
 
+/**
+ * A halted issue: retries stopped (limit reached, or operator pressed Stop). The
+ * claim is kept so the poll loop cannot re-dispatch it; it is released when the
+ * issue's state changes (console/API) or the issue leaves the active states.
+ */
+export interface HaltedEntry {
+  identifier: string;
+  reason: string;
+  attempts: number;
+  halted_at: string;
+}
+
 interface CodexTotals {
   input_tokens: number;
   output_tokens: number;
@@ -109,6 +121,7 @@ export class Orchestrator {
   private running = new Map<string, RunningEntry>();
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
+  private halted = new Map<string, HaltedEntry>();
   private completed = new Set<string>();
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
@@ -291,7 +304,8 @@ export class Orchestrator {
     );
     const issues = all.map((i) => {
       const run = this.running.get(i.id);
-      const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : "idle";
+      const halt = this.halted.get(i.id) ?? null;
+      const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : halt ? "halted" : "idle";
       return {
         id: i.id,
         identifier: i.identifier,
@@ -301,6 +315,7 @@ export class Orchestrator {
         labels: i.labels,
         url: i.url,
         runtime,
+        halt_reason: halt ? halt.reason : null,
         turn_count: run ? run.session.turn_count : null,
         is_active: this.isActiveState(i.state),
         is_terminal: this.isTerminalState(i.state),
@@ -326,6 +341,7 @@ export class Orchestrator {
     }
     const issue = await this.adapter.setIssueState(id, state);
     this.logger.info("issue state changed", { issue_id: id, issue_identifier: issue.identifier, state: issue.state });
+    this.releaseHalt(id); // a manual state change ends the operator hold
     // If it left an active state while running, reconciliation will stop it; poll now.
     this.scheduleTick(0);
     this.notify();
@@ -361,6 +377,15 @@ export class Orchestrator {
         this.logger.error("candidate fetch failed; skipping dispatch this tick", { error: String(err) });
         this.notify();
         return;
+      }
+
+      // A halted issue that left the active states (edited out-of-band) no longer
+      // needs the operator hold; release its claim.
+      if (this.halted.size > 0) {
+        const activeIds = new Set(issues.map((i) => i.id));
+        for (const id of [...this.halted.keys()]) {
+          if (!activeIds.has(id)) this.releaseHalt(id);
+        }
       }
 
       for (const issue of this.sortForDispatch(issues)) {
@@ -562,6 +587,12 @@ export class Orchestrator {
 
   /** SPEC §8.4 backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
   private scheduleRetry(issueId: string, attempt: number, identifier: string, error: string | null, continuation: boolean): void {
+    // Failure-retry cap (extension): past the limit, halt instead of rescheduling.
+    const cap = this.config.max_retry_attempts;
+    if (!continuation && cap > 0 && attempt > cap) {
+      this.halt(issueId, identifier, `retry limit reached (${cap}): ${error ?? "worker failed"}`, attempt - 1);
+      return;
+    }
     this.cancelRetry(issueId);
     const delay = continuation
       ? 1000
@@ -586,6 +617,32 @@ export class Orchestrator {
       clearTimeout(r.timer);
       this.retry_attempts.delete(issueId);
     }
+  }
+
+  /** Stop retrying an issue but keep its claim so ticks cannot re-dispatch it. */
+  private halt(issueId: string, identifier: string, reason: string, attempts: number): void {
+    this.cancelRetry(issueId);
+    this.halted.set(issueId, { identifier, reason, attempts, halted_at: new Date().toISOString() });
+    this.claimed.add(issueId);
+    this.logger.warn("retries halted; waiting for operator", { issue_id: issueId, issue_identifier: identifier, reason, attempts });
+    this.notify();
+  }
+
+  /** Operator Stop (console/API): cancel a pending retry and hold the issue for a manual state change. */
+  stopRetry(issueId: string): HaltedEntry | null {
+    const existing = this.halted.get(issueId);
+    if (existing) return existing; // idempotent
+    const r = this.retry_attempts.get(issueId);
+    if (!r) return null;
+    this.halt(issueId, r.identifier, "stopped by operator", r.attempt);
+    return this.halted.get(issueId) ?? null;
+  }
+
+  /** Forget a halt (issue state changed or issue left the active states). */
+  private releaseHalt(issueId: string): void {
+    if (!this.halted.delete(issueId)) return;
+    this.claimed.delete(issueId);
+    this.notify();
   }
 
   /** SPEC §16.6 on_retry_timer. */
@@ -792,11 +849,19 @@ export class Orchestrator {
       due_at: new Date(r.due_at_ms).toISOString(),
       error: r.error,
     }));
+    const halted = [...this.halted.entries()].map(([id, h]) => ({
+      issue_id: id,
+      issue_identifier: h.identifier,
+      attempts: h.attempts,
+      reason: h.reason,
+      halted_at: h.halted_at,
+    }));
     return {
       generated_at: new Date().toISOString(),
-      counts: { running: running.length, retrying: retrying.length },
+      counts: { running: running.length, retrying: retrying.length, halted: halted.length },
       running,
       retrying,
+      halted,
       codex_totals: {
         input_tokens: this.codex_totals.input_tokens,
         output_tokens: this.codex_totals.output_tokens,
@@ -927,6 +992,20 @@ export class Orchestrator {
         };
       }
     }
+    for (const [id, h] of this.halted) {
+      if (h.identifier === identifier) {
+        return {
+          issue_identifier: identifier,
+          issue_id: id,
+          status: "halted",
+          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          running: null,
+          retry: null,
+          last_error: h.reason,
+          recent_events: this.history.get(id)?.events ?? [],
+        };
+      }
+    }
     // Finished/terminated runs: serve the retained log so operators can review it.
     for (const [id, h] of this.history) {
       if (h.identifier === identifier) {
@@ -953,9 +1032,10 @@ function round1(n: number): number {
 
 export interface SnapshotView {
   generated_at: string;
-  counts: { running: number; retrying: number };
+  counts: { running: number; retrying: number; halted: number };
   running: unknown[];
   retrying: unknown[];
+  halted: unknown[];
   codex_totals: { input_tokens: number; output_tokens: number; total_tokens: number; seconds_running: number };
   rate_limits: unknown;
   rate_limits_agent: string | null;
@@ -985,7 +1065,9 @@ export interface BoardIssueView {
   priority: number | null;
   labels: string[];
   url: string | null;
-  runtime: "running" | "retrying" | "idle";
+  runtime: "running" | "retrying" | "halted" | "idle";
+  /** Why retries stopped, when runtime is "halted". */
+  halt_reason: string | null;
   turn_count: number | null;
   is_active: boolean;
   is_terminal: boolean;

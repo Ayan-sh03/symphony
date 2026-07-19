@@ -17,6 +17,7 @@ test("applies defaults for missing optional fields", () => {
   assert.equal(c.max_concurrent_agents, 10);
   assert.equal(c.max_turns, 20);
   assert.equal(c.max_retry_backoff_ms, 300000);
+  assert.equal(c.max_retry_attempts, 3);
   assert.equal(c.hooks.timeout_ms, 60000);
   assert.equal(c.codex.command, "codex app-server");
   assert.equal(c.agent_kind, "codex");
@@ -49,6 +50,12 @@ test("per-state concurrency normalizes keys and drops invalid", () => {
 
 test("invalid max_turns fails validation", () => {
   assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  max_turns: 0\n---\n"), (e) => e instanceof ConfigError);
+});
+
+test("max_retry_attempts: explicit value and 0 (unlimited) accepted; negative rejected", () => {
+  assert.equal(cfg("---\ntracker:\n  kind: file\nagent:\n  max_retry_attempts: 7\n---\n").max_retry_attempts, 7);
+  assert.equal(cfg("---\ntracker:\n  kind: file\nagent:\n  max_retry_attempts: 0\n---\n").max_retry_attempts, 0);
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  max_retry_attempts: -1\n---\n"), (e) => e instanceof ConfigError);
 });
 
 test("codex.command preserved verbatim as shell string", () => {

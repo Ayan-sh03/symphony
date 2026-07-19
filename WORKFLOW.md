@@ -23,6 +23,9 @@ agent:
   max_concurrent_agents: 2
   max_turns: 6
   max_retry_backoff_ms: 120000
+  # Give up after this many failed attempts (0 = retry forever). A halted issue
+  # stays on the board with Stop/Hold/Retry controls until you change its state.
+  max_retry_attempts: 3
 
 codex:
   command: codex app-server

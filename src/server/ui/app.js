@@ -6,7 +6,7 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopRetry } from "./api.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
 import { headerView } from "./views/header.js";
@@ -74,6 +74,8 @@ document.addEventListener("click", (e) => {
     else if (a === "theme") toggleTheme();
     return;
   }
+  const stp = e.target.closest("[data-stop-id]");
+  if (stp) { stopRetry(stp.getAttribute("data-stop-id"), stp); return; }
   const sb = e.target.closest("[data-state-id]");
   if (sb) { setState(sb.getAttribute("data-state-id"), sb.getAttribute("data-state-to"), sb); return; }
   const row = e.target.closest("[data-open]");

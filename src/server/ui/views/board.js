@@ -39,7 +39,11 @@ function boardRow(i, b, m) {
     : html`<span class="bkey">${i.identifier}</span>`;
   let actions;
   if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>`;
-  else if (i.runtime === "retrying") actions = html`<span class="run-ind">retry queued</span>`;
+  else if (i.runtime === "retrying") actions = html`<span class="run-ind">retry queued</span>
+    <button class="btn sm" data-stop-id=${i.id} @click=${stop} title="Cancel the pending retry and hold this issue">■ Stop</button>`;
+  else if (i.runtime === "halted") actions = html`<span class="run-ind" title=${i.halt_reason || ""}>■ stopped</span>
+    <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"} @click=${stop}>Hold</button>
+    <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state} @click=${stop}>↻ Retry</button>`;
   else if (i.is_terminal) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>↺ Reopen</button>`;
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;
   else actions = html`<button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>▸ Start</button>`;
@@ -89,12 +93,22 @@ function runningTable(rows) {
 
 function retryTable(rows) {
   return html`<div class="panel tscroll"><table><thead><tr>
-    <th>Issue</th><th class="num">Attempt</th><th>Next attempt</th><th>Reason</th>
+    <th>Issue</th><th class="num">Attempt</th><th>Next attempt</th><th>Reason</th><th></th>
     </tr></thead><tbody>${repeat(rows, (r) => r.issue_identifier, (r) => html`<tr class="clk" data-open=${r.issue_identifier}>
       <td><span class="key">${r.issue_identifier}</span></td>
       <td class="num">${r.attempt}</td>
       <td>${badge(until(r.due_at), "warn")}</td>
-      <td class="sub">${r.error || "—"}</td></tr>`)}</tbody></table></div>`;
+      <td class="sub">${r.error || "—"}</td>
+      <td><button class="btn sm" data-stop-id=${r.issue_id} @click=${stop} title="Cancel the pending retry and hold this issue">■ Stop</button></td></tr>`)}</tbody></table></div>`;
+}
+
+function haltedTable(rows) {
+  return html`<div class="panel tscroll"><table><thead><tr>
+    <th>Issue</th><th class="num">Attempts</th><th>Reason</th>
+    </tr></thead><tbody>${repeat(rows, (r) => r.issue_identifier, (r) => html`<tr class="clk" data-open=${r.issue_identifier}>
+      <td><span class="key">${r.issue_identifier}</span></td>
+      <td class="num">${r.attempts}</td>
+      <td class="sub">${r.reason || "—"}</td></tr>`)}</tbody></table></div>`;
 }
 
 function emptyRunning(m) {
@@ -132,6 +146,7 @@ export function boardBody(m) {
   const t = state.codex_totals || {};
   const running = state.running || [];
   const retrying = state.retrying || [];
+  const halted = state.halted || [];
   return html`<div class="meta">
       <span><b>${m.tracker_kind || "?"}</b> tracker</span>
       <span>agent <b>${m.default_agent || m.agent_kind || "?"}</b></span>
@@ -148,5 +163,6 @@ export function boardBody(m) {
     ${boardSection(m)}
     ${section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))}
     ${section("Retry queue", retrying.length, retrying.length ? retryTable(retrying) : emptyRetry())}
+    ${halted.length ? section("Stopped — waiting for you", halted.length, haltedTable(halted)) : nothing}
     ${rateLimit(state.rate_limits, state.rate_limits_agent)}`;
 }

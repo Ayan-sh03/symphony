@@ -69,6 +69,8 @@ export interface ServiceConfigValues {
   max_concurrent_agents: number;
   max_turns: number;
   max_retry_backoff_ms: number;
+  /** Failure-retry cap (extension): give up after this many attempts. 0 = unlimited. */
+  max_retry_attempts: number;
   max_concurrent_agents_by_state: Record<string, number>;
   codex: CodexConfig;
   opencode: OpencodeConfig;
@@ -154,6 +156,8 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
   const max_turns = agent.max_turns !== undefined ? coerceInt(agent.max_turns, "agent.max_turns") : 20;
   if (max_turns <= 0) throw new ConfigError("agent.max_turns must be a positive integer");
   const max_retry_backoff_ms = agent.max_retry_backoff_ms !== undefined ? coerceInt(agent.max_retry_backoff_ms, "agent.max_retry_backoff_ms") : 300000;
+  const max_retry_attempts = agent.max_retry_attempts !== undefined ? coerceInt(agent.max_retry_attempts, "agent.max_retry_attempts") : 3;
+  if (max_retry_attempts < 0) throw new ConfigError("agent.max_retry_attempts must be >= 0 (0 = unlimited)");
 
   const max_concurrent_agents_by_state: Record<string, number> = {};
   const byState = asObject(agent.max_concurrent_agents_by_state);
@@ -200,6 +204,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     max_concurrent_agents,
     max_turns,
     max_retry_backoff_ms,
+    max_retry_attempts,
     max_concurrent_agents_by_state,
     codex,
     opencode,
