@@ -6,6 +6,11 @@ import { store } from "../store.js";
 import { hashFor } from "../router.js";
 import { ago, dur, until, humanSecs, nfmt, badge, stateBadge, eventKind } from "../format.js";
 
+// For links/selects inside clickable rows only: swallow the click so the row's
+// data-open navigation does not fire. Never put this on action buttons — all
+// button clicks are handled by app.js's document-level delegated listener, and
+// stopping propagation would keep the click from ever reaching it (the listener
+// already checks action attributes before data-open, so buttons need no guard).
 const stop = (e) => e.stopPropagation();
 
 function metric(k, v, u, hot) {
@@ -40,10 +45,10 @@ function boardRow(i, b, m) {
   let actions;
   if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>`;
   else if (i.runtime === "retrying") actions = html`<span class="run-ind">retry queued</span>
-    <button class="btn sm" data-stop-id=${i.id} @click=${stop} title="Cancel the pending retry and hold this issue">■ Stop</button>`;
+    <button class="btn sm" data-stop-id=${i.id} title="Cancel the pending retry and hold this issue">■ Stop</button>`;
   else if (i.runtime === "halted") actions = html`<span class="run-ind" title=${i.halt_reason || ""}>■ stopped</span>
-    <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"} @click=${stop}>Hold</button>
-    <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state} @click=${stop}>↻ Retry</button>`;
+    <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>
+    <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>↻ Retry</button>`;
   else if (i.is_terminal) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>↺ Reopen</button>`;
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;
   else actions = html`<button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>▸ Start</button>`;
@@ -99,7 +104,7 @@ function retryTable(rows) {
       <td class="num">${r.attempt}</td>
       <td>${badge(until(r.due_at), "warn")}</td>
       <td class="sub">${r.error || "—"}</td>
-      <td><button class="btn sm" data-stop-id=${r.issue_id} @click=${stop} title="Cancel the pending retry and hold this issue">■ Stop</button></td></tr>`)}</tbody></table></div>`;
+      <td><button class="btn sm" data-stop-id=${r.issue_id} title="Cancel the pending retry and hold this issue">■ Stop</button></td></tr>`)}</tbody></table></div>`;
 }
 
 function haltedTable(rows) {
