@@ -1,4 +1,4 @@
-/** Board route: meta line, metric strip, tracker board, running sessions, retry queue, rate limits. */
+/** Board route: meta line, metric strip, tracker board, running sessions, retry queue. */
 import { html, nothing } from "../vendor/lit-html/lit-html.js";
 import { repeat } from "../vendor/lit-html/directives/repeat.js";
 import { live } from "../vendor/lit-html/directives/live.js";
@@ -132,20 +132,6 @@ function emptyRetry() {
     <p>Failed attempts and post-run continuation checks land here with a backoff timer. Nothing is waiting.</p></div>`;
 }
 
-function rateLimit(rl, agent) {
-  if (!rl) return nothing;
-  const p = rl.primary || {};
-  const pct = typeof p.usedPercent === "number" ? p.usedPercent : null;
-  const resets = p.resetsAt ? new Date(p.resetsAt * 1000).toLocaleString() : "—";
-  const head = (agent ? agent + " " : "") + "rate limits";
-  return section(head, "", html`<div class="panel"><div class="rl">
-    <div class="item"><span class="k">Plan</span><span class="v">${rl.planType || "—"}</span></div>
-    ${pct != null ? html`<div class="item"><span class="k">Primary window used</span><span class="v">${pct}%</span>
-      <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, pct)}%"></div></div></div>` : nothing}
-    <div class="item"><span class="k">Resets</span><span class="v">${resets}</span></div>
-    </div></div>`);
-}
-
 export function boardBody(m) {
   const state = store.state;
   const t = state.codex_totals || {};
@@ -168,6 +154,5 @@ export function boardBody(m) {
     ${boardSection(m)}
     ${section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))}
     ${section("Retry queue", retrying.length, retrying.length ? retryTable(retrying) : emptyRetry())}
-    ${halted.length ? section("Stopped — waiting for you", halted.length, haltedTable(halted)) : nothing}
-    ${rateLimit(state.rate_limits, state.rate_limits_agent)}`;
+    ${halted.length ? section("Stopped — waiting for you", halted.length, haltedTable(halted)) : nothing}`;
 }

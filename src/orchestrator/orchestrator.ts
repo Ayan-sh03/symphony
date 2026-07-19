@@ -126,7 +126,6 @@ export class Orchestrator {
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
-  private codex_rate_limits: unknown = null;
 
   private tickTimer: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -518,10 +517,9 @@ export class Orchestrator {
     if (s.thread_id && s.turn_id) s.session_id = `${s.thread_id}-${s.turn_id}`;
     if (u.event === "turn_started") s.turn_count += 1;
 
-    // Append meaningful events to the activity log (skip pure token/rate-limit pings).
+    // Append meaningful events to the activity log (skip pure token pings).
     const isMetricPing =
-      u.event === "notification" &&
-      ((u as { kind?: string }).kind === "token_usage" || (u as { kind?: string }).kind === "rate_limits");
+      u.event === "notification" && (u as { kind?: string }).kind === "token_usage";
     if (!isMetricPing) {
       entry.events.push({ at: u.timestamp, event: u.event, message: typeof u.message === "string" ? u.message : "" });
       if (entry.events.length > MAX_EVENTS) entry.events.splice(0, entry.events.length - MAX_EVENTS);
@@ -544,9 +542,6 @@ export class Orchestrator {
       this.codex_totals.input_tokens += dInp;
       this.codex_totals.output_tokens += dOut;
       this.codex_totals.total_tokens += dTot;
-    }
-    if ((u as { rate_limits?: unknown }).rate_limits !== undefined && u.rate_limits !== null) {
-      this.codex_rate_limits = u.rate_limits;
     }
   }
 
@@ -868,10 +863,6 @@ export class Orchestrator {
         total_tokens: this.codex_totals.total_tokens,
         seconds_running: round1(this.codex_totals.seconds_running + activeSeconds),
       },
-      rate_limits: this.codex_rate_limits,
-      // Rate limits are reported only by the codex app-server today; attribute the
-      // panel so it never reads as a generic, unowned metric.
-      rate_limits_agent: this.codex_rate_limits ? "codex" : null,
       meta: {
         tracker_kind: this.config.tracker.kind,
         tracker_kinds: [...TRACKER_KINDS],
@@ -1037,8 +1028,6 @@ export interface SnapshotView {
   retrying: unknown[];
   halted: unknown[];
   codex_totals: { input_tokens: number; output_tokens: number; total_tokens: number; seconds_running: number };
-  rate_limits: unknown;
-  rate_limits_agent: string | null;
   meta: {
     tracker_kind: string;
     tracker_kinds: string[];

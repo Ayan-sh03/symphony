@@ -75,7 +75,6 @@ export interface AgentUpdate {
   timestamp: string;
   codex_app_server_pid?: string | null;
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } | null;
-  rate_limits?: unknown;
   message?: string;
   thread_id?: string | null;
   turn_id?: string | null;

@@ -86,7 +86,7 @@ onUpdate({
   event: "agent_message",          // required
   timestamp: new Date().toISOString(),
   message: "…",                    // optional, shown in the activity log
-  // usage / rate_limits / thread_id / turn_id as applicable
+  // usage / thread_id / turn_id as applicable
 });
 ```
 
@@ -107,7 +107,7 @@ Events the orchestrator understands (emit the ones your backend can produce):
 Session id is derived by the orchestrator as `` `${thread_id}-${turn_id}` `` from the
 `thread_id`/`turn_id` you attach to updates.
 
-### Tokens and rate limits
+### Tokens
 
 Report **absolute cumulative** token totals (the orchestrator de-dupes into deltas, so
 resending the same totals is safe):
@@ -118,12 +118,6 @@ onUpdate({
   usage: { input_tokens, output_tokens, total_tokens },
   absolute: true,
 });
-```
-
-Rate limits (any JSON, shown on the dashboard verbatim):
-
-```ts
-onUpdate({ event: "notification", timestamp, rate_limits: { /* provider payload */ } });
 ```
 
 ---
@@ -200,7 +194,7 @@ export class MyAgentSession implements AgentSession {
 
 Use [`src/agent/appServerClient.ts`](src/agent/appServerClient.ts) (the Codex backend) as a
 full reference: subprocess launch via `spawnShell`, JSON-RPC framing, timeouts, approval and
-tool-call handling, token/rate-limit extraction.
+tool-call handling, token extraction.
 
 ---
 

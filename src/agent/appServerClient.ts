@@ -374,10 +374,8 @@ export class CodexAppServerClient implements AgentSession {
         }
         return;
       }
-      case "account/rateLimits/updated": {
-        this.emit("notification", { kind: "rate_limits", rate_limits: params.rateLimits });
-        return;
-      }
+      case "account/rateLimits/updated":
+        return; // account metering noise; not part of run observability
       case "error": {
         this.emit("turn_ended_with_error", { message: JSON.stringify(params).slice(0, 500) });
         return;
