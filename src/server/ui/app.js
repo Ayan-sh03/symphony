@@ -6,7 +6,7 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, copyText } from "./api.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
 import { headerView } from "./views/header.js";
@@ -76,6 +76,10 @@ document.addEventListener("click", (e) => {
   }
   const stp = e.target.closest("[data-stop-id]");
   if (stp) { stopIssue(stp.getAttribute("data-stop-id"), stp); return; }
+  const push = e.target.closest("[data-push-id]");
+  if (push) { pushBranch(push.getAttribute("data-push-id"), push); return; }
+  const cpy = e.target.closest("[data-copy]");
+  if (cpy) { copyText(cpy.getAttribute("data-copy"), cpy.getAttribute("data-copy-what") || "Value"); return; }
   const sb = e.target.closest("[data-state-id]");
   if (sb) { setState(sb.getAttribute("data-state-id"), sb.getAttribute("data-state-to"), sb); return; }
   const row = e.target.closest("[data-open]");

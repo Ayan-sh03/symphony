@@ -52,6 +52,9 @@ function boardRow(i, b, m) {
     <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>
     <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>↻ Retry</button>`;
   else if (i.is_terminal) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>↺ Reopen</button>`;
+  else if (b.review_state && i.state.toLowerCase() === b.review_state.toLowerCase()) actions = html`${i.needs_attention ? badge("attention", "warn") : nothing}
+    <button class="btn sm" data-state-id=${i.id} data-state-to=${b.start_state} title="Send the branch back for more work">↻ Rework</button>
+    <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.terminal_states[0] || "done"} title="Accept the delivered branch and close the issue">✓ Mark done</button>`;
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;
   else actions = html`<button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>▸ Start</button>`;
   return html`<div class="brow clk" data-open=${i.identifier}>${key}<span class="btitle">${i.title}</span>
@@ -72,7 +75,8 @@ function boardSection(m) {
     const items = board.issues.filter((i) => i.state.toLowerCase() === st.toLowerCase());
     if (!items.length) return nothing;
     const lc = st.toLowerCase();
-    const cls = backlog.includes(lc) ? "st-backlog" : terminal.includes(lc) ? "st-terminal" : "st-active";
+    const review = (board.review_state || "").toLowerCase();
+    const cls = backlog.includes(lc) ? "st-backlog" : terminal.includes(lc) ? "st-terminal" : review && lc === review ? "st-review" : "st-active";
     return html`<div class="board-group"><div class="group-head"><span class="gname ${cls}">${st}</span>
       <span class="count">${items.length}</span></div>
       <div class="panel">${repeat(items, (i) => i.id, (i) => boardRow(i, board, m))}</div></div>`;

@@ -47,7 +47,7 @@ export function badge(text, kind) {
 }
 
 export function stateBadge(st) {
-  const k = /done|complete|closed|merged/i.test(st) ? "ok" : /progress|review|doing/i.test(st) ? "active" : "";
+  const k = /done|complete|closed|merged/i.test(st) ? "ok" : /review/i.test(st) ? "warn" : /progress|doing/i.test(st) ? "active" : "";
   return badge(st, k);
 }
 
