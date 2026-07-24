@@ -30,7 +30,12 @@ interface RunningEntry {
   started_ms: number;
   last_event_ms: number | null;
   stopSession: (() => void) | null;
-  terminating: { cleanupWorkspace: boolean } | null;
+  /**
+   * Set once the run is being wound down. `grace_until_ms` (terminal-state
+   * termination only) lets the live turn settle on its own instead of being
+   * killed mid-turn; past the deadline the session is stopped anyway.
+   */
+  terminating: { cleanupWorkspace: boolean; grace_until_ms: number | null } | null;
   workerDone: Promise<void>;
   events: LogEvent[];
   agent: string;
@@ -48,6 +53,14 @@ interface FinishedLog {
 
 const MAX_EVENTS = 80;
 const MAX_HISTORY = 40;
+
+/**
+ * How long a live turn may keep running after its issue reached a terminal state
+ * (extension). The agent usually moves the issue itself, mid-turn, and is still
+ * finishing up (committing, verifying) when reconciliation notices; killing it
+ * there turned every successful run into a cancelled one.
+ */
+const TERMINAL_GRACE_MS = 120000;
 
 interface RetryEntry {
   issue_id: string;
@@ -559,16 +572,23 @@ export class Orchestrator {
     this.running.delete(issueId);
     this.addRuntimeSeconds(entry);
 
-    const outcome = entry.terminating ? "canceled" : exit.kind === "normal" ? "completed" : "failed";
-    const lastError = exit.kind === "abnormal" ? exit.reason ?? "worker failed" : null;
+    // A terminated run is not a failed one: reaching the terminal state IS the
+    // success path, and a turn we stopped ourselves reports "cancelled" purely
+    // because we stopped it — neither belongs in the log as a worker failure.
+    const term = entry.terminating;
+    const stoppedByUs = exit.kind === "abnormal" && /session stopped/.test(exit.reason ?? "");
+    const outcome = term
+      ? term.cleanupWorkspace ? "delivered" : "canceled"
+      : exit.kind === "normal" ? "completed" : "failed";
+    const lastError = exit.kind === "abnormal" && !(term && stoppedByUs) ? exit.reason ?? "worker failed" : null;
     if (lastError) entry.events.push({ at: new Date().toISOString(), event: "worker_failed", message: lastError });
     this.archiveLog(issueId, entry, outcome, lastError);
 
     // Terminated: optional cleanup, no retry. An operator Stop halted the issue
     // before terminating — keep its claim so it waits for a manual state change;
     // a reconciliation terminate releases the claim as before.
-    if (entry.terminating) {
-      if (entry.terminating.cleanupWorkspace) {
+    if (term) {
+      if (term.cleanupWorkspace) {
         // Record the deliverable (branch/commit/files) before the worktree goes.
         void (async () => {
           await this.finalizeDelivery(entry.identifier, issueId);
@@ -579,7 +599,10 @@ export class Orchestrator {
         this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
       } else {
         this.claimed.delete(issueId);
-        this.logger.info("run canceled by reconciliation", { issue_id: issueId, issue_identifier: entry.identifier });
+        this.logger.info(term.cleanupWorkspace ? "run finished in a terminal state" : "run canceled by reconciliation", {
+          issue_id: issueId,
+          issue_identifier: entry.identifier,
+        });
       }
       this.notify();
       return;
@@ -850,12 +873,39 @@ export class Orchestrator {
     }
   }
 
-  /** Terminate a running worker (SPEC §8.5). cleanupWorkspace only for terminal state. */
+  /**
+   * Terminate a running worker (SPEC §8.5). cleanupWorkspace only for terminal state.
+   *
+   * A terminal state is normally the agent's own doing (it moved the issue mid-turn
+   * and is still committing/verifying), so that case is given a grace window: the
+   * run is marked terminating but the live turn is left to settle on its own, and
+   * only a run still going past {@link TERMINAL_GRACE_MS} is stopped outright.
+   * Every other reason to terminate stops the session immediately, as before.
+   */
   private terminateRunning(issueId: string, cleanupWorkspace: boolean): void {
     const entry = this.running.get(issueId);
     if (!entry) return;
-    entry.terminating = { cleanupWorkspace };
-    this.logger.info("terminating running issue", { issue_id: issueId, issue_identifier: entry.identifier, cleanup: cleanupWorkspace });
+    if (entry.terminating) {
+      // Already winding down; enforce the grace deadline rather than re-arming it.
+      this.enforceTerminalGrace(issueId, entry);
+      return;
+    }
+    entry.terminating = { cleanupWorkspace, grace_until_ms: cleanupWorkspace ? Date.now() + TERMINAL_GRACE_MS : null };
+    this.logger.info("terminating running issue", {
+      issue_id: issueId,
+      issue_identifier: entry.identifier,
+      cleanup: cleanupWorkspace,
+      grace: cleanupWorkspace ? TERMINAL_GRACE_MS : 0,
+    });
+    if (!cleanupWorkspace) entry.stopSession?.();
+  }
+
+  /** Stop a terminal-state run whose turn outstayed the grace window. */
+  private enforceTerminalGrace(issueId: string, entry: RunningEntry): void {
+    const until = entry.terminating?.grace_until_ms ?? null;
+    if (until === null || Date.now() <= until) return;
+    entry.terminating!.grace_until_ms = null;
+    this.logger.warn("terminal-state grace expired; stopping session", { issue_id: issueId, issue_identifier: entry.identifier });
     entry.stopSession?.();
   }
 

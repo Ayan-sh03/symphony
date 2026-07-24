@@ -63,7 +63,8 @@ function deliveryPanel(d) {
 
 export function detailPage(d) {
   const run = d.running, ret = d.retry;
-  const statusKind = d.status === "running" ? "active" : d.status === "completed" ? "ok" : d.status === "queued" ? "active" : "warn";
+  const statusKind = d.status === "running" || d.status === "queued" ? "active"
+    : d.status === "completed" || d.status === "delivered" ? "ok" : "warn";
 
   const rows = [["Issue id", mono(d.issue_id)]];
   const trackerState = run ? run.state : d.state;

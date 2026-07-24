@@ -577,3 +577,56 @@ test("pushIssueBranch rejects scratch projects and issues without a delivery", a
   await assert.rejects(() => orch2.pushIssueBranch("T-1"), /no recorded delivery/, "nothing delivered yet");
   orch2.stop();
 });
+
+/**
+ * Fake backend that behaves like a real coding agent: it moves the issue to the
+ * terminal state through the tracker tool *mid-turn*, then keeps working for a
+ * while (committing, verifying) before the turn completes. Records whether the
+ * orchestrator stopped the session out from under the live turn.
+ */
+function makeMidTurnFactory(kind: string, seen: { cancelled: boolean }): AgentFactory {
+  return {
+    kind,
+    create(o: AgentSessionOptions): AgentSession {
+      let stopped = false;
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          await o.adapter.executeAgentTool(
+            "set_issue_result",
+            { state: "done", comment: "did the work mid-turn" },
+            { issue: o.issue },
+          );
+          // Several poll/reconcile cycles of after-work while the turn is live.
+          for (let i = 0; i < 10 && !stopped; i++) await new Promise((r) => setTimeout(r, 100));
+          if (stopped) { seen.cancelled = true; return { status: "cancelled", error: "session stopped" } as const; }
+          return { status: "completed" } as const;
+        },
+        stop() { stopped = true; },
+      };
+    },
+  };
+}
+
+test("an issue moved to terminal mid-turn finishes as delivered, not a failed/cancelled run", async () => {
+  const seen = { cancelled: false };
+  registerAgentFactory(makeMidTurnFactory("fake-midturn", seen));
+  const { issuesDir, wfPath, workflow, config } = setup("done");
+  // The workflow's agent kind comes from setup(); point it at the mid-turn fake.
+  const cfg = { ...config, agent_kind: "fake-midturn" };
+  const orch = new Orchestrator({ config: cfg, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    assert.ok(await waitFor(() => readState(issuesDir) === "done"), "agent's own tool call moves the issue");
+    const settled = await waitFor(() => orch.issueDetail("T-1")?.status === "delivered", 12000);
+    assert.ok(settled, `run should archive as delivered, got ${orch.issueDetail("T-1")?.status}`);
+    assert.equal(seen.cancelled, false, "the live turn was left to finish inside the grace window");
+    const detail = orch.issueDetail("T-1")!;
+    assert.equal(detail.last_error, null, "a terminal handoff is not a worker error");
+    assert.ok(!detail.recent_events.some((e) => e.event === "worker_failed"), "no worker_failed row in the log");
+  } finally {
+    orch.stop();
+  }
+});
