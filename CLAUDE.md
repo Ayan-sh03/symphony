@@ -62,6 +62,18 @@ append one at runtime. With no `--projects` flag / manifest, the host runs a sin
 `default` project (back-compat). This is a host extension above the single-workflow
 SPEC — the orchestrator itself is unchanged and unaware of projects.
 
+**Repository delivery (extension, SPEC Appendix B).** Set `workspace.repository` and a
+project's workspaces become **git worktrees** of that repo on `issue/<identifier>`
+(`workspace.branch_template`), cut from `workspace.base_branch` — the base is recorded
+in the repo's local config at creation, since HEAD moves. On completion the orchestrator
+records an `IssueDelivery` (branch, SHA, base, files, tests, summary) via the optional
+`TrackerAdapter.setIssueDelivery` and parks the issue in `tracker.review_state`; an
+operator marks it done. Cleanup removes the worktree, **never** the branch, and preserves
+it whenever the work isn't safely captured (dirty, missing branch, unknown status).
+Pushing (`workspace.delivery_mode: push|pr`) is a manual console action only. `WORKFLOW.dev.md`
+is the self-dev instance of this. **All git in `workspace/manager.ts` is async on purpose** —
+every project, agent and the console share one event loop.
+
 The console is a small client-side app in `src/server/ui/` — plain browser ES
 modules rendered with **lit-html** (no bundler, no build step): the server serves
 the files from disk at `/ui/*` (`httpServer.ts`, which also maps
@@ -74,7 +86,9 @@ and call `rerender()`. It is project-scoped: routes are hash-routed under a proj
 id (`#/<pid>`, `#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`,
 `#/<pid>/add-project`), a header dropdown switches projects (persisted in
 `localStorage`), and every fetch hits `/api/v1/projects/<pid>/…` (`state`,
-`issues`, `refresh`, `<identifier>`, …). `/api/v1/projects` lists/creates projects.
+`issues`, `refresh`, `<identifier>`, `issues/<id>/push-branch`, …).
+`/api/v1/projects` lists/creates projects. The API is unauthenticated and
+`push-branch` reaches a remote with ambient git credentials — bind it to loopback.
 
 ## Conventions
 

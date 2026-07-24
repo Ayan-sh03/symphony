@@ -250,6 +250,13 @@ Key rules (see [`README.md`](README.md) → adapter profile, and SPEC §11):
 - Optional `supportsCreate`/`createIssue` and `supportsBoard`/`listAllIssues`/`setIssueState`
   light up the console's **New issue** form, **Board**, and **Start/Hold/Reopen** actions
   automatically. Omit them and the UI hides those controls.
+- Optional `setIssueDelivery` persists the delivery record for repository-backed projects
+  (SPEC Appendix B): branch, commit, base, changed files, and whether the handoff needs a
+  human. It is a **merge**, not a write — fields absent from the patch keep their stored
+  value, which is how the orchestrator hands you git facts at completion and only
+  `pushed_at` after a push. Absent fields are also your chance to fill in what only the
+  tracker knows (the agent's summary and test report). Omit the method entirely and
+  repository projects still work; they just carry no delivery record.
 
 [`src/tracker/fileAdapter.ts`](src/tracker/fileAdapter.ts) is a complete, dependency-free
 reference implementing all of the above.
