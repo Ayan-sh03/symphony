@@ -26,6 +26,14 @@ export interface TrackerConfig {
    * only tells the console which states to offer and where new issues should land.
    */
   backlog_states: string[];
+  /**
+   * Review state (extension): on `workspace.repository` projects, an issue whose
+   * run reaches the first terminal state is moved here instead, with its delivery
+   * (branch, commit, files) recorded. It MUST NOT be listed in active_states or
+   * terminal_states — it parks the issue for operator review until it is moved to
+   * a real terminal state (e.g. via the console's Mark done).
+   */
+  review_state: string;
 }
 
 export interface HooksConfig {
@@ -64,6 +72,17 @@ export interface ServiceConfigValues {
   poll_interval_ms: number;
   workspace_root: string;
   workspace_repository: string | null;
+  /**
+   * Repository delivery settings (extension; only meaningful when
+   * workspace_repository is set):
+   * - base_branch: ref issue branches are cut from (null = the repo's current HEAD).
+   * - branch_template: issue branch naming rule; must contain "{identifier}".
+   * - delivery_mode: "branch" (local only), "push", or "pr" (both expose a
+   *   Push action in the console; PR creation itself is manual).
+   */
+  workspace_base_branch: string | null;
+  workspace_branch_template: string;
+  workspace_delivery_mode: string;
   hooks: HooksConfig;
   /** Selected agent backend (SPEC §10 generalized). Default "codex". */
   agent_kind: string;
@@ -128,7 +147,12 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     active_states: coerceStringList(trackerRaw.active_states),
     terminal_states: coerceStringList(trackerRaw.terminal_states),
     backlog_states: coerceStringList(trackerRaw.backlog_states),
+    review_state: typeof trackerRaw.review_state === "string" && trackerRaw.review_state.trim() !== "" ? trackerRaw.review_state.trim() : "review",
   };
+  const norm = (s: string) => s.trim().toLowerCase();
+  if (tracker.active_states.some((s) => norm(s) === norm(tracker.review_state)) || tracker.terminal_states.some((s) => norm(s) === norm(tracker.review_state))) {
+    throw new ConfigError("tracker.review_state must not appear in active_states or terminal_states");
+  }
 
   const polling = asObject(cfg.polling);
   const poll_interval_ms = polling.interval_ms !== undefined ? coerceInt(polling.interval_ms, "polling.interval_ms") : 30000;
@@ -143,6 +167,15 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
   const workspace_repository = repositoryRaw === null
     ? null
     : path.isAbsolute(repositoryRaw) ? path.normalize(repositoryRaw) : path.normalize(path.join(workflowDir, repositoryRaw));
+  const workspace_base_branch = typeof workspace.base_branch === "string" && workspace.base_branch.trim() !== "" ? workspace.base_branch.trim() : null;
+  const workspace_branch_template = typeof workspace.branch_template === "string" && workspace.branch_template.trim() !== "" ? workspace.branch_template.trim() : "issue/{identifier}";
+  if (!workspace_branch_template.includes("{identifier}")) {
+    throw new ConfigError('workspace.branch_template must contain the "{identifier}" placeholder');
+  }
+  const workspace_delivery_mode = typeof workspace.delivery_mode === "string" && workspace.delivery_mode.trim() !== "" ? workspace.delivery_mode.trim().toLowerCase() : "branch";
+  if (!["branch", "push", "pr"].includes(workspace_delivery_mode)) {
+    throw new ConfigError('workspace.delivery_mode must be one of "branch", "push", "pr"');
+  }
 
   const hooksRaw = asObject(cfg.hooks);
   const hookStr = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
@@ -205,6 +238,9 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     poll_interval_ms,
     workspace_root,
     workspace_repository,
+    workspace_base_branch,
+    workspace_branch_template,
+    workspace_delivery_mode,
     hooks,
     agent_kind,
     max_concurrent_agents,
