@@ -67,6 +67,22 @@ export interface WorkspaceManagerOptions {
 
 const DEFAULT_BRANCH_TEMPLATE = "issue/{identifier}";
 
+/**
+ * Runner scratch files written into the workspace (issue snapshot in, result
+ * envelope out). In repository mode they live inside the worktree, so git must
+ * be told to ignore them: otherwise the agent commits them onto the issue
+ * branch, they show up as the delivery's changed files, and deleting one leaves
+ * the worktree dirty enough to block cleanup forever.
+ */
+const SCRATCH_FILES = ["SYMPHONY_ISSUE.json", "SYMPHONY_RESULT.json"];
+const EXCLUDE_MARKER = "# symphony runner scratch files (local only)";
+
+/** True for a `git status --porcelain` line about one of the scratch files. */
+function isScratchLine(line: string): boolean {
+  const p = line.slice(3).trim().replace(/^"|"$/g, "");
+  return SCRATCH_FILES.includes(p);
+}
+
 export class WorkspaceManager {
   private opts: WorkspaceManagerOptions;
   constructor(opts: WorkspaceManagerOptions) {
@@ -146,6 +162,10 @@ export class WorkspaceManager {
       }
     }
 
+    // Idempotent, and applied to reused worktrees too so workspaces created
+    // before this rule still get it.
+    if (this.opts.repository) this.excludeScratchFiles(wsPath);
+
     if (created_now && this.opts.hooks.after_create) {
       const res = await this.runHook("after_create", this.opts.hooks.after_create, wsPath);
       if (!res.ok) {
@@ -199,12 +219,17 @@ export class WorkspaceManager {
       }
       try {
         // `git worktree remove` refuses worktrees with untracked files. Our own
-        // issue snapshot is excluded from the dirty check above, so drop it here
+        // scratch files are excluded from the dirty check above, so drop them here
         // too — anything else untracked would have preserved the worktree already.
-        try {
-          fs.rmSync(path.join(wsPath, "SYMPHONY_ISSUE.json"), { force: true });
-        } catch {
-          /* best effort */
+        // A scratch file an older run committed is tracked: restore it after the
+        // delete so the worktree git sees is clean.
+        for (const name of SCRATCH_FILES) {
+          try {
+            fs.rmSync(path.join(wsPath, name), { force: true });
+          } catch {
+            /* best effort */
+          }
+          this.git(wsPath, ["checkout", "--", name], true);
         }
         this.git(this.opts.repository, ["worktree", "remove", wsPath]);
         this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch });
@@ -240,7 +265,7 @@ export class WorkspaceManager {
     if (base && branchExists) {
       // Three-dot: diff from the merge-base, so base may have moved since branching.
       const out = this.git(repo, ["diff", "--name-only", `${base}...${branch}`], true);
-      if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "");
+      if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "" && !SCRATCH_FILES.includes(l));
     }
     return { branch, commit_sha: commitSha, base_branch: base, files_changed: filesChanged, uncommitted, branch_exists: branchExists };
   }
@@ -251,20 +276,46 @@ export class WorkspaceManager {
     this.git(this.opts.repository, ["push", "origin", branch]);
   }
 
+  /**
+   * Teach git to ignore the runner's scratch files, via the worktree's exclude
+   * file (`info/exclude` — repository-local, never committed). Best effort: an
+   * unwritable exclude file only costs us the tidiness, so it must not fail a run.
+   */
+  private excludeScratchFiles(wsPath: string): void {
+    const rel = this.git(wsPath, ["rev-parse", "--git-path", "info/exclude"], true)?.trim();
+    if (!rel) return;
+    const file = path.resolve(wsPath, rel);
+    try {
+      let text = "";
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch {
+        /* no exclude file yet */
+      }
+      const lines = text.split(/\r?\n/);
+      const missing = SCRATCH_FILES.filter((name) => !lines.includes(`/${name}`));
+      if (missing.length === 0) return;
+      const body = (text && !text.endsWith("\n") ? "\n" : "") + `${EXCLUDE_MARKER}\n` + missing.map((n) => `/${n}\n`).join("");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, body, "utf8");
+    } catch (err) {
+      this.opts.logger.debug("could not update git exclude for scratch files", { path: file, error: String(err) });
+    }
+  }
+
   private branchExists(branch: string): boolean {
     if (!this.opts.repository) return false;
     return this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true) !== null;
   }
 
   /**
-   * Porcelain status of the worktree, excluding the runner's own issue snapshot
-   * file. Null when git itself fails (callers must treat that as "unknown", not
-   * "clean").
+   * Porcelain status of the worktree, excluding the runner's own scratch files.
+   * Null when git itself fails (callers must treat that as "unknown", not "clean").
    */
   private uncommittedPaths(wsPath: string): string[] | null {
     const out = this.git(wsPath, ["status", "--porcelain"], true);
     if (out === null) return null;
-    return out.split(/\r?\n/).filter((line) => line !== "" && !line.endsWith(" SYMPHONY_ISSUE.json"));
+    return out.split(/\r?\n/).filter((line) => line !== "" && !isScratchLine(line));
   }
 
   private git(cwd: string, args: string[], allowFailure = false): string | null {

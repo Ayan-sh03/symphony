@@ -199,3 +199,37 @@ test("pushBranch pushes the issue branch to origin", async () => {
   assert.throws(() => plain.pushBranch("issue/PUSH-1"), WorkspaceError, "scratch projects cannot push");
 });
 
+
+test("runner scratch files are git-ignored inside the worktree", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("SCRATCH-1");
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_ISSUE.json"), "{}\n");
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_RESULT.json"), "{}\n");
+  assert.equal(git(ws.path, ["status", "--porcelain"]).trim(), "", "git sees a clean worktree");
+  // `git add -A` (what an agent typically runs) must not pick them up either.
+  git(ws.path, ["add", "-A"]);
+  assert.equal(git(ws.path, ["diff", "--cached", "--name-only"]).trim(), "", "nothing staged from scratch files");
+});
+
+test("a scratch file committed by an earlier run neither counts as delivery nor blocks cleanup", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("SCRATCH-2");
+  // Simulate the pre-fix state: the snapshot is tracked on the issue branch.
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_ISSUE.json"), "{}\n");
+  git(ws.path, ["add", "-f", "SYMPHONY_ISSUE.json"]);
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "real work\n");
+  git(ws.path, ["add", "work.txt"]);
+  git(ws.path, ["commit", "-qm", "work plus scratch"]);
+
+  const info = wm.deliveryInfo("SCRATCH-2")!;
+  assert.deepEqual(info.files_changed, ["work.txt"], "scratch files stay out of the delivery");
+  assert.deepEqual(info.uncommitted, []);
+
+  await wm.cleanupForIssue("SCRATCH-2");
+  assert.ok(!fs.existsSync(ws.path), "worktree removed even though a scratch file is tracked");
+  assert.equal(git(repo, ["show", "issue/SCRATCH-2:work.txt"]), "real work\n");
+});
