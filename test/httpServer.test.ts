@@ -31,7 +31,8 @@ function project(root: string, name: string, issueId: string): string {
   fs.writeFileSync(path.join(dir, "WORKFLOW.md"), WF);
   fs.writeFileSync(
     path.join(dir, "issues", `${issueId}.json`),
-    JSON.stringify({ identifier: issueId, title: `title ${issueId}`, state: "todo" }),
+    // backlog on purpose: an active-state issue would dispatch a real agent on tick.
+    JSON.stringify({ identifier: issueId, title: `title ${issueId}`, state: "backlog" }),
   );
   return path.join(dir, "WORKFLOW.md");
 }
@@ -125,6 +126,44 @@ test("POST /issues/<id>/stop 404s when nothing is running or retrying", async ()
     assert.equal(body.error.code, "nothing_to_stop");
 
     assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1/stop`)).status, 405);
+  });
+});
+
+test("POST /issues/<id>/push-branch 501s on a scratch project (no repository)", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/issues/A-1/push-branch`, { method: "POST" });
+    assert.equal(res.status, 501, "the project cannot push at all: not a bad request");
+    const body = (await res.json()) as any;
+    assert.equal(body.error.code, "not_supported");
+    assert.match(body.error.message, /workspace\.repository/);
+
+    assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1/push-branch`)).status, 405);
+  });
+});
+
+test("POST /issues persists the per-task agent override and rejects unknown kinds", async () => {
+  await withServer(async (base) => {
+    // backlog state: parked, so the create-triggered tick never dispatches a real agent.
+    const created = await fetch(`${base}/api/v1/projects/a/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-2", title: "agent override", state: "backlog", agent: "opencode" }),
+    });
+    assert.equal(created.status, 201);
+
+    const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+    const row = board.issues.find((i: { identifier: string }) => i.identifier === "A-2");
+    assert.equal(row.agent_override, "opencode", "override should persist instead of falling back to the default");
+    assert.equal(row.agent, "opencode");
+
+    const bad = await fetch(`${base}/api/v1/projects/a/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-3", title: "bad agent", state: "backlog", agent: "nope" }),
+    });
+    assert.equal(bad.status, 400);
+    const err = (await bad.json()) as any;
+    assert.match(err.error.message, /unknown agent\.kind/);
   });
 });
 

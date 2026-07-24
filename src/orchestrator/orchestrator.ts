@@ -3,7 +3,7 @@
  * state. Node's single-threaded event loop serializes these mutations; all worker
  * outcomes are reported back here and converted into explicit transitions.
  */
-import type { Issue, AgentUpdate, LiveSession } from "../domain/types.ts";
+import type { Issue, AgentUpdate, LiveSession, IssueDelivery } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
@@ -13,6 +13,21 @@ import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from
 import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
+
+/**
+ * Failure of an operator action, carrying enough classification for the HTTP
+ * layer to answer with the right status instead of flattening everything to 400.
+ */
+export type OrchestratorErrorCode = "not_supported" | "not_found" | "conflict" | "upstream_failed";
+
+export class OrchestratorError extends Error {
+  code: OrchestratorErrorCode;
+  constructor(code: OrchestratorErrorCode, message: string) {
+    super(message);
+    this.name = "OrchestratorError";
+    this.code = code;
+  }
+}
 
 /** One entry in an agent's activity log (SPEC §13.7.2 recent_events). */
 interface LogEvent {
@@ -30,7 +45,12 @@ interface RunningEntry {
   started_ms: number;
   last_event_ms: number | null;
   stopSession: (() => void) | null;
-  terminating: { cleanupWorkspace: boolean } | null;
+  /**
+   * Set once the run is being wound down. `grace_until_ms` (terminal-state
+   * termination only) lets the live turn settle on its own instead of being
+   * killed mid-turn; past the deadline the session is stopped anyway.
+   */
+  terminating: { cleanupWorkspace: boolean; grace_until_ms: number | null } | null;
   workerDone: Promise<void>;
   events: LogEvent[];
   agent: string;
@@ -48,6 +68,14 @@ interface FinishedLog {
 
 const MAX_EVENTS = 80;
 const MAX_HISTORY = 40;
+
+/**
+ * How long a live turn may keep running after its issue reached a terminal state
+ * (extension). The agent usually moves the issue itself, mid-turn, and is still
+ * finishing up (committing, verifying) when reconciliation notices; killing it
+ * there turned every successful run into a cancelled one.
+ */
+const TERMINAL_GRACE_MS = 120000;
 
 interface RetryEntry {
   issue_id: string;
@@ -142,6 +170,9 @@ export class Orchestrator {
       root: this.config.workspace_root,
       hooks: this.config.hooks,
       logger: this.logger,
+      repository: this.config.workspace_repository,
+      baseBranch: this.config.workspace_base_branch,
+      branchTemplate: this.config.workspace_branch_template,
     });
   }
 
@@ -234,6 +265,7 @@ export class Orchestrator {
     if (!this.canCreateIssues() || !this.adapter.createIssue) {
       throw new Error("the active tracker does not support creating issues");
     }
+    if (input.agent && !isSupportedAgentKind(input.agent)) throw new Error(`unknown agent.kind: ${input.agent}`);
     const issue = await this.adapter.createIssue(input);
     this.logger.info("issue created", { issue_id: issue.id, issue_identifier: issue.identifier });
     this.scheduleTick(0);
@@ -298,6 +330,9 @@ export class Orchestrator {
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
+      // Delivered work waiting on a human sits between "being worked on" and
+      // "closed", which is also where the operator's attention should land.
+      this.deliveryEnabled() ? [this.config.tracker.review_state] : [],
       this.config.tracker.terminal_states,
       all.map((i) => i.state),
     );
@@ -320,6 +355,7 @@ export class Orchestrator {
         is_terminal: this.isTerminalState(i.state),
         agent: this.resolveAgentKind(i), // effective backend
         agent_override: i.agent,          // explicit per-task choice, or null
+        needs_attention: i.delivery?.needs_attention === true,
       };
     });
     return {
@@ -328,6 +364,7 @@ export class Orchestrator {
       active_states: this.config.tracker.active_states,
       terminal_states: this.config.tracker.terminal_states,
       backlog_states: this.config.tracker.backlog_states,
+      review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
       start_state: this.config.tracker.active_states[0] ?? "todo",
       issues,
     };
@@ -553,21 +590,37 @@ export class Orchestrator {
     this.running.delete(issueId);
     this.addRuntimeSeconds(entry);
 
-    const outcome = entry.terminating ? "canceled" : exit.kind === "normal" ? "completed" : "failed";
-    const lastError = exit.kind === "abnormal" ? exit.reason ?? "worker failed" : null;
+    // A terminated run is not a failed one: reaching the terminal state IS the
+    // success path, and a turn we stopped ourselves reports "cancelled" purely
+    // because we stopped it — neither belongs in the log as a worker failure.
+    const term = entry.terminating;
+    const stoppedByUs = exit.kind === "abnormal" && /session stopped/.test(exit.reason ?? "");
+    const outcome = term
+      ? term.cleanupWorkspace ? "delivered" : "canceled"
+      : exit.kind === "normal" ? "completed" : "failed";
+    const lastError = exit.kind === "abnormal" && !(term && stoppedByUs) ? exit.reason ?? "worker failed" : null;
     if (lastError) entry.events.push({ at: new Date().toISOString(), event: "worker_failed", message: lastError });
     this.archiveLog(issueId, entry, outcome, lastError);
 
     // Terminated: optional cleanup, no retry. An operator Stop halted the issue
     // before terminating — keep its claim so it waits for a manual state change;
     // a reconciliation terminate releases the claim as before.
-    if (entry.terminating) {
-      if (entry.terminating.cleanupWorkspace) void this.workspaceManager.cleanupForIssue(entry.identifier);
+    if (term) {
+      if (term.cleanupWorkspace) {
+        // Record the deliverable (branch/commit/files) before the worktree goes.
+        void (async () => {
+          await this.finalizeDelivery(entry.identifier, issueId);
+          await this.workspaceManager.cleanupForIssue(entry.identifier);
+        })();
+      }
       if (this.halted.has(issueId)) {
         this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
       } else {
         this.claimed.delete(issueId);
-        this.logger.info("run canceled by reconciliation", { issue_id: issueId, issue_identifier: entry.identifier });
+        this.logger.info(term.cleanupWorkspace ? "run finished in a terminal state" : "run canceled by reconciliation", {
+          issue_id: issueId,
+          issue_identifier: entry.identifier,
+        });
       }
       this.notify();
       return;
@@ -656,6 +709,103 @@ export class Orchestrator {
     this.notify();
   }
 
+  // ---- delivery (extension: repository-backed workspaces) ----
+
+  /** True when this project delivers work as repository branches. */
+  private deliveryEnabled(): boolean {
+    return this.config.workspace_repository !== null;
+  }
+
+  /**
+   * Record the deliverable for an issue that just reached the success terminal
+   * state (the first configured terminal state), then move it to the review
+   * state instead of leaving it done: the operator inspects/merges the branch
+   * and only then marks the issue done. Unsafe deliveries (uncommitted work in
+   * the worktree, or a missing branch ref) are flagged needs_attention and the
+   * worktree is preserved by the workspace manager's own guards. No-op for
+   * scratch projects and for other terminal states (e.g. canceled).
+   */
+  private async finalizeDelivery(identifier: string, issueId: string): Promise<void> {
+    if (!this.deliveryEnabled()) return;
+    let fresh: Issue | undefined;
+    try {
+      fresh = (await this.adapter.fetchIssuesByIds([issueId]))[0];
+    } catch {
+      return; // tracker hiccup: leave state as-is; cleanup guards still apply
+    }
+    if (!fresh) return;
+    const doneState = this.config.tracker.terminal_states[0];
+    if (!doneState || this.normState(fresh.state) !== this.normState(doneState)) return;
+    const info = await this.workspaceManager.deliveryInfo(identifier);
+    if (!info) return; // worktree already gone: nothing to record from
+
+    const reasons: string[] = [];
+    if (info.uncommitted.length > 0) reasons.push(`uncommitted changes left in workspace: ${info.uncommitted.join(", ")}`);
+    if (!info.branch_exists) reasons.push(`issue branch ${info.branch} is missing in the repository`);
+    // `tests` and `summary` are deliberately absent, not null: the adapter fills
+    // them from the agent's own result envelope, and an explicit null would be a
+    // value that overwrites what it knows.
+    const delivery: Partial<IssueDelivery> = {
+      branch: info.branch,
+      commit_sha: info.commit_sha,
+      base_branch: info.base_branch,
+      files_changed: info.files_changed,
+      uncommitted: info.uncommitted,
+      needs_attention: reasons.length > 0,
+      attention_reason: reasons.length > 0 ? reasons.join("; ") : null,
+      delivered_at: new Date().toISOString(),
+      pushed_at: null,
+    };
+    try {
+      if (this.adapter.setIssueDelivery) {
+        await this.adapter.setIssueDelivery(issueId, delivery);
+      } else {
+        this.logger.warn("tracker cannot record delivery; skipping", { issue_id: issueId, issue_identifier: identifier });
+      }
+    } catch (err) {
+      this.logger.warn("delivery record failed", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+    }
+    if (this.adapter.setIssueState) {
+      try {
+        await this.adapter.setIssueState(issueId, this.config.tracker.review_state);
+        this.logger.info("issue delivered for review", {
+          issue_id: issueId,
+          issue_identifier: identifier,
+          branch: delivery.branch,
+          commit_sha: delivery.commit_sha ?? "",
+          needs_attention: delivery.needs_attention,
+        });
+      } catch (err) {
+        this.logger.warn("review-state transition failed", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+      }
+    }
+  }
+
+  /**
+   * Push the recorded issue branch to the origin remote (delivery_mode push/pr).
+   * Manual operator action from the console — never automatic.
+   */
+  async pushIssueBranch(id: string): Promise<{ branch: string; pushed_at: string }> {
+    if (!this.deliveryEnabled()) throw new OrchestratorError("not_supported", "this project has no workspace.repository configured");
+    if (!this.adapter.setIssueDelivery) throw new OrchestratorError("not_supported", "the active tracker does not support delivery records");
+    const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
+    if (!issue) throw new OrchestratorError("not_found", `unknown issue ${id}`);
+    const branch = issue.delivery?.branch;
+    if (!branch) throw new OrchestratorError("conflict", `issue ${issue.identifier} has no recorded delivery to push`);
+    try {
+      await this.workspaceManager.pushBranch(branch);
+    } catch (err) {
+      // The push itself failed (no remote, rejected, network) — an upstream
+      // problem, not a bad request.
+      throw new OrchestratorError("upstream_failed", String((err as Error).message ?? err));
+    }
+    const pushed_at = new Date().toISOString();
+    await this.adapter.setIssueDelivery(id, { pushed_at });
+    this.logger.info("issue branch pushed", { issue_id: id, issue_identifier: issue.identifier, branch });
+    this.notify();
+    return { branch, pushed_at };
+  }
+
   /** SPEC §16.6 on_retry_timer. */
   private async onRetryTimer(issueId: string): Promise<void> {
     const retry = this.retry_attempts.get(issueId);
@@ -677,6 +827,8 @@ export class Orchestrator {
       return;
     }
     if (this.isTerminalState(issue.state)) {
+      // Record the deliverable (branch/commit/files) before the worktree goes.
+      await this.finalizeDelivery(issue.identifier, issue.id);
       void this.workspaceManager.cleanupForIssue(issue.identifier);
       this.claimed.delete(issueId);
       this.notify();
@@ -746,12 +898,39 @@ export class Orchestrator {
     }
   }
 
-  /** Terminate a running worker (SPEC §8.5). cleanupWorkspace only for terminal state. */
+  /**
+   * Terminate a running worker (SPEC §8.5). cleanupWorkspace only for terminal state.
+   *
+   * A terminal state is normally the agent's own doing (it moved the issue mid-turn
+   * and is still committing/verifying), so that case is given a grace window: the
+   * run is marked terminating but the live turn is left to settle on its own, and
+   * only a run still going past {@link TERMINAL_GRACE_MS} is stopped outright.
+   * Every other reason to terminate stops the session immediately, as before.
+   */
   private terminateRunning(issueId: string, cleanupWorkspace: boolean): void {
     const entry = this.running.get(issueId);
     if (!entry) return;
-    entry.terminating = { cleanupWorkspace };
-    this.logger.info("terminating running issue", { issue_id: issueId, issue_identifier: entry.identifier, cleanup: cleanupWorkspace });
+    if (entry.terminating) {
+      // Already winding down; enforce the grace deadline rather than re-arming it.
+      this.enforceTerminalGrace(issueId, entry);
+      return;
+    }
+    entry.terminating = { cleanupWorkspace, grace_until_ms: cleanupWorkspace ? Date.now() + TERMINAL_GRACE_MS : null };
+    this.logger.info("terminating running issue", {
+      issue_id: issueId,
+      issue_identifier: entry.identifier,
+      cleanup: cleanupWorkspace,
+      grace: cleanupWorkspace ? TERMINAL_GRACE_MS : 0,
+    });
+    if (!cleanupWorkspace) entry.stopSession?.();
+  }
+
+  /** Stop a terminal-state run whose turn outstayed the grace window. */
+  private enforceTerminalGrace(issueId: string, entry: RunningEntry): void {
+    const until = entry.terminating?.grace_until_ms ?? null;
+    if (until === null || Date.now() <= until) return;
+    entry.terminating!.grace_until_ms = null;
+    this.logger.warn("terminal-state grace expired; stopping session", { issue_id: issueId, issue_identifier: entry.identifier });
     entry.stopSession?.();
   }
 
@@ -809,7 +988,11 @@ export class Orchestrator {
 
     this.config = next;
     this.promptTemplate = def.prompt_template;
-    this.workspaceManager.update(next.workspace_root, next.hooks);
+    this.workspaceManager.update(next.workspace_root, next.hooks, {
+      repository: next.workspace_repository,
+      base_branch: next.workspace_base_branch,
+      branch_template: next.workspace_branch_template,
+    });
     if (kindChanged || providerChanged) {
       try {
         this.adapter = createAdapter(next.tracker.kind, next.tracker.provider, next.workflowDir, this.logger);
@@ -891,6 +1074,9 @@ export class Orchestrator {
         backlog_states: this.config.tracker.backlog_states,
         terminal_states: this.config.tracker.terminal_states,
         workspace_root: this.config.workspace_root,
+        repository: this.config.workspace_repository,
+        delivery_mode: this.config.workspace_delivery_mode,
+        review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
         can_create: this.canCreateIssues(),
         can_board: this.canBoard(),
         can_set_agent: this.canSetAgent(),
@@ -903,10 +1089,28 @@ export class Orchestrator {
    * retrying/finished views synchronously; for an issue that has never run (e.g. one
    * sitting in backlog) it falls back to the tracker so the console shows an idle
    * detail instead of a spurious 404. Returns null only when the tracker has no such issue.
+   * Retrying/halted/finished views carry no tracker state of their own, so those are
+   * enriched with the issue's current tracker state via the same lookup.
    */
   async issueDetailFor(identifier: string): Promise<IssueDetailView | null> {
     const known = this.issueDetail(identifier);
-    if (known) return this.withPersistedTranscript(known);
+    if (known && (known.running || known.state)) return this.withPersistedTranscript(known);
+    if (known) {
+      // A known run already carries the issue id, so enrich it with a targeted
+      // fetch — the console polls this route, and listing every issue each time
+      // would re-read the whole tracker for one row.
+      let issue: Issue | undefined;
+      try {
+        issue = (await this.adapter.fetchIssuesByIds([known.issue_id]))[0];
+      } catch {
+        issue = undefined;
+      }
+      if (issue) {
+        known.state = issue.state;
+        known.delivery = issue.delivery ?? null;
+      }
+      return this.withPersistedTranscript(known);
+    }
     if (!this.canBoard() || !this.adapter.listAllIssues) return null;
     let all: Issue[];
     try {
@@ -922,6 +1126,7 @@ export class Orchestrator {
       status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
       state: issue.state,
       agent: this.resolveAgentKind(issue),
+      delivery: issue.delivery ?? null,
       workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
       running: null,
       retry: null,
@@ -1056,6 +1261,11 @@ export interface SnapshotView {
     backlog_states: string[];
     terminal_states: string[];
     workspace_root: string;
+    /** Repository path for branch-delivering projects, null for scratch projects. */
+    repository: string | null;
+    delivery_mode: string;
+    /** State delivered issues wait in (null on scratch projects). */
+    review_state: string | null;
     can_create: boolean;
     can_board: boolean;
     can_set_agent: boolean;
@@ -1078,6 +1288,8 @@ export interface BoardIssueView {
   is_terminal: boolean;
   agent: string;
   agent_override: string | null;
+  /** Delivery was recorded but flagged unsafe (uncommitted work / missing branch). */
+  needs_attention: boolean;
 }
 
 export interface BoardView {
@@ -1086,16 +1298,19 @@ export interface BoardView {
   active_states: string[];
   terminal_states: string[];
   backlog_states: string[];
+  /** State delivered issues wait in for operator review (null on scratch projects). */
+  review_state: string | null;
   start_state: string;
   issues: BoardIssueView[];
 }
 
 /** Order states for the board: backlog, then active, then terminal, then any others seen. */
-function orderedStates(backlog: string[], active: string[], terminal: string[], seen: string[]): string[] {
+function orderedStates(backlog: string[], active: string[], review: string[], terminal: string[], seen: string[]): string[] {
   const out: string[] = [];
   const push = (s: string) => { if (s && !out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
   backlog.forEach(push);
   active.forEach(push);
+  review.forEach(push);
   terminal.forEach(push);
   seen.forEach(push);
   return out;
@@ -1105,10 +1320,12 @@ export interface IssueDetailView {
   issue_identifier: string;
   issue_id: string;
   status: string;
-  /** Tracker state, present for idle/queued issues that are not live. */
+  /** Tracker state, present when the issue is not live (live runs carry it under `running`). */
   state?: string;
   /** Effective agent backend that would run this issue. */
   agent?: string;
+  /** Recorded deliverable (repository projects), enriched from the tracker. */
+  delivery?: IssueDelivery | null;
   workspace: { path: string };
   running: unknown;
   retry: unknown;

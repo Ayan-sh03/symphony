@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { Orchestrator } from "../orchestrator/orchestrator.ts";
+import { OrchestratorError } from "../orchestrator/orchestrator.ts";
 import type { ProjectManager } from "../project/manager.ts";
 import type { Logger } from "../logger.ts";
 import { renderDashboard } from "./dashboard.ts";
@@ -191,6 +192,22 @@ export class SymphonyHttpServer {
       }
       return this.json(res, 200, { stopped: true, issue_id: id, issue_identifier: halt.identifier, attempts: halt.attempts, reason: halt.reason });
     }
+    const pushMatch = rest.match(/^\/issues\/([^/]+)\/push-branch$/);
+    if (pushMatch) {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      const id = decodeURIComponent(pushMatch[1]!);
+      void orch
+        .pushIssueBranch(id)
+        .then((r) => this.json(res, 200, { pushed: true, branch: r.branch, pushed_at: r.pushed_at }))
+        .catch((err) => {
+          // Distinguish "this project/issue can't be pushed" from "the push itself
+          // failed", so the console can tell the operator which one it is.
+          const code = err instanceof OrchestratorError ? err.code : "push_failed";
+          const status = code === "not_supported" ? 501 : code === "not_found" ? 404 : code === "upstream_failed" ? 502 : 409;
+          this.json(res, status, { error: { code, message: String((err as Error).message ?? err) } });
+        });
+      return;
+    }
     const agentMatch = rest.match(/^\/issues\/([^/]+)\/agent$/);
     if (agentMatch) {
       if (method !== "POST") return this.methodNotAllowed(res);
@@ -279,6 +296,7 @@ export class SymphonyHttpServer {
         state: typeof body.state === "string" ? body.state : null,
         priority: typeof body.priority === "number" ? body.priority : body.priority != null ? Number(body.priority) : null,
         labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
+        agent: typeof body.agent === "string" && body.agent.trim() !== "" ? body.agent.trim() : null,
       });
       this.json(res, 201, { created: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
     } catch (err) {

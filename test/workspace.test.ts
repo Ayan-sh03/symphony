@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { WorkspaceManager, workspaceKey, WorkspaceError } from "../src/workspace/manager.ts";
 import { Logger } from "../src/logger.ts";
 
@@ -76,4 +77,226 @@ test("cleanup removes workspace", async () => {
   assert.ok(fs.existsSync(ws.path));
   await wm.cleanupForIssue("CL-1");
   assert.ok(!fs.existsSync(ws.path));
+});
+function initRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "sym-repo-"));
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Symphony test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n");
+  execFileSync("git", ["-C", repo, "add", "README.md"]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "initial"]);
+  return repo;
+}
+
+test("git worktree cleanup retains the issue branch and its committed work", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("DELIVERY-1");
+  assert.equal(execFileSync("git", ["-C", ws.path, "branch", "--show-current"], { encoding: "utf8" }).trim(), "issue/DELIVERY-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "kept by the branch\n");
+  execFileSync("git", ["-C", ws.path, "add", "delivered.txt"]);
+  execFileSync("git", ["-C", ws.path, "commit", "-qm", "deliver issue work"]);
+  await wm.cleanupForIssue("DELIVERY-1");
+  assert.ok(!fs.existsSync(ws.path), "the disposable worktree is removed");
+  assert.match(execFileSync("git", ["-C", repo, "branch", "--list", "issue/DELIVERY-1"], { encoding: "utf8" }), /issue\/DELIVERY-1/);
+  assert.equal(execFileSync("git", ["-C", repo, "show", "issue/DELIVERY-1:delivered.txt"], { encoding: "utf8" }), "kept by the branch\n");
+});
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+test("branch_template names the issue branch", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, branchTemplate: "feat/{identifier}-work" });
+  assert.equal(wm.branchNameFor("SYM-9"), "feat/SYM-9-work");
+  const ws = await wm.createForIssue("SYM-9");
+  assert.equal(git(ws.path, ["branch", "--show-current"]).trim(), "feat/SYM-9-work");
+});
+
+test("base_branch cuts the worktree from the given ref, not HEAD", async () => {
+  const repo = initRepo();
+  git(repo, ["checkout", "-qb", "base-b"]);
+  fs.writeFileSync(path.join(repo, "only-on-base.txt"), "base branch content\n");
+  git(repo, ["add", "only-on-base.txt"]);
+  git(repo, ["commit", "-qm", "base branch commit"]);
+  const baseSha = git(repo, ["rev-parse", "base-b"]).trim();
+  git(repo, ["checkout", "-q", "-"]);
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "base-b" });
+  const ws = await wm.createForIssue("BASE-1");
+  assert.equal(git(ws.path, ["rev-parse", "HEAD"]).trim(), baseSha, "worktree starts at the configured base");
+  assert.ok(fs.existsSync(path.join(ws.path, "only-on-base.txt")));
+});
+
+test("deliveryInfo reports branch facts; null for scratch projects and missing worktrees", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  assert.equal(await plain.deliveryInfo("X-1"), null, "no repository configured");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  assert.equal(await wm.deliveryInfo("X-1"), null, "worktree does not exist yet");
+
+  const ws = await wm.createForIssue("X-1");
+  fs.writeFileSync(path.join(ws.path, "feature.ts"), "export const x = 1;\n");
+  git(ws.path, ["add", "feature.ts"]);
+  git(ws.path, ["commit", "-qm", "add feature"]);
+  const info = (await wm.deliveryInfo("X-1"))!;
+  const base = git(repo, ["branch", "--show-current"]).trim();
+  assert.equal(info.branch, "issue/X-1");
+  assert.equal(info.commit_sha, git(ws.path, ["rev-parse", "HEAD"]).trim());
+  assert.equal(info.base_branch, base, "no configured base: the repo's current branch");
+  assert.deepEqual(info.files_changed, ["feature.ts"]);
+  assert.deepEqual(info.uncommitted, []);
+  assert.equal(info.branch_exists, true);
+
+  fs.writeFileSync(path.join(ws.path, "dirty.txt"), "not committed\n");
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_ISSUE.json"), "{}");
+  const dirty = (await wm.deliveryInfo("X-1"))!;
+  assert.deepEqual(dirty.uncommitted, ["?? dirty.txt"], "runner's own issue file is excluded");
+});
+
+test("the recorded base survives the repo's HEAD moving on after the branch was cut", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const cutFrom = git(repo, ["branch", "--show-current"]).trim();
+
+  const ws = await wm.createForIssue("BASE-2");
+  fs.writeFileSync(path.join(ws.path, "feature.ts"), "export const x = 1;\n");
+  git(ws.path, ["add", "feature.ts"]);
+  git(ws.path, ["commit", "-qm", "add feature"]);
+
+  // The operator moves the main repo onto an unrelated branch mid-run.
+  git(repo, ["checkout", "-qb", "some-other-work"]);
+  fs.writeFileSync(path.join(repo, "unrelated.txt"), "not part of the issue\n");
+  git(repo, ["add", "unrelated.txt"]);
+  git(repo, ["commit", "-qm", "unrelated"]);
+
+  const info = (await wm.deliveryInfo("BASE-2"))!;
+  assert.equal(info.base_branch, cutFrom, "base is what the branch was cut from, not the repo's current branch");
+  assert.deepEqual(info.files_changed, ["feature.ts"], "diff is against the cut point, so unrelated work stays out");
+});
+
+test("a detached-HEAD repo still branches and records no base ref", async () => {
+  const repo = initRepo();
+  git(repo, ["checkout", "-q", "--detach"]);
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("DET-1");
+  fs.writeFileSync(path.join(ws.path, "feature.ts"), "export const x = 1;\n");
+  git(ws.path, ["add", "feature.ts"]);
+  git(ws.path, ["commit", "-qm", "add feature"]);
+  const info = (await wm.deliveryInfo("DET-1"))!;
+  assert.equal(info.base_branch, null, "no branch name to record, and never an empty string");
+  assert.deepEqual(info.files_changed, ["feature.ts"], "the recorded start commit still anchors the diff");
+});
+
+test("a worktree registration left behind by a deleted directory does not wedge the issue", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const first = await wm.createForIssue("STALE-1");
+  // Someone removes the workspace by hand; git still has it registered.
+  fs.rmSync(first.path, { recursive: true, force: true });
+  const again = await wm.createForIssue("STALE-1");
+  assert.equal(again.path, first.path);
+  assert.equal(git(again.path, ["branch", "--show-current"]).trim(), "issue/STALE-1", "the issue branch is checked out again");
+});
+
+test("a non-worktree directory at the workspace path is refused, not silently used", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const wsPath = wm.workspacePathFor("PLAIN-1");
+  fs.mkdirSync(wsPath, { recursive: true });
+  fs.writeFileSync(path.join(wsPath, "leftover.txt"), "from a scratch-mode run\n");
+  await assert.rejects(() => wm.createForIssue("PLAIN-1"), WorkspaceError, "work off any branch would be lost silently");
+
+  // An empty one is safe to replace with a real worktree.
+  const emptyPath = wm.workspacePathFor("PLAIN-2");
+  fs.mkdirSync(emptyPath, { recursive: true });
+  const ws = await wm.createForIssue("PLAIN-2");
+  assert.equal(git(ws.path, ["branch", "--show-current"]).trim(), "issue/PLAIN-2");
+});
+
+test("cleanup preserves a dirty worktree and one whose branch is gone", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+
+  // Uncommitted work: the worktree must survive cleanup.
+  const dirty = await wm.createForIssue("KEEP-1");
+  fs.writeFileSync(path.join(dirty.path, "wip.txt"), "uncommitted\n");
+  await wm.cleanupForIssue("KEEP-1");
+  assert.ok(fs.existsSync(dirty.path), "uncommitted work is never deleted");
+
+  // Branch ref removed out-of-band: committed work would be lost, so preserve.
+  const orphaned = await wm.createForIssue("KEEP-2");
+  fs.writeFileSync(path.join(orphaned.path, "done.txt"), "committed\n");
+  git(orphaned.path, ["add", "done.txt"]);
+  git(orphaned.path, ["commit", "-qm", "committed work"]);
+  git(repo, ["update-ref", "-d", "refs/heads/issue/KEEP-2"]); // bypasses the worktree checkout guard
+  await wm.cleanupForIssue("KEEP-2");
+  assert.ok(fs.existsSync(orphaned.path), "worktree preserved when its branch is missing");
+});
+
+test("pushBranch pushes the issue branch to origin", async () => {
+  const repo = initRepo();
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "sym-remote-"));
+  execFileSync("git", ["init", "-q", "--bare", bare]);
+  git(repo, ["remote", "add", "origin", bare]);
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("PUSH-1");
+  fs.writeFileSync(path.join(ws.path, "pushed.txt"), "on the remote\n");
+  git(ws.path, ["add", "pushed.txt"]);
+  git(ws.path, ["commit", "-qm", "push me"]);
+  await wm.pushBranch("issue/PUSH-1");
+  const ref = execFileSync("git", ["--git-dir", bare, "show-ref", "--verify", "refs/heads/issue/PUSH-1"], { encoding: "utf8" });
+  assert.match(ref, /issue\/PUSH-1/);
+
+  // A branch name is tracker data, so it must never reach git as an option.
+  await assert.rejects(() => wm.pushBranch("--receive-pack=touch pwned"), WorkspaceError, "option-shaped branch names are refused by git, not obeyed");
+
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  await assert.rejects(() => plain.pushBranch("issue/PUSH-1"), WorkspaceError, "scratch projects cannot push");
+});
+
+
+test("runner scratch files are git-ignored inside the worktree", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("SCRATCH-1");
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_ISSUE.json"), "{}\n");
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_RESULT.json"), "{}\n");
+  assert.equal(git(ws.path, ["status", "--porcelain"]).trim(), "", "git sees a clean worktree");
+  // `git add -A` (what an agent typically runs) must not pick them up either.
+  git(ws.path, ["add", "-A"]);
+  assert.equal(git(ws.path, ["diff", "--cached", "--name-only"]).trim(), "", "nothing staged from scratch files");
+});
+
+test("a scratch file committed by an earlier run neither counts as delivery nor blocks cleanup", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("SCRATCH-2");
+  // Simulate the pre-fix state: the snapshot is tracked on the issue branch.
+  fs.writeFileSync(path.join(ws.path, "SYMPHONY_ISSUE.json"), "{}\n");
+  git(ws.path, ["add", "-f", "SYMPHONY_ISSUE.json"]);
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "real work\n");
+  git(ws.path, ["add", "work.txt"]);
+  git(ws.path, ["commit", "-qm", "work plus scratch"]);
+
+  const info = (await wm.deliveryInfo("SCRATCH-2"))!;
+  assert.deepEqual(info.files_changed, ["work.txt"], "scratch files stay out of the delivery");
+  assert.deepEqual(info.uncommitted, []);
+
+  await wm.cleanupForIssue("SCRATCH-2");
+  assert.ok(!fs.existsSync(ws.path), "worktree removed even though a scratch file is tracked");
+  assert.equal(git(repo, ["show", "issue/SCRATCH-2:work.txt"]), "real work\n");
 });

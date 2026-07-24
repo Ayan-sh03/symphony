@@ -19,11 +19,15 @@
  * Provider-native tools (SPEC §10.5, mutate tracker state):
  * - `update_issue_state({state, comment?})`  -> sets the issue's state (+ optional comment)
  * - `add_issue_comment({comment})`           -> appends a comment
- * - `set_issue_result({state?, comment?, pr_url?})` -> convenience terminal handoff
+ * - `set_issue_result({state?, comment?, pr_url?, tests?})` -> convenience terminal handoff
+ *
+ * Delivery records (extension): `setIssueDelivery` merges a delivery (branch,
+ * commit, files, …) onto the issue's `delivery` field, enriching summary/tests
+ * from the stored result envelope; the record survives on the issue for review.
  */
 import fs from "node:fs";
 import path from "node:path";
-import type { Issue, BlockerRef } from "../domain/types.ts";
+import type { Issue, BlockerRef, IssueDelivery } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import { expandPath } from "../config/config.ts";
 import {
@@ -137,6 +141,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       blocked_by: normalizeBlockers(raw.blocked_by),
       dispatchable,
       agent: typeof raw.agent === "string" && raw.agent.trim() !== "" ? raw.agent.trim() : null,
+      delivery: normalizeDelivery(raw.delivery),
       created_at: strOrNull(raw.created_at),
       updated_at: strOrNull(raw.updated_at),
     };
@@ -207,6 +212,36 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return this.patch(id, (rec) => { if (target) rec.agent = target; else delete rec.agent; }, { agent: target || null });
   }
 
+  /**
+   * Record/merge a delivery on the issue (extension). Fields absent from the
+   * incoming patch keep their stored values; summary/tests fall back to the
+   * agent's own result envelope (its latest comment + result_tests). A fresh
+   * delivery (one carrying delivered_at) also lands in the comment log.
+   */
+  async setIssueDelivery(id: string, delivery: Partial<IssueDelivery>): Promise<Issue> {
+    return this.patch(id, (rec) => {
+      const existing = normalizeDelivery(rec.delivery);
+      const merged: IssueDelivery = {
+        branch: delivery.branch ?? existing?.branch ?? "",
+        commit_sha: delivery.commit_sha ?? existing?.commit_sha ?? null,
+        base_branch: delivery.base_branch ?? existing?.base_branch ?? null,
+        files_changed: delivery.files_changed ?? existing?.files_changed ?? [],
+        uncommitted: delivery.uncommitted ?? existing?.uncommitted ?? [],
+        tests: delivery.tests ?? existing?.tests ?? (str(rec.result_tests) || null),
+        summary: delivery.summary ?? existing?.summary ?? lastCommentText(rec),
+        needs_attention: delivery.needs_attention ?? existing?.needs_attention ?? false,
+        attention_reason: delivery.attention_reason ?? existing?.attention_reason ?? null,
+        delivered_at: delivery.delivered_at ?? existing?.delivered_at ?? new Date().toISOString(),
+        pushed_at: delivery.pushed_at ?? existing?.pushed_at ?? null,
+      };
+      rec.delivery = merged;
+      if (delivery.delivered_at) {
+        const sha = (merged.commit_sha ?? "").slice(0, 7) || "unknown";
+        appendComment(rec, `Delivery recorded: ${merged.branch} @ ${sha}${merged.needs_attention ? ` — needs attention: ${merged.attention_reason ?? "check workspace"}` : ""}`);
+      }
+    }, { delivery_recorded: true });
+  }
+
   private async patch(id: string, fn: (rec: Record<string, unknown>) => void, ok: Record<string, unknown>): Promise<Issue> {
     const res = this.mutate(id, fn, ok);
     if (!res.success) throw new AdapterError("tracker_response", String((res.output as { error?: string }).error ?? "update failed"));
@@ -246,7 +281,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       {
         name: "set_issue_result",
         description:
-          "Record the final outcome of your work on the issue: optionally set its handoff state, add a summary comment, and attach a PR/URL.",
+          "Record the final outcome of your work on the issue: optionally set its handoff state, add a summary comment, attach a PR/URL, and note the test/build outcome.",
         mutates: true,
         input_schema: {
           type: "object",
@@ -254,6 +289,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
             state: { type: "string" },
             comment: { type: "string" },
             pr_url: { type: "string" },
+            tests: { type: "string", description: "Test/build outcome, e.g. 'npm test: 70 passed; typecheck clean'." },
           },
         },
       },
@@ -332,6 +368,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
           if (str(a.state)) rec.state = str(a.state);
           if (str(a.comment)) appendComment(rec, str(a.comment));
           if (str(a.pr_url)) rec.pr_url = str(a.pr_url);
+          if (str(a.tests)) rec.result_tests = str(a.tests);
         }, { result_recorded: true });
       }
       default:
@@ -401,6 +438,37 @@ function appendComment(rec: Record<string, unknown>, comment: string): void {
   const list = Array.isArray(rec.comments) ? (rec.comments as unknown[]) : [];
   list.push({ at: new Date().toISOString(), text: comment });
   rec.comments = list;
+}
+function lastCommentText(rec: Record<string, unknown>): string | null {
+  const list = Array.isArray(rec.comments) ? (rec.comments as unknown[]) : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const text = str((list[i] as Record<string, unknown> | null)?.text);
+    if (text) return text;
+  }
+  return null;
+}
+function stringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x !== "") : [];
+}
+/** Parse a stored delivery record; null when absent or shapeless (extension). */
+function normalizeDelivery(v: unknown): IssueDelivery | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  const branch = str(r.branch);
+  if (!branch) return null;
+  return {
+    branch,
+    commit_sha: strOrNull(r.commit_sha),
+    base_branch: strOrNull(r.base_branch),
+    files_changed: stringArray(r.files_changed),
+    uncommitted: stringArray(r.uncommitted),
+    tests: strOrNull(r.tests),
+    summary: strOrNull(r.summary),
+    needs_attention: r.needs_attention === true,
+    attention_reason: strOrNull(r.attention_reason),
+    delivered_at: str(r.delivered_at),
+    pushed_at: strOrNull(r.pushed_at),
+  };
 }
 function fail(message: string): ToolResult {
   return { success: false, output: { error: message } };

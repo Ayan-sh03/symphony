@@ -67,3 +67,23 @@ test("server.port parsed when present", () => {
   const c = cfg("---\ntracker:\n  kind: file\nserver:\n  port: 8080\n---\n");
   assert.equal(c.server_port, 8080);
 });
+
+test("repository delivery settings: defaults, explicit values, validation", () => {
+  const d = cfg("---\ntracker:\n  kind: file\n---\n");
+  assert.equal(d.workspace_repository, null);
+  assert.equal(d.workspace_base_branch, null);
+  assert.equal(d.workspace_branch_template, "issue/{identifier}");
+  assert.equal(d.workspace_delivery_mode, "branch");
+  assert.equal(d.tracker.review_state, "review");
+
+  const c = cfg("---\ntracker:\n  kind: file\n  review_state: in review\nworkspace:\n  repository: ./repo\n  base_branch: master\n  branch_template: feat/{identifier}-work\n  delivery_mode: push\n---\n");
+  assert.equal(c.workspace_base_branch, "master");
+  assert.equal(c.workspace_branch_template, "feat/{identifier}-work");
+  assert.equal(c.workspace_delivery_mode, "push");
+  assert.equal(c.tracker.review_state, "in review");
+
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nworkspace:\n  branch_template: fixed-name\n---\n"), ConfigError, "branch_template without the {identifier} placeholder is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nworkspace:\n  delivery_mode: merge\n---\n"), ConfigError, "unknown delivery_mode is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\n  terminal_states: [done]\n  review_state: Done\n---\n"), ConfigError, "review_state colliding with a terminal state is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\n  backlog_states: [backlog]\n  review_state: Backlog\n---\n"), ConfigError, "review_state colliding with a backlog state is rejected");
+});

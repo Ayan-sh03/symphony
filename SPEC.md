@@ -2299,3 +2299,72 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+## Appendix B. Repository Delivery Extension (OPTIONAL)
+
+This appendix describes the extension in which an issue workspace is a git worktree of a
+real repository, so the work an agent commits outlives its disposable workspace. It is a
+host extension: §7's state machine, §8's scheduling and §11's adapter contract are
+unchanged, and a conforming implementation MAY omit all of it.
+
+Extension config (under `workspace`, plus one `tracker` key):
+
+- `workspace.repository` (path, OPTIONAL)
+  - Repository whose worktrees back this project's workspaces, resolved relative to the
+    workflow file. When omitted the project uses plain scratch workspaces (§9.1) and none
+    of the rest of this appendix applies.
+- `workspace.base_branch` (string, OPTIONAL)
+  - Ref new issue branches are cut from. Default: the repository's current branch.
+- `workspace.branch_template` (string, OPTIONAL, default `issue/{identifier}`)
+  - Naming rule for issue branches. MUST contain the `{identifier}` placeholder.
+- `workspace.delivery_mode` (`branch` | `push` | `pr`, OPTIONAL, default `branch`)
+  - `branch` keeps delivery local. `push` and `pr` additionally expose an operator Push
+    action. `pr` is reserved: an implementation MAY open a pull request, and Symphony's
+    own implementation currently does not, so it behaves as `push`.
+- `tracker.review_state` (string, OPTIONAL, default `review`)
+  - Where delivered issues wait for a human. It MUST NOT appear in `active_states`,
+    `terminal_states` or `backlog_states` — it is neither schedulable nor closed.
+
+### B.1 Workspace as Worktree
+
+- Workspace creation (§9.2) adds a git worktree of `workspace.repository` at the workspace
+  path, checked out on the issue branch, cutting the branch from the configured base when
+  it does not exist yet.
+- The base the branch was cut from MUST be recorded at creation time, not recomputed at
+  delivery: the repository's HEAD may move while the run is in flight.
+- The runner's scratch files (§10.1) MUST be kept out of the branch — they are workspace
+  transport, not deliverable content.
+- Workspace reuse (§9.2) applies to the worktree. An implementation SHOULD tolerate a
+  registration whose directory was removed out of band, and MUST NOT silently reuse a
+  directory that is not a worktree, since work committed there would belong to no branch.
+
+### B.2 Delivery and the Review State
+
+- When a run's issue reaches the first configured terminal state, the implementation
+  records a **delivery** on the issue before cleanup: issue branch, its head commit, the
+  recorded base, the files changed against that base, any uncommitted paths left behind,
+  and the agent's own summary and test report.
+- The issue then moves to `tracker.review_state` instead of staying terminal. Only an
+  operator moves it to a terminal state, which is the accept.
+- A delivery MUST be flagged `needs_attention` when it is not safely captured — uncommitted
+  work in the worktree, or a missing branch ref — and the reason recorded with it.
+- Recording delivery is a tracker capability (§11): adapters that do not implement it are
+  not an error, the implementation simply skips the record.
+
+### B.3 Cleanup Safety
+
+Terminal cleanup (§8.6, §9.4) is narrowed in repository mode. The implementation:
+
+- MUST remove only the disposable worktree, never the issue branch.
+- MUST preserve the worktree when it holds uncommitted changes, when its branch ref is
+  missing, or when cleanliness cannot be determined (a failed status command is "unknown",
+  not "clean"). Preserving costs disk; deleting costs the only copy of the work.
+
+### B.4 Operational Notes
+
+- Pushing is an explicit operator action and MUST NOT happen automatically: the delivery
+  record is the handoff, and what reaches a shared remote stays a human decision.
+- A branch name read back from tracker data is untrusted input to git and MUST NOT be able
+  to reach it as an option.
+- Git invocations are subprocesses on the host's event path; an implementation SHOULD run
+  them asynchronously so a slow repository or a network push cannot stall polling,
+  reconciliation, or the status surface for other issues and projects.

@@ -79,6 +79,21 @@ export function setIssueAgent(id, agent, el) {
     .catch((ex) => { toast(String(ex.message || ex), "err"); if (el) el.disabled = false; });
 }
 
+/** Push a delivered issue's branch to the origin remote (repository projects). */
+export function pushBranch(id, btn) {
+  if (btn) btn.classList.add("busy");
+  fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/push-branch", { method: "POST" })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then((res) => {
+      if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
+      toast("Pushed " + res.j.branch + " to origin", "ok");
+      const jobs = [fetchState(), fetchBoard()];
+      if (store.route.name === "detail") jobs.push(loadDetail(store.route.id));
+      return Promise.all(jobs);
+    })
+    .catch((ex) => { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });
+}
+
 export function stopIssue(id, btn) {
   if (btn) btn.classList.add("busy");
   fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/stop", { method: "POST" })
