@@ -3,7 +3,7 @@
  * state. Node's single-threaded event loop serializes these mutations; all worker
  * outcomes are reported back here and converted into explicit transitions.
  */
-import type { Issue, AgentUpdate, LiveSession } from "../domain/types.ts";
+import type { Issue, AgentUpdate, LiveSession, IssueDelivery } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
@@ -143,6 +143,8 @@ export class Orchestrator {
       hooks: this.config.hooks,
       logger: this.logger,
       repository: this.config.workspace_repository,
+      baseBranch: this.config.workspace_base_branch,
+      branchTemplate: this.config.workspace_branch_template,
     });
   }
 
@@ -322,6 +324,7 @@ export class Orchestrator {
         is_terminal: this.isTerminalState(i.state),
         agent: this.resolveAgentKind(i), // effective backend
         agent_override: i.agent,          // explicit per-task choice, or null
+        needs_attention: i.delivery?.needs_attention === true,
       };
     });
     return {
@@ -330,6 +333,7 @@ export class Orchestrator {
       active_states: this.config.tracker.active_states,
       terminal_states: this.config.tracker.terminal_states,
       backlog_states: this.config.tracker.backlog_states,
+      review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
       start_state: this.config.tracker.active_states[0] ?? "todo",
       issues,
     };
@@ -564,7 +568,13 @@ export class Orchestrator {
     // before terminating — keep its claim so it waits for a manual state change;
     // a reconciliation terminate releases the claim as before.
     if (entry.terminating) {
-      if (entry.terminating.cleanupWorkspace) void this.workspaceManager.cleanupForIssue(entry.identifier);
+      if (entry.terminating.cleanupWorkspace) {
+        // Record the deliverable (branch/commit/files) before the worktree goes.
+        void (async () => {
+          await this.finalizeDelivery(entry.identifier, issueId);
+          await this.workspaceManager.cleanupForIssue(entry.identifier);
+        })();
+      }
       if (this.halted.has(issueId)) {
         this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
       } else {
@@ -658,6 +668,96 @@ export class Orchestrator {
     this.notify();
   }
 
+  // ---- delivery (extension: repository-backed workspaces) ----
+
+  /** True when this project delivers work as repository branches. */
+  private deliveryEnabled(): boolean {
+    return this.config.workspace_repository !== null;
+  }
+
+  /**
+   * Record the deliverable for an issue that just reached the success terminal
+   * state (the first configured terminal state), then move it to the review
+   * state instead of leaving it done: the operator inspects/merges the branch
+   * and only then marks the issue done. Unsafe deliveries (uncommitted work in
+   * the worktree, or a missing branch ref) are flagged needs_attention and the
+   * worktree is preserved by the workspace manager's own guards. No-op for
+   * scratch projects and for other terminal states (e.g. canceled).
+   */
+  private async finalizeDelivery(identifier: string, issueId: string): Promise<void> {
+    if (!this.deliveryEnabled()) return;
+    let fresh: Issue | undefined;
+    try {
+      fresh = (await this.adapter.fetchIssuesByIds([issueId]))[0];
+    } catch {
+      return; // tracker hiccup: leave state as-is; cleanup guards still apply
+    }
+    if (!fresh) return;
+    const doneState = this.config.tracker.terminal_states[0];
+    if (!doneState || this.normState(fresh.state) !== this.normState(doneState)) return;
+    const info = this.workspaceManager.deliveryInfo(identifier);
+    if (!info) return; // worktree already gone: nothing to record from
+
+    const reasons: string[] = [];
+    if (info.uncommitted.length > 0) reasons.push(`uncommitted changes left in workspace: ${info.uncommitted.join(", ")}`);
+    if (!info.branch_exists) reasons.push(`issue branch ${info.branch} is missing in the repository`);
+    const delivery: IssueDelivery = {
+      branch: info.branch,
+      commit_sha: info.commit_sha,
+      base_branch: info.base_branch,
+      files_changed: info.files_changed,
+      uncommitted: info.uncommitted,
+      tests: null,   // enriched by the adapter from the agent's result envelope
+      summary: null, // ditto
+      needs_attention: reasons.length > 0,
+      attention_reason: reasons.length > 0 ? reasons.join("; ") : null,
+      delivered_at: new Date().toISOString(),
+      pushed_at: null,
+    };
+    try {
+      if (this.adapter.setIssueDelivery) {
+        await this.adapter.setIssueDelivery(issueId, delivery);
+      } else {
+        this.logger.warn("tracker cannot record delivery; skipping", { issue_id: issueId, issue_identifier: identifier });
+      }
+    } catch (err) {
+      this.logger.warn("delivery record failed", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+    }
+    if (this.adapter.setIssueState) {
+      try {
+        await this.adapter.setIssueState(issueId, this.config.tracker.review_state);
+        this.logger.info("issue delivered for review", {
+          issue_id: issueId,
+          issue_identifier: identifier,
+          branch: delivery.branch,
+          commit_sha: delivery.commit_sha ?? "",
+          needs_attention: delivery.needs_attention,
+        });
+      } catch (err) {
+        this.logger.warn("review-state transition failed", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+      }
+    }
+  }
+
+  /**
+   * Push the recorded issue branch to the origin remote (delivery_mode push/pr).
+   * Manual operator action from the console — never automatic.
+   */
+  async pushIssueBranch(id: string): Promise<{ branch: string; pushed_at: string }> {
+    if (!this.deliveryEnabled()) throw new Error("this project has no workspace.repository configured");
+    if (!this.adapter.setIssueDelivery) throw new Error("the active tracker does not support delivery records");
+    const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
+    if (!issue) throw new Error(`unknown issue ${id}`);
+    const branch = issue.delivery?.branch;
+    if (!branch) throw new Error(`issue ${issue.identifier} has no recorded delivery to push`);
+    this.workspaceManager.pushBranch(branch);
+    const pushed_at = new Date().toISOString();
+    await this.adapter.setIssueDelivery(id, { pushed_at });
+    this.logger.info("issue branch pushed", { issue_id: id, issue_identifier: issue.identifier, branch });
+    this.notify();
+    return { branch, pushed_at };
+  }
+
   /** SPEC §16.6 on_retry_timer. */
   private async onRetryTimer(issueId: string): Promise<void> {
     const retry = this.retry_attempts.get(issueId);
@@ -679,6 +779,8 @@ export class Orchestrator {
       return;
     }
     if (this.isTerminalState(issue.state)) {
+      // Record the deliverable (branch/commit/files) before the worktree goes.
+      await this.finalizeDelivery(issue.identifier, issue.id);
       void this.workspaceManager.cleanupForIssue(issue.identifier);
       this.claimed.delete(issueId);
       this.notify();
@@ -811,7 +913,11 @@ export class Orchestrator {
 
     this.config = next;
     this.promptTemplate = def.prompt_template;
-    this.workspaceManager.update(next.workspace_root, next.hooks, next.workspace_repository);
+    this.workspaceManager.update(next.workspace_root, next.hooks, {
+      repository: next.workspace_repository,
+      base_branch: next.workspace_base_branch,
+      branch_template: next.workspace_branch_template,
+    });
     if (kindChanged || providerChanged) {
       try {
         this.adapter = createAdapter(next.tracker.kind, next.tracker.provider, next.workflowDir, this.logger);
@@ -893,6 +999,9 @@ export class Orchestrator {
         backlog_states: this.config.tracker.backlog_states,
         terminal_states: this.config.tracker.terminal_states,
         workspace_root: this.config.workspace_root,
+        repository: this.config.workspace_repository,
+        delivery_mode: this.config.workspace_delivery_mode,
+        review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
         can_create: this.canCreateIssues(),
         can_board: this.canBoard(),
         can_set_agent: this.canSetAgent(),
@@ -920,7 +1029,10 @@ export class Orchestrator {
     }
     const issue = all.find((i) => i.identifier === identifier);
     if (known) {
-      if (issue) known.state = issue.state;
+      if (issue) {
+        known.state = issue.state;
+        known.delivery = issue.delivery ?? null;
+      }
       return this.withPersistedTranscript(known);
     }
     if (!issue) return null;
@@ -930,6 +1042,7 @@ export class Orchestrator {
       status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
       state: issue.state,
       agent: this.resolveAgentKind(issue),
+      delivery: issue.delivery ?? null,
       workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
       running: null,
       retry: null,
@@ -1064,6 +1177,11 @@ export interface SnapshotView {
     backlog_states: string[];
     terminal_states: string[];
     workspace_root: string;
+    /** Repository path for branch-delivering projects, null for scratch projects. */
+    repository: string | null;
+    delivery_mode: string;
+    /** State delivered issues wait in (null on scratch projects). */
+    review_state: string | null;
     can_create: boolean;
     can_board: boolean;
     can_set_agent: boolean;
@@ -1086,6 +1204,8 @@ export interface BoardIssueView {
   is_terminal: boolean;
   agent: string;
   agent_override: string | null;
+  /** Delivery was recorded but flagged unsafe (uncommitted work / missing branch). */
+  needs_attention: boolean;
 }
 
 export interface BoardView {
@@ -1094,6 +1214,8 @@ export interface BoardView {
   active_states: string[];
   terminal_states: string[];
   backlog_states: string[];
+  /** State delivered issues wait in for operator review (null on scratch projects). */
+  review_state: string | null;
   start_state: string;
   issues: BoardIssueView[];
 }
@@ -1117,6 +1239,8 @@ export interface IssueDetailView {
   state?: string;
   /** Effective agent backend that would run this issue. */
   agent?: string;
+  /** Recorded deliverable (repository projects), enriched from the tracker. */
+  delivery?: IssueDelivery | null;
   workspace: { path: string };
   running: unknown;
   retry: unknown;

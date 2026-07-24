@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { Orchestrator } from "../src/orchestrator/orchestrator.ts";
 import { registerAgentFactory } from "../src/agent/registry.ts";
 import type { AgentFactory, AgentSession, AgentSessionOptions } from "../src/agent/types.ts";
@@ -387,4 +388,192 @@ test("stopIssue terminates a running session and holds the issue for the operato
   } finally {
     orch.stop();
   }
+});
+
+// ---- delivery flow (repository-backed workspaces) ----
+
+/** Git repo the project's workspaces branch from. */
+function initRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-repo-"));
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Symphony test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n");
+  execFileSync("git", ["-C", repo, "add", "README.md"]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "initial"]);
+  return repo;
+}
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+/**
+ * Fake backend that does real repo work in the worktree: commit a file, and
+ * (dirty variant) leave an uncommitted file behind, then hand off with done.
+ */
+function makeGitFactory(kind: string, opts: { dirty: boolean }): AgentFactory {
+  return {
+    kind,
+    create(o: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          fs.writeFileSync(path.join(o.workspacePath, "feature.txt"), `work from ${kind}\n`);
+          git(o.workspacePath, ["add", "feature.txt"]);
+          git(o.workspacePath, ["commit", "-qm", "implement the feature"]);
+          if (opts.dirty) fs.writeFileSync(path.join(o.workspacePath, "wip.txt"), "uncommitted\n");
+          fs.writeFileSync(
+            path.join(o.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "feature implemented and committed", tests: "npm test: 3 passed" }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+}
+
+/** Repo-mode project: one issue, workspaces are worktrees of `repo`. */
+function setupDelivery(kind: string, repo: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-del-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  fs.writeFileSync(
+    path.join(issuesDir, "T-1.json"),
+    JSON.stringify({ id: "T-1", identifier: "T-1", title: "task", description: "do it", state: "todo", dispatchable: true }),
+  );
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo", "in progress"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 200
+workspace:
+  root: ./ws
+  repository: "${repo.replace(/\\/g, "/")}"
+agent:
+  kind: ${kind}
+  max_turns: 2
+  max_retry_backoff_ms: 2000
+---
+Work on {{ issue.identifier }}: {{ issue.title }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  return { dir, issuesDir, wfPath, workflow, config, wsPath: path.join(dir, "ws", "T-1") };
+}
+
+function readIssue(issuesDir: string) {
+  return JSON.parse(fs.readFileSync(path.join(issuesDir, "T-1.json"), "utf8"));
+}
+
+test("repository project: completion records the delivery and lands in review, not done", async () => {
+  registerAgentFactory(makeGitFactory("fake-git-clean", { dirty: false }));
+  const repo = initRepo();
+  const { issuesDir, wfPath, workflow, config, wsPath } = setupDelivery("fake-git-clean", repo);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const reviewed = await waitFor(() => readIssue(issuesDir).state === "review");
+    assert.ok(reviewed, "issue moves to the review state instead of done");
+
+    // The deliverable is recorded on the issue…
+    const rec = readIssue(issuesDir);
+    const d = rec.delivery;
+    assert.ok(d, "delivery record written to the tracker");
+    assert.equal(d.branch, "issue/T-1");
+    assert.equal(d.needs_attention, false);
+    assert.equal(d.tests, "npm test: 3 passed", "tests enriched from the result envelope");
+    assert.equal(d.summary, "feature implemented and committed", "summary enriched from the result comment");
+    assert.deepEqual(d.files_changed, ["feature.txt"]);
+    assert.match(git(repo, ["rev-parse", "issue/T-1"]), new RegExp(`^${d.commit_sha}`), "recorded SHA is the branch head");
+
+    // …the disposable worktree is gone, but the branch keeps the work in the repo.
+    const cleaned = await waitFor(() => !fs.existsSync(wsPath));
+    assert.ok(cleaned, "worktree removed after delivery");
+    assert.equal(git(repo, ["show", "issue/T-1:feature.txt"]), "work from fake-git-clean\n");
+
+    // The console views expose it: board review_state + detail delivery.
+    const board = await orch.board();
+    assert.equal(board.review_state, "review");
+    assert.equal(board.issues[0]!.needs_attention, false);
+    const detail = await orch.issueDetailFor("T-1");
+    assert.equal(detail?.state, "review");
+    assert.equal(detail?.delivery?.branch, "issue/T-1");
+    assert.equal(orch.snapshot().meta.review_state, "review");
+
+    // Mark done is the operator's explicit accept.
+    await orch.setIssueState("T-1", "done");
+    assert.equal(readIssue(issuesDir).state, "done");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("repository project: uncommitted work flags needs_attention and preserves the worktree", async () => {
+  registerAgentFactory(makeGitFactory("fake-git-dirty", { dirty: true }));
+  const repo = initRepo();
+  const { issuesDir, wfPath, workflow, config, wsPath } = setupDelivery("fake-git-dirty", repo);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const reviewed = await waitFor(() => readIssue(issuesDir).state === "review");
+    assert.ok(reviewed, "issue still reaches review");
+    await new Promise((r) => setTimeout(r, 400)); // give cleanup a chance to misbehave
+    assert.ok(fs.existsSync(wsPath), "worktree with uncommitted changes is preserved");
+    const d = readIssue(issuesDir).delivery;
+    assert.equal(d.needs_attention, true);
+    assert.match(d.attention_reason, /uncommitted changes/);
+    assert.deepEqual(d.uncommitted, ["?? wip.txt"]);
+    const board = await orch.board();
+    assert.equal(board.issues[0]!.needs_attention, true, "board surfaces the attention flag");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("pushIssueBranch pushes the delivered branch and records pushed_at", async () => {
+  registerAgentFactory(makeGitFactory("fake-git-push", { dirty: false }));
+  const repo = initRepo();
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-remote-"));
+  execFileSync("git", ["init", "-q", "--bare", bare]);
+  git(repo, ["remote", "add", "origin", bare]);
+  const { issuesDir, wfPath, workflow, config } = setupDelivery("fake-git-push", repo);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const reviewed = await waitFor(() => readIssue(issuesDir).state === "review");
+    assert.ok(reviewed, "precondition: delivered to review");
+
+    const r = await orch.pushIssueBranch("T-1");
+    assert.equal(r.branch, "issue/T-1");
+    const ref = execFileSync("git", ["--git-dir", bare, "show-ref", "--verify", "refs/heads/issue/T-1"], { encoding: "utf8" });
+    assert.match(ref, /issue\/T-1/);
+    assert.equal(readIssue(issuesDir).delivery.pushed_at, r.pushed_at, "push is stamped on the delivery");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("pushIssueBranch rejects scratch projects and issues without a delivery", async () => {
+  registerAgentFactory(makeFakeFactory("done"));
+  const { wfPath, workflow, config } = setup("done");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await assert.rejects(() => orch.pushIssueBranch("T-1"), /no workspace\.repository/, "scratch project");
+  orch.stop();
+
+  registerAgentFactory(makeGitFactory("fake-git-nopush", { dirty: false }));
+  const repo = initRepo();
+  const del = setupDelivery("fake-git-nopush", repo);
+  const orch2 = new Orchestrator({ config: del.config, workflow: del.workflow, workflowPath: del.wfPath, logger: silent });
+  await assert.rejects(() => orch2.pushIssueBranch("T-1"), /no recorded delivery/, "nothing delivered yet");
+  orch2.stop();
 });
