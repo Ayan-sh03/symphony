@@ -2,7 +2,7 @@
  * Issue Tracker Adapter contract (SPEC §11). A portable read kernel plus OPTIONAL
  * provider-native agent tools.
  */
-import type { Issue } from "../domain/types.ts";
+import type { Issue, IssueDelivery } from "../domain/types.ts";
 
 export type AdapterErrorCategory =
   | "unsupported_tracker_kind"
@@ -85,4 +85,11 @@ export interface TrackerAdapter {
   setIssueState?(id: string, state: string): Promise<Issue>;
   /** OPTIONAL: assign/clear the per-task agent backend (empty string clears). */
   setIssueAgent?(id: string, agent: string): Promise<Issue>;
+  /**
+   * OPTIONAL delivery capability (extension): persist/merge a delivery record on
+   * the issue. The orchestrator writes git facts at completion and `pushed_at`
+   * after a push; the adapter may enrich provider-side fields (summary/tests)
+   * from its own records. Adapters without it simply skip delivery recording.
+   */
+  setIssueDelivery?(id: string, delivery: Partial<IssueDelivery>): Promise<Issue>;
 }

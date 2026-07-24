@@ -9,6 +9,35 @@ export interface BlockerRef {
   state: string | null;
 }
 
+/**
+ * Delivery record for a repository-backed issue (extension). Written by the
+ * orchestrator when a run completes on a `workspace.repository` project: the
+ * issue branch and its head commit are the deliverable, so they are recorded
+ * on the tracker issue before the disposable worktree is removed.
+ */
+export interface IssueDelivery {
+  /** Issue branch in the main repository (e.g. "issue/SYM-1"). */
+  branch: string;
+  /** Head commit of the issue branch at delivery time. */
+  commit_sha: string | null;
+  /** Base the branch was cut from (configured base_branch, else the repo branch at creation). */
+  base_branch: string | null;
+  /** Files changed on the branch relative to the base (merge-base diff). */
+  files_changed: string[];
+  /** Paths with uncommitted changes left in the preserved worktree (empty when clean). */
+  uncommitted: string[];
+  /** Agent-reported test/build outcome (from the result envelope). */
+  tests: string | null;
+  /** Agent-reported summary (from the result envelope). */
+  summary: string | null;
+  /** True when delivery was unsafe (uncommitted work, missing branch) — operator must look. */
+  needs_attention: boolean;
+  attention_reason: string | null;
+  delivered_at: string;
+  /** Set once the branch has been pushed to the remote (delivery_mode push/pr). */
+  pushed_at: string | null;
+}
+
 /** Normalized schedulable work item (SPEC §4.1.1). */
 export interface Issue {
   id: string;
@@ -29,6 +58,8 @@ export interface Issue {
    * agent kind, this issue runs on that backend instead of the effective default.
    */
   agent: string | null;
+  /** Recorded delivery, present on repository-backed issues that reached review (extension). */
+  delivery?: IssueDelivery | null;
   created_at: string | null;
   updated_at: string | null;
 }

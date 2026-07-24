@@ -137,3 +137,72 @@ test("secretEnvironmentNames is empty for file adapter", () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   assert.deepEqual(a.secretEnvironmentNames(), []);
 });
+
+test("delivery: record, enrich from the result envelope, merge pushed_at", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "done" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  const [issue] = await a.fetchIssuesByIds(["A"]);
+
+  // The agent's result envelope supplies summary (its comment) and tests.
+  const res = await a.executeAgentTool("set_issue_result", { state: "done", comment: "built the thing", tests: "npm test: 12 passed" }, { issue: issue! });
+  assert.equal(res.success, true);
+
+  const delivered = await a.setIssueDelivery("A", {
+    branch: "issue/A-1",
+    commit_sha: "abc123def456",
+    base_branch: "master",
+    files_changed: ["src/x.ts"],
+    uncommitted: [],
+    needs_attention: false,
+    attention_reason: null,
+    delivered_at: "2026-07-24T10:00:00.000Z",
+  });
+  const d = delivered.delivery!;
+  assert.equal(d.branch, "issue/A-1");
+  assert.equal(d.commit_sha, "abc123def456");
+  assert.equal(d.files_changed.join(","), "src/x.ts");
+  assert.equal(d.summary, "built the thing", "summary falls back to the result comment");
+  assert.equal(d.tests, "npm test: 12 passed", "tests fall back to the result envelope");
+  assert.equal(d.pushed_at, null);
+
+  // Delivery survives normalization through later reads, and a partial patch merges.
+  const [read1] = await a.fetchIssuesByIds(["A"]);
+  assert.equal(read1!.delivery!.branch, "issue/A-1");
+  const pushed = await a.setIssueDelivery("A", { pushed_at: "2026-07-24T11:00:00.000Z" });
+  assert.equal(pushed.delivery!.pushed_at, "2026-07-24T11:00:00.000Z");
+  assert.equal(pushed.delivery!.commit_sha, "abc123def456", "merge keeps stored fields");
+
+  // A fresh delivery comments on the issue; the push merge does not.
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8"));
+  const comments = (raw.comments as { text: string }[]).map((c) => c.text);
+  assert.equal(comments.filter((c) => c.startsWith("Delivery recorded: issue/A-1 @ abc123d")).length, 1);
+});
+
+test("delivery: needs_attention with uncommitted paths is preserved verbatim", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "done" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  const delivered = await a.setIssueDelivery("A", {
+    branch: "issue/A-1",
+    commit_sha: "deadbeef",
+    uncommitted: ["?? wip.txt"],
+    needs_attention: true,
+    attention_reason: "uncommitted changes left in workspace: ?? wip.txt",
+    delivered_at: "2026-07-24T10:00:00.000Z",
+  });
+  assert.equal(delivered.delivery!.needs_attention, true);
+  assert.deepEqual(delivered.delivery!.uncommitted, ["?? wip.txt"]);
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8"));
+  const last = (raw.comments as { text: string }[]).at(-1)!.text;
+  assert.match(last, /needs attention: uncommitted changes/);
+});
+
+test("delivery: absent or shapeless records normalize to null", async () => {
+  const dir = mkDir({
+    "a.json": { id: "A", identifier: "A-1", title: "t", state: "done" },
+    "b.json": { id: "B", identifier: "B-1", title: "t", state: "done", delivery: { no_branch: true } },
+  });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  const all = await a.listAllIssues();
+  assert.equal(all.find((i) => i.id === "A")!.delivery, null);
+  assert.equal(all.find((i) => i.id === "B")!.delivery, null, "delivery without a branch is invalid");
+});
