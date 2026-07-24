@@ -14,6 +14,21 @@ import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 
+/**
+ * Failure of an operator action, carrying enough classification for the HTTP
+ * layer to answer with the right status instead of flattening everything to 400.
+ */
+export type OrchestratorErrorCode = "not_supported" | "not_found" | "conflict" | "upstream_failed";
+
+export class OrchestratorError extends Error {
+  code: OrchestratorErrorCode;
+  constructor(code: OrchestratorErrorCode, message: string) {
+    super(message);
+    this.name = "OrchestratorError";
+    this.code = code;
+  }
+}
+
 /** One entry in an agent's activity log (SPEC §13.7.2 recent_events). */
 interface LogEvent {
   at: string;
@@ -315,6 +330,9 @@ export class Orchestrator {
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
+      // Delivered work waiting on a human sits between "being worked on" and
+      // "closed", which is also where the operator's attention should land.
+      this.deliveryEnabled() ? [this.config.tracker.review_state] : [],
       this.config.tracker.terminal_states,
       all.map((i) => i.state),
     );
@@ -718,20 +736,21 @@ export class Orchestrator {
     if (!fresh) return;
     const doneState = this.config.tracker.terminal_states[0];
     if (!doneState || this.normState(fresh.state) !== this.normState(doneState)) return;
-    const info = this.workspaceManager.deliveryInfo(identifier);
+    const info = await this.workspaceManager.deliveryInfo(identifier);
     if (!info) return; // worktree already gone: nothing to record from
 
     const reasons: string[] = [];
     if (info.uncommitted.length > 0) reasons.push(`uncommitted changes left in workspace: ${info.uncommitted.join(", ")}`);
     if (!info.branch_exists) reasons.push(`issue branch ${info.branch} is missing in the repository`);
-    const delivery: IssueDelivery = {
+    // `tests` and `summary` are deliberately absent, not null: the adapter fills
+    // them from the agent's own result envelope, and an explicit null would be a
+    // value that overwrites what it knows.
+    const delivery: Partial<IssueDelivery> = {
       branch: info.branch,
       commit_sha: info.commit_sha,
       base_branch: info.base_branch,
       files_changed: info.files_changed,
       uncommitted: info.uncommitted,
-      tests: null,   // enriched by the adapter from the agent's result envelope
-      summary: null, // ditto
       needs_attention: reasons.length > 0,
       attention_reason: reasons.length > 0 ? reasons.join("; ") : null,
       delivered_at: new Date().toISOString(),
@@ -767,13 +786,19 @@ export class Orchestrator {
    * Manual operator action from the console — never automatic.
    */
   async pushIssueBranch(id: string): Promise<{ branch: string; pushed_at: string }> {
-    if (!this.deliveryEnabled()) throw new Error("this project has no workspace.repository configured");
-    if (!this.adapter.setIssueDelivery) throw new Error("the active tracker does not support delivery records");
+    if (!this.deliveryEnabled()) throw new OrchestratorError("not_supported", "this project has no workspace.repository configured");
+    if (!this.adapter.setIssueDelivery) throw new OrchestratorError("not_supported", "the active tracker does not support delivery records");
     const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
-    if (!issue) throw new Error(`unknown issue ${id}`);
+    if (!issue) throw new OrchestratorError("not_found", `unknown issue ${id}`);
     const branch = issue.delivery?.branch;
-    if (!branch) throw new Error(`issue ${issue.identifier} has no recorded delivery to push`);
-    this.workspaceManager.pushBranch(branch);
+    if (!branch) throw new OrchestratorError("conflict", `issue ${issue.identifier} has no recorded delivery to push`);
+    try {
+      await this.workspaceManager.pushBranch(branch);
+    } catch (err) {
+      // The push itself failed (no remote, rejected, network) — an upstream
+      // problem, not a bad request.
+      throw new OrchestratorError("upstream_failed", String((err as Error).message ?? err));
+    }
     const pushed_at = new Date().toISOString();
     await this.adapter.setIssueDelivery(id, { pushed_at });
     this.logger.info("issue branch pushed", { issue_id: id, issue_identifier: issue.identifier, branch });
@@ -1070,21 +1095,30 @@ export class Orchestrator {
   async issueDetailFor(identifier: string): Promise<IssueDetailView | null> {
     const known = this.issueDetail(identifier);
     if (known && (known.running || known.state)) return this.withPersistedTranscript(known);
-    if (!this.canBoard() || !this.adapter.listAllIssues) return known ? this.withPersistedTranscript(known) : null;
-    let all: Issue[];
-    try {
-      all = await this.adapter.listAllIssues();
-    } catch {
-      return known ? this.withPersistedTranscript(known) : null;
-    }
-    const issue = all.find((i) => i.identifier === identifier);
     if (known) {
+      // A known run already carries the issue id, so enrich it with a targeted
+      // fetch — the console polls this route, and listing every issue each time
+      // would re-read the whole tracker for one row.
+      let issue: Issue | undefined;
+      try {
+        issue = (await this.adapter.fetchIssuesByIds([known.issue_id]))[0];
+      } catch {
+        issue = undefined;
+      }
       if (issue) {
         known.state = issue.state;
         known.delivery = issue.delivery ?? null;
       }
       return this.withPersistedTranscript(known);
     }
+    if (!this.canBoard() || !this.adapter.listAllIssues) return null;
+    let all: Issue[];
+    try {
+      all = await this.adapter.listAllIssues();
+    } catch {
+      return null;
+    }
+    const issue = all.find((i) => i.identifier === identifier);
     if (!issue) return null;
     return this.withPersistedTranscript({
       issue_identifier: identifier,
@@ -1271,11 +1305,12 @@ export interface BoardView {
 }
 
 /** Order states for the board: backlog, then active, then terminal, then any others seen. */
-function orderedStates(backlog: string[], active: string[], terminal: string[], seen: string[]): string[] {
+function orderedStates(backlog: string[], active: string[], review: string[], terminal: string[], seen: string[]): string[] {
   const out: string[] = [];
   const push = (s: string) => { if (s && !out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
   backlog.forEach(push);
   active.forEach(push);
+  review.forEach(push);
   terminal.forEach(push);
   seen.forEach(push);
   return out;

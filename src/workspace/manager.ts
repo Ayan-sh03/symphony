@@ -7,15 +7,22 @@
  * worktree of that repository on the issue branch (`branch_template`). Cleanup
  * removes only the disposable worktree — never the branch — and refuses to
  * remove a worktree that still holds uncommitted work or whose branch is gone.
+ *
+ * Every git call here is async: the host runs all projects, their agents' stdio
+ * and the console on one event loop, so a synchronous `worktree add` (or worse,
+ * a network `push`) would freeze the whole service for its duration.
  */
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Logger } from "../logger.ts";
 import type { HooksConfig } from "../config/config.ts";
 import { runScript } from "../shell.ts";
 import type { Workspace } from "../domain/types.ts";
+
+const execFileAsync = promisify(execFile);
 
 export class WorkspaceError extends Error {
   constructor(message: string) {
@@ -139,16 +146,40 @@ export class WorkspaceManager {
       // Existing non-directory at the workspace location: fail safely (SPEC §17.2).
       throw new WorkspaceError(`workspace path ${wsPath} exists but is not a directory`);
     }
+    if (stat && this.opts.repository) {
+      // A directory that is not a worktree (e.g. left by a run from before the
+      // project gained a repository) would silently take the agent's work off
+      // any branch, so refuse it — unless it is empty and safe to replace. The
+      // test is the worktree *root*: a workspace root inside the repository
+      // makes every plain directory under it "inside a work tree".
+      const top = (await this.git(wsPath, ["rev-parse", "--show-toplevel"], true))?.trim();
+      if (!top || path.resolve(top) !== path.resolve(wsPath)) {
+        if (fs.readdirSync(wsPath).length > 0) {
+          throw new WorkspaceError(`workspace path ${wsPath} exists but is not a git worktree; move or remove it`);
+        }
+        fs.rmSync(wsPath, { recursive: true, force: true });
+        stat = null;
+      }
+    }
     if (!stat && this.opts.repository) {
+      const repo = this.opts.repository;
+      const branch = this.branchNameFor(identifier);
       try {
         fs.mkdirSync(path.dirname(wsPath), { recursive: true });
-        const branch = this.branchNameFor(identifier);
-        const existing = this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
-        // New branches are cut from the configured base (default: the repo's HEAD).
+        // Forget registrations whose directory was removed out of band: without
+        // this `worktree add` fails with "already registered" and the issue can
+        // never run again.
+        await this.git(repo, ["worktree", "prune"], true);
+        const existing = await this.git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
+        // New branches are cut from the configured base (default: the repo's
+        // current branch). The base is recorded now, while it is still true —
+        // the repo's HEAD may have moved on by the time the run delivers.
+        const base = await this.resolveBase(repo);
         const addArgs = existing === null
-          ? ["worktree", "add", "-b", branch, wsPath, ...(this.opts.baseBranch ? [this.opts.baseBranch] : [])]
+          ? ["worktree", "add", "-b", branch, wsPath, ...(base.ref ? [base.ref] : [])]
           : ["worktree", "add", wsPath, branch];
-        this.git(this.opts.repository, addArgs);
+        await this.git(repo, addArgs);
+        if (existing === null) await this.recordBase(repo, branch, base);
         created_now = true;
       } catch (err) {
         throw new WorkspaceError(`failed to create git worktree ${wsPath}: ${(err as Error).message}`);
@@ -164,7 +195,7 @@ export class WorkspaceManager {
 
     // Idempotent, and applied to reused worktrees too so workspaces created
     // before this rule still get it.
-    if (this.opts.repository) this.excludeScratchFiles(wsPath);
+    if (this.opts.repository) await this.excludeScratchFiles(wsPath);
 
     if (created_now && this.opts.hooks.after_create) {
       const res = await this.runHook("after_create", this.opts.hooks.after_create, wsPath);
@@ -205,14 +236,14 @@ export class WorkspaceManager {
     }
     if (this.opts.repository) {
       const branch = this.branchNameFor(identifier);
-      const dirty = this.uncommittedPaths(wsPath);
+      const dirty = await this.uncommittedPaths(wsPath);
       if (dirty === null || dirty.length > 0) {
         // Hard rule: never delete the only copy of uncommitted work — and when we
         // cannot verify cleanliness, preserve rather than risk it (extension).
         this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { issue_identifier: identifier, path: wsPath, changes: dirty === null ? "(git status failed)" : dirty.join(", ") });
         return;
       }
-      if (!this.branchExists(branch)) {
+      if (!(await this.branchExists(branch))) {
         // Without the branch ref, removing the worktree would drop committed work too.
         this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", { issue_identifier: identifier, path: wsPath, branch });
         return;
@@ -229,9 +260,9 @@ export class WorkspaceManager {
           } catch {
             /* best effort */
           }
-          this.git(wsPath, ["checkout", "--", name], true);
+          await this.git(wsPath, ["checkout", "--", name], true);
         }
-        this.git(this.opts.repository, ["worktree", "remove", wsPath]);
+        await this.git(this.opts.repository, ["worktree", "remove", wsPath]);
         this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch });
       } catch (err) {
         this.opts.logger.warn("git worktree cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
@@ -251,29 +282,67 @@ export class WorkspaceManager {
    * the base, and any uncommitted paths still in the worktree. Returns null when
    * this is not a repository project or the worktree is already gone.
    */
-  deliveryInfo(identifier: string): WorkspaceDeliveryInfo | null {
+  async deliveryInfo(identifier: string): Promise<WorkspaceDeliveryInfo | null> {
     if (!this.opts.repository) return null;
     const wsPath = this.workspacePathFor(identifier);
     if (!fs.existsSync(wsPath)) return null;
     const repo = this.opts.repository;
     const branch = this.branchNameFor(identifier);
-    const uncommitted = this.uncommittedPaths(wsPath) ?? [];
-    const commitSha = this.git(wsPath, ["rev-parse", "HEAD"], true)?.trim() ?? null;
-    const branchExists = this.branchExists(branch);
-    const base = this.opts.baseBranch ?? this.git(repo, ["branch", "--show-current"], true)?.trim() ?? null;
+    const uncommitted = (await this.uncommittedPaths(wsPath)) ?? [];
+    const commitSha = (await this.git(wsPath, ["rev-parse", "HEAD"], true))?.trim() || null;
+    const branchExists = await this.branchExists(branch);
+    // What the branch was actually cut from, recorded at creation. The live
+    // lookup is only a fallback for worktrees created before that was recorded;
+    // the repo's HEAD may have moved since, which is exactly why we store it.
+    const stored = await this.storedBase(repo, branch);
+    const base = stored.ref ?? (await this.resolveBase(repo)).ref;
+    // Diffing from the recorded start commit is exact; the ref name is a
+    // best-effort stand-in when we only have that.
+    const from = stored.sha ?? base;
     let filesChanged: string[] = [];
-    if (base && branchExists) {
+    if (from && branchExists) {
       // Three-dot: diff from the merge-base, so base may have moved since branching.
-      const out = this.git(repo, ["diff", "--name-only", `${base}...${branch}`], true);
+      const out = await this.git(repo, ["diff", "--name-only", `${from}...${branch}`], true);
       if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "" && !SCRATCH_FILES.includes(l));
     }
     return { branch, commit_sha: commitSha, base_branch: base, files_changed: filesChanged, uncommitted, branch_exists: branchExists };
   }
 
   /** Push the issue branch to the `origin` remote (extension; delivery_mode push/pr). */
-  pushBranch(branch: string): void {
+  async pushBranch(branch: string): Promise<void> {
     if (!this.opts.repository) throw new WorkspaceError("no workspace.repository configured");
-    this.git(this.opts.repository, ["push", "origin", branch]);
+    // `--` ends option parsing: the branch is read back from tracker data, which
+    // must never be able to hand git an option like `--receive-pack`.
+    await this.git(this.opts.repository, ["push", "origin", "--", branch]);
+  }
+
+  /**
+   * The ref an issue branch should be cut from right now: the configured
+   * `base_branch`, else the repository's current branch. `ref` is null on a
+   * detached HEAD (git then branches from HEAD anyway); `sha` pins the exact
+   * commit either way.
+   */
+  private async resolveBase(repo: string): Promise<{ ref: string | null; sha: string | null }> {
+    const configured = this.opts.baseBranch;
+    const ref = configured ?? (await this.git(repo, ["branch", "--show-current"], true))?.trim() ?? null;
+    const sha = (await this.git(repo, ["rev-parse", "--verify", configured ?? "HEAD"], true))?.trim() ?? null;
+    return { ref: ref || null, sha: sha || null };
+  }
+
+  /**
+   * Remember the branch's base in the repository's local config — outside the
+   * working tree, so it is never committed, and it outlives the disposable
+   * worktree that cleanup removes.
+   */
+  private async recordBase(repo: string, branch: string, base: { ref: string | null; sha: string | null }): Promise<void> {
+    if (base.ref) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.base`, base.ref], true);
+    if (base.sha) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.baseSha`, base.sha], true);
+  }
+
+  private async storedBase(repo: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
+    const ref = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.base`], true))?.trim() || null;
+    const sha = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.baseSha`], true))?.trim() || null;
+    return { ref, sha };
   }
 
   /**
@@ -281,8 +350,8 @@ export class WorkspaceManager {
    * file (`info/exclude` — repository-local, never committed). Best effort: an
    * unwritable exclude file only costs us the tidiness, so it must not fail a run.
    */
-  private excludeScratchFiles(wsPath: string): void {
-    const rel = this.git(wsPath, ["rev-parse", "--git-path", "info/exclude"], true)?.trim();
+  private async excludeScratchFiles(wsPath: string): Promise<void> {
+    const rel = (await this.git(wsPath, ["rev-parse", "--git-path", "info/exclude"], true))?.trim();
     if (!rel) return;
     const file = path.resolve(wsPath, rel);
     try {
@@ -303,24 +372,25 @@ export class WorkspaceManager {
     }
   }
 
-  private branchExists(branch: string): boolean {
+  private async branchExists(branch: string): Promise<boolean> {
     if (!this.opts.repository) return false;
-    return this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true) !== null;
+    return (await this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true)) !== null;
   }
 
   /**
    * Porcelain status of the worktree, excluding the runner's own scratch files.
    * Null when git itself fails (callers must treat that as "unknown", not "clean").
    */
-  private uncommittedPaths(wsPath: string): string[] | null {
-    const out = this.git(wsPath, ["status", "--porcelain"], true);
+  private async uncommittedPaths(wsPath: string): Promise<string[] | null> {
+    const out = await this.git(wsPath, ["status", "--porcelain"], true);
     if (out === null) return null;
     return out.split(/\r?\n/).filter((line) => line !== "" && !isScratchLine(line));
   }
 
-  private git(cwd: string, args: string[], allowFailure = false): string | null {
+  private async git(cwd: string, args: string[], allowFailure = false): Promise<string | null> {
     try {
-      return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+      return stdout;
     } catch (err) {
       if (allowFailure) return null;
       const detail = err instanceof Error ? err.message : String(err);
