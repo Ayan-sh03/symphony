@@ -6,7 +6,8 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, copyText } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch } from "./api.js";
+import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
 import { headerView } from "./views/header.js";

@@ -94,16 +94,6 @@ export function pushBranch(id, btn) {
     .catch((ex) => { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });
 }
 
-/** Copy text to the clipboard with a toast (delivery panel branch/SHA helpers). */
-export function copyText(text, what) {
-  const done = () => toast((what || "Value") + " copied", "ok");
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(done, () => toast("Copy failed", "err"));
-  } else {
-    toast("Clipboard unavailable", "err");
-  }
-}
-
 export function stopIssue(id, btn) {
   if (btn) btn.classList.add("busy");
   fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/stop", { method: "POST" })

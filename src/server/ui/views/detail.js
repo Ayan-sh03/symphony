@@ -44,7 +44,9 @@ function deliveryPanel(d) {
   ];
   if (del.tests) rows.push(["Tests", del.tests]);
   if (del.uncommitted && del.uncommitted.length) rows.push(["Uncommitted", html`<span class="warn-text">${del.uncommitted.length} path(s) left in the preserved workspace</span>`]);
-  const inReview = m.review_state && String(d.state || "").toLowerCase() === String(m.review_state).toLowerCase();
+  // A live run carries the tracker state under `running`; an idle one has it flat.
+  const stateNow = (d.running && d.running.state) || d.state || "";
+  const inReview = m.review_state && String(stateNow).toLowerCase() === String(m.review_state).toLowerCase();
   const canPush = m.delivery_mode && m.delivery_mode !== "branch" && !del.pushed_at;
   const files = del.files_changed || [];
   return html`<div class="aside-card">
