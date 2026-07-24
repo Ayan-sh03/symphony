@@ -295,7 +295,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   margin-top: 5px; padding-top: 11px; }
 .proj-item.add:hover { color: var(--ink); background: none; }
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
-.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 12px; }
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }
 .form-actions .btn { flex: 1; justify-content: center; }
 .field-err { color: var(--danger); font-size: 12px; }

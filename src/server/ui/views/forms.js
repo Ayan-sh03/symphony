@@ -20,12 +20,13 @@ export function createPage() {
     <div class="field"><label for="f-desc">Description</label>
       <textarea class="textarea" id="f-desc" name="description" placeholder="Tell the agent exactly what to do. It works in an isolated workspace, so include everything it needs, and how to know it is done."></textarea>
       <span class="hint">This becomes the agent prompt via {{ issue.description }}.</span></div>
+    ${agentHidden(m)}
     <div class="row2"><div class="field"><label for="f-state">State</label>
       <select class="select" id="f-state" name="state">${states.map((s) => html`<option value=${s}>${s}</option>`)}</select>
       <span class="hint">Backlog waits; an active state runs now.</span></div>
     <div class="field"><label for="f-prio">Priority</label>
-      <select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div></div>
-    ${agentField(m)}
+      <select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+    ${agentField(m)}</div>
     <div class="field"><label for="f-labels">Labels</label>
       <input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>
     <div class="field-err" id="f-err" hidden></div>
@@ -34,10 +35,18 @@ export function createPage() {
   </form></div>`;
 }
 
+// Hidden input keeps the `agent` form field present (empty) when only one
+// backend is registered; rendered outside the grid so it never claims a column.
+function agentHidden(m) {
+  const kinds = m.agent_kinds || [m.default_agent];
+  if (kinds.length < 2) return html`<input type="hidden" id="f-agent" name="agent" value="">`;
+  return null;
+}
+
 function agentField(m) {
   const kinds = m.agent_kinds || [m.default_agent];
   // Only worth choosing when more than one backend is registered.
-  if (kinds.length < 2) return html`<input type="hidden" id="f-agent" name="agent" value="">`;
+  if (kinds.length < 2) return null;
   return html`<div class="field"><label for="f-agent">Agent</label>
     <select class="select" id="f-agent" name="agent">
       <option value="">Default (${m.default_agent})</option>
