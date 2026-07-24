@@ -31,7 +31,8 @@ function project(root: string, name: string, issueId: string): string {
   fs.writeFileSync(path.join(dir, "WORKFLOW.md"), WF);
   fs.writeFileSync(
     path.join(dir, "issues", `${issueId}.json`),
-    JSON.stringify({ identifier: issueId, title: `title ${issueId}`, state: "todo" }),
+    // backlog on purpose: an active-state issue would dispatch a real agent on tick.
+    JSON.stringify({ identifier: issueId, title: `title ${issueId}`, state: "backlog" }),
   );
   return path.join(dir, "WORKFLOW.md");
 }
@@ -125,6 +126,18 @@ test("POST /issues/<id>/stop 404s when nothing is running or retrying", async ()
     assert.equal(body.error.code, "nothing_to_stop");
 
     assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1/stop`)).status, 405);
+  });
+});
+
+test("POST /issues/<id>/push-branch 400s on a scratch project (no repository)", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/issues/A-1/push-branch`, { method: "POST" });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as any;
+    assert.equal(body.error.code, "push_failed");
+    assert.match(body.error.message, /workspace\.repository/);
+
+    assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1/push-branch`)).status, 405);
   });
 });
 

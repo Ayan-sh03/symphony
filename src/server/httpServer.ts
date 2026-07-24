@@ -191,6 +191,16 @@ export class SymphonyHttpServer {
       }
       return this.json(res, 200, { stopped: true, issue_id: id, issue_identifier: halt.identifier, attempts: halt.attempts, reason: halt.reason });
     }
+    const pushMatch = rest.match(/^\/issues\/([^/]+)\/push-branch$/);
+    if (pushMatch) {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      const id = decodeURIComponent(pushMatch[1]!);
+      void orch
+        .pushIssueBranch(id)
+        .then((r) => this.json(res, 200, { pushed: true, branch: r.branch, pushed_at: r.pushed_at }))
+        .catch((err) => this.json(res, 400, { error: { code: "push_failed", message: String((err as Error).message ?? err) } }));
+      return;
+    }
     const agentMatch = rest.match(/^\/issues\/([^/]+)\/agent$/);
     if (agentMatch) {
       if (method !== "POST") return this.methodNotAllowed(res);
