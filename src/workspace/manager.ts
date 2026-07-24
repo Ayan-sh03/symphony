@@ -2,6 +2,11 @@
  * Workspace Manager (SPEC §4.2, §9). Deterministic per-issue workspaces with
  * sanitized, collision-resistant keys; lifecycle hooks; safety invariants;
  * terminal cleanup.
+ *
+ * Repository mode (extension): when `repository` is set, a workspace is a git
+ * worktree of that repository on the issue branch (`branch_template`). Cleanup
+ * removes only the disposable worktree — never the branch — and refuses to
+ * remove a worktree that still holds uncommitted work or whose branch is gone.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -34,12 +39,33 @@ export function workspaceKey(identifier: string): string {
   return `${sanitized}-${hash}`;
 }
 
+/** Repository delivery settings (extension); null repository = plain empty workspaces. */
+export interface WorkspaceRepoSettings {
+  repository: string | null;
+  base_branch: string | null;
+  branch_template: string;
+}
+
+/** Git facts about an issue worktree/branch, gathered at delivery time (extension). */
+export interface WorkspaceDeliveryInfo {
+  branch: string;
+  commit_sha: string | null;
+  base_branch: string | null;
+  files_changed: string[];
+  uncommitted: string[];
+  branch_exists: boolean;
+}
+
 export interface WorkspaceManagerOptions {
   root: string;
   hooks: HooksConfig;
   logger: Logger;
   repository?: string | null;
+  baseBranch?: string | null;
+  branchTemplate?: string;
 }
+
+const DEFAULT_BRANCH_TEMPLATE = "issue/{identifier}";
 
 export class WorkspaceManager {
   private opts: WorkspaceManagerOptions;
@@ -47,11 +73,18 @@ export class WorkspaceManager {
     this.opts = opts;
   }
 
-  /** Update effective hooks/root after a config reload (SPEC §6.2). */
-  update(root: string, hooks: HooksConfig, repository: string | null): void {
+  /** Update effective hooks/root/repo after a config reload (SPEC §6.2). */
+  update(root: string, hooks: HooksConfig, repo: WorkspaceRepoSettings): void {
     this.opts.root = root;
     this.opts.hooks = hooks;
-    this.opts.repository = repository;
+    this.opts.repository = repo.repository;
+    this.opts.baseBranch = repo.base_branch;
+    this.opts.branchTemplate = repo.branch_template;
+  }
+
+  /** The issue branch name from the configured template (extension). */
+  branchNameFor(identifier: string): string {
+    return (this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE).replaceAll("{identifier}", identifier);
   }
 
   workspacePathFor(identifier: string): string {
@@ -93,9 +126,13 @@ export class WorkspaceManager {
     if (!stat && this.opts.repository) {
       try {
         fs.mkdirSync(path.dirname(wsPath), { recursive: true });
-        const branch = `issue/${identifier}`;
+        const branch = this.branchNameFor(identifier);
         const existing = this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
-        this.git(this.opts.repository, existing === null ? ["worktree", "add", "-b", branch, wsPath] : ["worktree", "add", wsPath, branch]);
+        // New branches are cut from the configured base (default: the repo's HEAD).
+        const addArgs = existing === null
+          ? ["worktree", "add", "-b", branch, wsPath, ...(this.opts.baseBranch ? [this.opts.baseBranch] : [])]
+          : ["worktree", "add", wsPath, branch];
+        this.git(this.opts.repository, addArgs);
         created_now = true;
       } catch (err) {
         throw new WorkspaceError(`failed to create git worktree ${wsPath}: ${(err as Error).message}`);
@@ -147,16 +184,30 @@ export class WorkspaceManager {
       await this.runHook("before_remove", this.opts.hooks.before_remove, wsPath);
     }
     if (this.opts.repository) {
-      const dirty = this.git(wsPath, ["status", "--porcelain"])!
-        .split(/\r?\n/)
-        .filter((line) => line !== "" && !line.endsWith(" SYMPHONY_ISSUE.json"));
-      if (dirty.length > 0) {
-        this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { issue_identifier: identifier, path: wsPath, changes: dirty.join(", ") });
+      const branch = this.branchNameFor(identifier);
+      const dirty = this.uncommittedPaths(wsPath);
+      if (dirty === null || dirty.length > 0) {
+        // Hard rule: never delete the only copy of uncommitted work — and when we
+        // cannot verify cleanliness, preserve rather than risk it (extension).
+        this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { issue_identifier: identifier, path: wsPath, changes: dirty === null ? "(git status failed)" : dirty.join(", ") });
+        return;
+      }
+      if (!this.branchExists(branch)) {
+        // Without the branch ref, removing the worktree would drop committed work too.
+        this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", { issue_identifier: identifier, path: wsPath, branch });
         return;
       }
       try {
+        // `git worktree remove` refuses worktrees with untracked files. Our own
+        // issue snapshot is excluded from the dirty check above, so drop it here
+        // too — anything else untracked would have preserved the worktree already.
+        try {
+          fs.rmSync(path.join(wsPath, "SYMPHONY_ISSUE.json"), { force: true });
+        } catch {
+          /* best effort */
+        }
         this.git(this.opts.repository, ["worktree", "remove", wsPath]);
-        this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch: `issue/${identifier}` });
+        this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch });
       } catch (err) {
         this.opts.logger.warn("git worktree cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
       }
@@ -168,6 +219,52 @@ export class WorkspaceManager {
     } catch (err) {
       this.opts.logger.warn("workspace cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
     }
+  }
+
+  /**
+   * Git facts for delivery recording (extension): branch head, changed files vs
+   * the base, and any uncommitted paths still in the worktree. Returns null when
+   * this is not a repository project or the worktree is already gone.
+   */
+  deliveryInfo(identifier: string): WorkspaceDeliveryInfo | null {
+    if (!this.opts.repository) return null;
+    const wsPath = this.workspacePathFor(identifier);
+    if (!fs.existsSync(wsPath)) return null;
+    const repo = this.opts.repository;
+    const branch = this.branchNameFor(identifier);
+    const uncommitted = this.uncommittedPaths(wsPath) ?? [];
+    const commitSha = this.git(wsPath, ["rev-parse", "HEAD"], true)?.trim() ?? null;
+    const branchExists = this.branchExists(branch);
+    const base = this.opts.baseBranch ?? this.git(repo, ["branch", "--show-current"], true)?.trim() ?? null;
+    let filesChanged: string[] = [];
+    if (base && branchExists) {
+      // Three-dot: diff from the merge-base, so base may have moved since branching.
+      const out = this.git(repo, ["diff", "--name-only", `${base}...${branch}`], true);
+      if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "");
+    }
+    return { branch, commit_sha: commitSha, base_branch: base, files_changed: filesChanged, uncommitted, branch_exists: branchExists };
+  }
+
+  /** Push the issue branch to the `origin` remote (extension; delivery_mode push/pr). */
+  pushBranch(branch: string): void {
+    if (!this.opts.repository) throw new WorkspaceError("no workspace.repository configured");
+    this.git(this.opts.repository, ["push", "origin", branch]);
+  }
+
+  private branchExists(branch: string): boolean {
+    if (!this.opts.repository) return false;
+    return this.git(this.opts.repository, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true) !== null;
+  }
+
+  /**
+   * Porcelain status of the worktree, excluding the runner's own issue snapshot
+   * file. Null when git itself fails (callers must treat that as "unknown", not
+   * "clean").
+   */
+  private uncommittedPaths(wsPath: string): string[] | null {
+    const out = this.git(wsPath, ["status", "--porcelain"], true);
+    if (out === null) return null;
+    return out.split(/\r?\n/).filter((line) => line !== "" && !line.endsWith(" SYMPHONY_ISSUE.json"));
   }
 
   private git(cwd: string, args: string[], allowFailure = false): string | null {
