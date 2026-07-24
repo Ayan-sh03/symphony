@@ -77,8 +77,9 @@ export interface ServiceConfigValues {
    * workspace_repository is set):
    * - base_branch: ref issue branches are cut from (null = the repo's current HEAD).
    * - branch_template: issue branch naming rule; must contain "{identifier}".
-   * - delivery_mode: "branch" (local only), "push", or "pr" (both expose a
-   *   Push action in the console; PR creation itself is manual).
+   * - delivery_mode: "branch" (local only), or "push"/"pr", which expose a Push
+   *   action in the console. "pr" is currently a forward declaration and behaves
+   *   exactly like "push": Symphony never opens a pull request itself.
    */
   workspace_base_branch: string | null;
   workspace_branch_template: string;
@@ -150,8 +151,10 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     review_state: typeof trackerRaw.review_state === "string" && trackerRaw.review_state.trim() !== "" ? trackerRaw.review_state.trim() : "review",
   };
   const norm = (s: string) => s.trim().toLowerCase();
-  if (tracker.active_states.some((s) => norm(s) === norm(tracker.review_state)) || tracker.terminal_states.some((s) => norm(s) === norm(tracker.review_state))) {
-    throw new ConfigError("tracker.review_state must not appear in active_states or terminal_states");
+  const reviewClash = [...tracker.active_states, ...tracker.terminal_states, ...tracker.backlog_states]
+    .some((s) => norm(s) === norm(tracker.review_state));
+  if (reviewClash) {
+    throw new ConfigError("tracker.review_state must not appear in active_states, terminal_states or backlog_states");
   }
 
   const polling = asObject(cfg.polling);

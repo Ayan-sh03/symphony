@@ -85,4 +85,5 @@ test("repository delivery settings: defaults, explicit values, validation", () =
   assert.throws(() => cfg("---\ntracker:\n  kind: file\nworkspace:\n  branch_template: fixed-name\n---\n"), ConfigError, "branch_template without the {identifier} placeholder is rejected");
   assert.throws(() => cfg("---\ntracker:\n  kind: file\nworkspace:\n  delivery_mode: merge\n---\n"), ConfigError, "unknown delivery_mode is rejected");
   assert.throws(() => cfg("---\ntracker:\n  kind: file\n  terminal_states: [done]\n  review_state: Done\n---\n"), ConfigError, "review_state colliding with a terminal state is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\n  backlog_states: [backlog]\n  review_state: Backlog\n---\n"), ConfigError, "review_state colliding with a backlog state is rejected");
 });
