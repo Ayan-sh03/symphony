@@ -17,9 +17,10 @@ jobs:
       - run: npm test
 
   docker:
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # Verifies the image builds. Does not run agents — codex/opencode CLIs are
       # not in the image. See README §Docker.
-      - run: docker build .
+      - run: docker build -t symphony:ci .
