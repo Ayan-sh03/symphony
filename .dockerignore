@@ -1,0 +1,12 @@
+node_modules
+.git
+.symphony
+issues
+issues-dev
+*.log
+PLAN.md
+symphony.projects.json
+Dockerfile
+.dockerignore
+docker-compose.yml
+.github
