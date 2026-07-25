@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { ProjectManager } from "../src/project/manager.ts";
 import { saveManifest } from "../src/project/manifest.ts";
 import { SymphonyHttpServer } from "../src/server/httpServer.ts";
+import { OrchestratorError, type OrchestratorErrorCode } from "../src/orchestrator/orchestrator.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -38,7 +39,7 @@ function project(root: string, name: string, issueId: string): string {
   return path.join(dir, "WORKFLOW.md");
 }
 
-async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
+async function withServer(fn: (base: string, mgr: ProjectManager) => Promise<void>): Promise<void> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-http-"));
   project(root, "a", "A-1");
   project(root, "b", "B-1");
@@ -51,7 +52,7 @@ async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
   const server = new SymphonyHttpServer({ manager: mgr, logger: silent, port: 0 });
   const port = await server.listen();
   try {
-    await fn(`http://127.0.0.1:${port}`);
+    await fn(`http://127.0.0.1:${port}`, mgr);
   } finally {
     server.close();
     mgr.stopAll();
@@ -189,6 +190,94 @@ test("a blank or whitespace host is treated as unset (binds loopback, not ::)", 
       mgr.stopAll();
     }
   }
+});
+
+test("PATCH /issues/<id> amends the record; DELETE removes it from the board", async () => {
+  await withServer(async (base) => {
+    const patched = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "edited title", description: "new body", priority: 2, labels: ["Docs", "docs"] }),
+    });
+    assert.equal(patched.status, 200);
+    const body = (await patched.json()) as any;
+    assert.equal(body.updated, true);
+    assert.equal(body.issue.title, "edited title");
+    assert.deepEqual(body.issue.labels, ["docs"]);
+
+    const detail = (await (await fetch(`${base}/api/v1/projects/a/A-1`)).json()) as any;
+    assert.equal(detail.title, "edited title");
+    assert.equal(detail.description, "new body", "the console prefills the edit form from this payload");
+
+    const deleted = await fetch(`${base}/api/v1/projects/a/issues/A-1`, { method: "DELETE" });
+    assert.equal(deleted.status, 200);
+    assert.equal(((await deleted.json()) as any).issue_identifier, "A-1");
+    const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+    assert.deepEqual(board.issues, []);
+
+    const again = await fetch(`${base}/api/v1/projects/a/issues/A-1`, { method: "DELETE" });
+    assert.equal(again.status, 404);
+    assert.equal(((await again.json()) as any).error.code, "not_found");
+  });
+});
+
+test("PATCH /issues/<id> rejects an empty or invalid patch; unsupported methods 405", async () => {
+  await withServer(async (base) => {
+    const cases: [unknown, RegExp][] = [
+      [{}, /at least one of/],
+      [{ title: "   " }, /title cannot be blank/],
+      [{ priority: 1.5 }, /priority must be an integer/],
+      [{ priority: true }, /priority must be an integer or null/],
+      [{ labels: "docs" }, /labels must be an array/],
+    ];
+    for (const [payload, message] of cases) {
+      const res = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(res.status, 400, `payload ${JSON.stringify(payload)} should be rejected`);
+      assert.match(((await res.json()) as any).error.message, message);
+    }
+    // The issue survived every rejected patch.
+    const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+    assert.equal(board.issues[0].title, "title A-1");
+
+    assert.equal((await fetch(`${base}/api/v1/projects/a/issues/A-1`, { method: "PUT" })).status, 405);
+  });
+});
+
+test("PATCH/DELETE /issues/<id> 501 when the tracker cannot edit", async () => {
+  await withServer(async (base, mgr) => {
+    // Simulate an adapter without the optional edit capability.
+    (mgr.get("a")!.orchestrator as unknown as { canEditIssues(): boolean }).canEditIssues = () => false;
+    for (const method of ["PATCH", "DELETE"]) {
+      const res = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: method === "PATCH" ? JSON.stringify({ title: "x" }) : undefined,
+      });
+      assert.equal(res.status, 501, `${method} should report the capability, not a bad request`);
+      assert.equal(((await res.json()) as any).error.code, "not_supported");
+    }
+  });
+});
+
+test("DELETE /issues/<id> maps orchestrator failures onto their own status", async () => {
+  await withServer(async (base, mgr) => {
+    const orch = mgr.get("a")!.orchestrator as unknown as { deleteIssue(id: string): Promise<unknown> };
+    const cases: [OrchestratorErrorCode, number][] = [
+      ["conflict", 409], // running or retrying: the operator must Stop it first
+      ["upstream_failed", 502],
+      ["not_found", 404],
+    ];
+    for (const [code, status] of cases) {
+      orch.deleteIssue = () => Promise.reject(new OrchestratorError(code, `simulated ${code}`));
+      const res = await fetch(`${base}/api/v1/projects/a/issues/A-1`, { method: "DELETE" });
+      assert.equal(res.status, status, `${code} should answer ${status}`);
+      assert.equal(((await res.json()) as any).error.code, code);
+    }
+  });
 });
 
 test("board views are isolated per project", async () => {

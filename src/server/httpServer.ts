@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { Orchestrator } from "../orchestrator/orchestrator.ts";
 import { OrchestratorError } from "../orchestrator/orchestrator.ts";
+import type { IssuePatch } from "../tracker/types.ts";
 import type { ProjectManager } from "../project/manager.ts";
 import type { Logger } from "../logger.ts";
 import { renderDashboard } from "./dashboard.ts";
@@ -182,6 +183,25 @@ export class SymphonyHttpServer {
       void this.createIssue(orch, req, res);
       return;
     }
+    // Edit/remove one issue (extension). Both halves are gated by the same adapter
+    // capability, so an unsupported tracker answers 501 rather than a bare 405.
+    const editMatch = rest.match(/^\/issues\/([^/]+)$/);
+    if (editMatch) {
+      if (method !== "PATCH" && method !== "DELETE") return this.methodNotAllowed(res);
+      if (!orch.canEditIssues()) {
+        return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support editing issues" } });
+      }
+      const id = decodeURIComponent(editMatch[1]!);
+      if (method === "PATCH") {
+        void this.updateIssue(orch, id, req, res);
+        return;
+      }
+      void orch
+        .deleteIssue(id)
+        .then((r) => this.json(res, 200, { deleted: true, issue_id: r.issue_id, issue_identifier: r.issue_identifier }))
+        .catch((err) => this.json(res, this.actionStatus(err, 400), { error: { code: this.actionCode(err, "delete_failed"), message: String((err as Error).message ?? err) } }));
+      return;
+    }
     const stateMatch = rest.match(/^\/issues\/([^/]+)\/state$/);
     if (stateMatch) {
       if (method !== "POST") return this.methodNotAllowed(res);
@@ -211,9 +231,7 @@ export class SymphonyHttpServer {
         .catch((err) => {
           // Distinguish "this project/issue can't be pushed" from "the push itself
           // failed", so the console can tell the operator which one it is.
-          const code = err instanceof OrchestratorError ? err.code : "push_failed";
-          const status = code === "not_supported" ? 501 : code === "not_found" ? 404 : code === "upstream_failed" ? 502 : 409;
-          this.json(res, status, { error: { code, message: String((err as Error).message ?? err) } });
+          this.json(res, this.actionStatus(err, 409), { error: { code: this.actionCode(err, "push_failed"), message: String((err as Error).message ?? err) } });
         });
       return;
     }
@@ -311,6 +329,66 @@ export class SymphonyHttpServer {
     } catch (err) {
       this.json(res, 400, { error: { code: "create_failed", message: String((err as Error).message ?? err) } });
     }
+  }
+
+  /**
+   * Amend an issue's editable fields. Only keys actually present in the body are
+   * written, so a partial patch never blanks the fields the operator left alone.
+   */
+  private async updateIssue(orch: Orchestrator, id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
+    }
+    const patch: IssuePatch = {};
+    if ("title" in body) patch.title = String(body.title ?? "").trim();
+    if ("description" in body) patch.description = typeof body.description === "string" ? body.description : null;
+    if ("priority" in body) {
+      const p = body.priority;
+      if (p != null && p !== "" && typeof p !== "number" && typeof p !== "string") {
+        return this.json(res, 400, { error: { code: "bad_request", message: "priority must be an integer or null" } });
+      }
+      patch.priority = p == null || p === "" ? null : Number(p);
+    }
+    if ("labels" in body) {
+      if (!Array.isArray(body.labels)) {
+        return this.json(res, 400, { error: { code: "bad_request", message: "labels must be an array" } });
+      }
+      patch.labels = body.labels.map(String);
+    }
+    if (Object.keys(patch).length === 0) {
+      return this.json(res, 400, { error: { code: "bad_request", message: "patch must set at least one of title, description, priority, labels" } });
+    }
+    if (patch.title !== undefined && patch.title === "") {
+      return this.json(res, 400, { error: { code: "bad_request", message: "title cannot be blank" } });
+    }
+    if (patch.priority != null && !Number.isInteger(patch.priority)) {
+      return this.json(res, 400, { error: { code: "bad_request", message: "priority must be an integer" } });
+    }
+    try {
+      const issue = await orch.updateIssue(id, patch);
+      this.json(res, 200, {
+        updated: true,
+        issue: { id: issue.id, identifier: issue.identifier, title: issue.title, priority: issue.priority, labels: issue.labels },
+      });
+    } catch (err) {
+      this.json(res, this.actionStatus(err, 400), { error: { code: this.actionCode(err, "update_failed"), message: String((err as Error).message ?? err) } });
+    }
+  }
+
+  /** Map an operator-action failure onto a status: a live issue is a conflict, not a 5xx. */
+  private actionStatus(err: unknown, fallback: number): number {
+    if (!(err instanceof OrchestratorError)) return fallback;
+    if (err.code === "not_supported") return 501;
+    if (err.code === "not_found") return 404;
+    if (err.code === "upstream_failed") return 502;
+    if (err.code === "conflict") return 409;
+    return fallback;
+  }
+  private actionCode(err: unknown, fallback: string): string {
+    return err instanceof OrchestratorError ? err.code : fallback;
   }
 
   private async setState(orch: Orchestrator, id: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

@@ -21,6 +21,10 @@
  * - `add_issue_comment({comment})`           -> appends a comment
  * - `set_issue_result({state?, comment?, pr_url?, tests?})` -> convenience terminal handoff
  *
+ * Edit capability (extension): `updateIssue` amends title/description/priority/labels
+ * in place and `deleteIssue` removes the issue's file; the identifier keys the record
+ * and is immutable (a rename is a delete + create).
+ *
  * Delivery records (extension): `setIssueDelivery` merges a delivery (branch,
  * commit, files, …) onto the issue's `delivery` field, enriching summary/tests
  * from the stored result envelope; the record survives on the issue for review.
@@ -37,6 +41,7 @@ import {
   type ToolResult,
   type ToolSpec,
   type NewIssueInput,
+  type IssuePatch,
 } from "./types.ts";
 import { workspaceKey } from "../workspace/manager.ts";
 
@@ -345,6 +350,46 @@ export class FileTrackerAdapter implements TrackerAdapter {
     const issue = this.normalize(record);
     if (!issue) throw new AdapterError("tracker_response", "created record failed normalization");
     return issue;
+  }
+
+  // ---- edit capability (extension) ----
+
+  supportsEdit(): boolean {
+    return true;
+  }
+
+  /**
+   * Amend an existing issue's editable fields in place. Absent keys keep their
+   * stored value; the identifier keys the file and is never rewritten here.
+   */
+  async updateIssue(id: string, patch: IssuePatch): Promise<Issue> {
+    if (patch.title !== undefined && !str(patch.title)) {
+      throw new AdapterError("invalid_tracker_config", "title cannot be blank");
+    }
+    return this.patch(id, (rec) => {
+      if (patch.title !== undefined) rec.title = str(patch.title);
+      if (patch.description !== undefined) {
+        rec.description = typeof patch.description === "string" && patch.description.trim() !== "" ? patch.description : null;
+      }
+      if (patch.priority !== undefined) rec.priority = normalizePriority(patch.priority);
+      if (patch.labels !== undefined) rec.labels = normalizeLabels(patch.labels);
+    }, { updated: true });
+  }
+
+  /** Remove an issue by deleting its file. Unknown id is an error, not a no-op. */
+  async deleteIssue(id: string): Promise<void> {
+    for (const file of this.listFiles()) {
+      const raw = this.readRaw(file);
+      if (!raw) continue;
+      if ((str(raw.id) || str(raw.identifier)) !== id) continue;
+      try {
+        fs.unlinkSync(file);
+      } catch (err) {
+        throw new AdapterError("tracker_request", `failed to delete issue ${id}: ${(err as Error).message}`);
+      }
+      return;
+    }
+    throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
   }
 
   async executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {

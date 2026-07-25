@@ -6,14 +6,14 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue } from "./api.js";
 import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
 import { headerView } from "./views/header.js";
 import { boardBody } from "./views/board.js";
 import { detailPage } from "./views/detail.js";
-import { createPage, addProjectPage } from "./views/forms.js";
+import { createPage, editPage, addProjectPage } from "./views/forms.js";
 import { integratePage } from "./views/integrate.js";
 import { pageHead, notFoundPage } from "./views/page.js";
 
@@ -35,10 +35,11 @@ function routeBody(m) {
   if (r.name === "new") return m.can_create ? createPage() : notFoundPage("Creating issues is not supported by this tracker.");
   if (r.name === "integrate") return integratePage();
   if (r.name === "add-project") return store.canAdd ? addProjectPage() : notFoundPage("Adding projects is not enabled on this host.");
-  if (r.name === "detail") {
+  if (r.name === "detail" || r.name === "edit") {
     if (store.detailErr) return notFoundPage(store.detailErr);
     if (!store.detailData) return html`${pageHead(r.id, "")}<div class="page"><p class="sub">Loading…</p></div>`;
-    return detailPage(store.detailData);
+    if (r.name === "detail") return detailPage(store.detailData);
+    return m.can_edit ? editPage(store.detailData) : notFoundPage("Editing issues is not supported by this tracker.");
   }
   return boardBody(m);
 }
@@ -79,6 +80,19 @@ document.addEventListener("click", (e) => {
   if (stp) { stopIssue(stp.getAttribute("data-stop-id"), stp); return; }
   const push = e.target.closest("[data-push-id]");
   if (push) { pushBranch(push.getAttribute("data-push-id"), push); return; }
+  // Delete is a two-click confirm: arm, then confirm (or cancel/navigate away).
+  const arm = e.target.closest("[data-del-arm]");
+  if (arm) { store.armDelete = arm.getAttribute("data-del-arm"); rerender(); return; }
+  if (e.target.closest("[data-del-cancel]")) { store.armDelete = null; rerender(); return; }
+  const del = e.target.closest("[data-del-id]");
+  if (del) {
+    deleteIssue(del.getAttribute("data-del-id"), del).then((gone) => {
+      if (!gone) return;
+      goBoard();
+      fetchState(); fetchBoard();
+    });
+    return;
+  }
   const cpy = e.target.closest("[data-copy]");
   if (cpy) { copyText(cpy.getAttribute("data-copy"), cpy.getAttribute("data-copy-what") || "Value"); return; }
   const sb = e.target.closest("[data-state-id]");

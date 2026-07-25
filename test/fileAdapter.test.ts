@@ -133,6 +133,57 @@ test("board: listAllIssues returns every state; setIssueState moves an issue", a
   assert.equal(after[0]!.identifier, "A-1");
 });
 
+test("edit: updateIssue writes only the patched fields", async () => {
+  const dir = mkDir({
+    "a.json": { id: "A", identifier: "A-1", title: "old", description: "keep me", state: "todo", priority: 3, labels: ["docs"] },
+  });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  assert.equal(a.supportsEdit(), true);
+
+  const titleOnly = await a.updateIssue("A", { title: " new title " });
+  assert.equal(titleOnly.title, "new title");
+  assert.equal(titleOnly.description, "keep me", "absent keys keep their stored value");
+  assert.equal(titleOnly.priority, 3);
+  assert.deepEqual(titleOnly.labels, ["docs"]);
+  assert.equal(titleOnly.state, "todo", "editing never touches state");
+
+  const full = await a.updateIssue("A", { description: "  ", priority: null, labels: ["BUG", "bug", " urgent "] });
+  assert.equal(full.description, null, "a blank description clears it");
+  assert.equal(full.priority, null);
+  assert.deepEqual(full.labels, ["bug", "urgent"], "labels are normalized like everywhere else");
+  assert.equal(full.title, "new title");
+
+  // The identifier keys the record and the workspace: it is never rewritten.
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8"));
+  assert.equal(raw.identifier, "A-1");
+});
+
+test("edit: updateIssue rejects a blank title and an unknown id", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await assert.rejects(() => a.updateIssue("A", { title: "   " }), (e) => e instanceof AdapterError);
+  await assert.rejects(
+    () => a.updateIssue("NOPE", { title: "x" }),
+    (e) => e instanceof AdapterError && e.category === "tracker_response",
+  );
+});
+
+test("edit: deleteIssue removes the file; unknown id is an error", async () => {
+  const dir = mkDir({
+    "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" },
+    "b.json": { id: "B", identifier: "B-1", title: "t", state: "todo" },
+  });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.deleteIssue("A");
+  assert.equal(fs.existsSync(path.join(dir, "a.json")), false);
+  assert.equal(fs.existsSync(path.join(dir, "b.json")), true, "only the requested issue goes");
+  assert.deepEqual((await a.listAllIssues()).map((i) => i.id), ["B"]);
+  await assert.rejects(
+    () => a.deleteIssue("A"),
+    (e) => e instanceof AdapterError && e.category === "tracker_response",
+  );
+});
+
 test("secretEnvironmentNames is empty for file adapter", () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   assert.deepEqual(a.secretEnvironmentNames(), []);

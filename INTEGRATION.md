@@ -250,6 +250,13 @@ Key rules (see [`README.md`](README.md) → adapter profile, and SPEC §11):
 - Optional `supportsCreate`/`createIssue` and `supportsBoard`/`listAllIssues`/`setIssueState`
   light up the console's **New issue** form, **Board**, and **Start/Hold/Reopen** actions
   automatically. Omit them and the UI hides those controls.
+- Optional `supportsEdit`/`updateIssue`/`deleteIssue` light up the detail page's **Edit**
+  and **Delete** actions (and `PATCH`/`DELETE /issues/<id>`). `updateIssue` is a patch —
+  only the keys present are written — and covers title/description/priority/labels only:
+  the identifier keys the record and its workspace, so a rename is a delete + create.
+  The orchestrator refuses to delete an issue that is running or has a pending retry, and
+  cleans the deleted issue's workspace under the usual rules — an uncommitted or
+  unverifiable worktree is preserved, and the issue branch is never deleted.
 - Optional `setIssueDelivery` persists the delivery record for repository-backed projects
   (SPEC Appendix B): branch, commit, base, changed files, and whether the handoff needs a
   human. It is a **merge**, not a write — fields absent from the patch keep their stored

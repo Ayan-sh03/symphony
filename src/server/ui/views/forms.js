@@ -1,8 +1,9 @@
-/** New-issue and add-project forms. Inputs are uncontrolled — lit never binds their
- * values, so background repaints cannot clobber what the user is typing. */
+/** New-issue, edit-issue and add-project forms. Inputs are uncontrolled — lit binds
+ * only `defaultValue`/`defaultSelected`, so a repaint can never clobber what the user
+ * is typing (a dirtied field ignores its default). */
 import { html } from "../vendor/lit-html/lit-html.js";
 import { store, apiBase, rerender } from "../store.js";
-import { hashFor, goBoard, switchProject } from "../router.js";
+import { hashFor, goBoard, navigate, switchProject } from "../router.js";
 import { fetchState, fetchBoard } from "../api.js";
 import { toast } from "../toast.js";
 import { pageHead } from "./page.js";
@@ -77,6 +78,62 @@ function submitCreate(e) {
       if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "create failed");
       toast("Created " + payload.identifier + " · dispatching", "ok");
       goBoard();
+      return Promise.all([fetchState(), fetchBoard()]);
+    })
+    .catch((ex) => { err.textContent = String(ex.message || ex); err.hidden = false;
+      btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
+}
+
+/**
+ * Edit an existing issue: the create form's editable fields, prefilled from the
+ * detail payload (loaded once on route entry). Identifier and state are absent on
+ * purpose — the identifier keys the record, and state has its own board actions.
+ */
+export function editPage(d) {
+  const labels = (d.labels || []).join(", ");
+  const prio = d.priority == null ? "" : String(d.priority);
+  return html`${pageHead("Edit " + d.issue_identifier, d.title || "")}
+    <div class="page"><form class="form page-form" id="editform" autocomplete="off"
+      data-issue-id=${d.issue_id} data-issue-identifier=${d.issue_identifier} @submit=${submitEdit}>
+    <div class="field"><label for="e-title">Title <span class="req">*</span></label>
+      <input class="input" id="e-title" name="title" .defaultValue=${d.title || ""} required></div>
+    <div class="field"><label for="e-desc">Description</label>
+      <textarea class="textarea" id="e-desc" name="description" .defaultValue=${d.description || ""}></textarea>
+      <span class="hint">This becomes the agent prompt via {{ issue.description }} on the next run.</span></div>
+    <div class="row2"><div class="field"><label for="e-prio">Priority</label>
+      <select class="select" id="e-prio" name="priority">
+        ${["", "1", "2", "3", "4"].map((p) => html`<option value=${p} ?selected=${p === prio}>${p === "" ? "None" : p}</option>`)}
+      </select></div>
+    <div class="field"><label for="e-labels">Labels</label>
+      <input class="input" id="e-labels" name="labels" .defaultValue=${labels}><span class="hint">Comma-separated.</span></div></div>
+    <div class="field-err" id="e-err" hidden></div>
+    <div class="form-actions"><button type="button" class="btn" data-nav=${hashFor("detail", d.issue_identifier)}>Cancel</button>
+      <button type="submit" class="btn primary">Save changes</button></div>
+  </form></div>`;
+}
+
+function submitEdit(e) {
+  e.preventDefault();
+  const f = e.target, err = document.getElementById("e-err");
+  err.hidden = true;
+  const id = f.getAttribute("data-issue-id"), identifier = f.getAttribute("data-issue-identifier");
+  const payload = {
+    title: f.title.value.trim(),
+    description: f.description.value.trim() || null,
+    priority: f.priority.value ? Number(f.priority.value) : null,
+    labels: f.labels.value.split(",").map((s) => s.trim()).filter(Boolean),
+  };
+  if (!payload.title) { err.textContent = "Title is required."; err.hidden = false; return; }
+  const btn = f.querySelector("button[type=submit]");
+  btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Saving';
+  fetch(apiBase() + "/issues/" + encodeURIComponent(id), {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+  })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then((res) => {
+      if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "update failed");
+      toast("Saved " + identifier, "ok");
+      navigate(hashFor("detail", identifier)); // route entry reloads the detail payload
       return Promise.all([fetchState(), fetchBoard()]);
     })
     .catch((ex) => { err.textContent = String(ex.message || ex); err.hidden = false;

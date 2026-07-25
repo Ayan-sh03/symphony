@@ -7,7 +7,7 @@ import type { Issue, AgentUpdate, LiveSession, IssueDelivery } from "../domain/t
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
-import type { TrackerAdapter } from "../tracker/types.ts";
+import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
 import { WorkspaceManager } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
 import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
@@ -271,6 +271,81 @@ export class Orchestrator {
     this.scheduleTick(0);
     this.notify();
     return issue;
+  }
+
+  /** Whether the active adapter supports editing/removing issues (console Edit/Delete). */
+  canEditIssues(): boolean {
+    return typeof this.adapter.supportsEdit === "function" && this.adapter.supportsEdit();
+  }
+
+  /** Amend an issue's editable fields, then poll promptly so the board reflects it. */
+  async updateIssue(id: string, patch: IssuePatch): Promise<Issue> {
+    if (!this.canEditIssues() || !this.adapter.updateIssue) {
+      throw new OrchestratorError("not_supported", "the active tracker does not support editing issues");
+    }
+    const issue = await this.adapter.updateIssue(id, patch);
+    // A live run keeps the issue it was dispatched with (its prompt is already
+    // rendered), but the detail view reads that snapshot — refresh the editable
+    // fields on a fresh object so the console stops showing pre-edit values.
+    const live = this.running.get(id);
+    if (live) {
+      live.issue = { ...live.issue, title: issue.title, description: issue.description, priority: issue.priority, labels: issue.labels };
+    }
+    this.logger.info("issue updated", { issue_id: id, issue_identifier: issue.identifier });
+    this.scheduleTick(0);
+    this.notify();
+    return issue;
+  }
+
+  /**
+   * Remove an issue from the tracker. Refused while it is running or has a pending
+   * retry — the operator must Stop it first, same rule as the halt flow — so a live
+   * worker is never left writing back to a record that no longer exists. A halted
+   * entry is cleared so the hold and its claim are released. The in-memory run
+   * history survives on purpose: the detail log stays readable after the issue is gone.
+   * The workspace goes with the record, under the usual cleanup rules — a dirty or
+   * unverifiable worktree is preserved, and the issue branch is never deleted.
+   */
+  async deleteIssue(id: string): Promise<{ issue_id: string; issue_identifier: string }> {
+    if (!this.canEditIssues() || !this.adapter.deleteIssue) {
+      throw new OrchestratorError("not_supported", "the active tracker does not support deleting issues");
+    }
+    this.assertDeletable(id);
+    let identifier = this.halted.get(id)?.identifier ?? id;
+    let known = false;
+    try {
+      const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
+      if (issue) {
+        identifier = issue.identifier;
+        known = true;
+      }
+    } catch (err) {
+      throw new OrchestratorError("upstream_failed", String((err as Error).message ?? err));
+    }
+    if (!known) throw new OrchestratorError("not_found", `unknown issue ${id}`);
+    // The lookup above yields the loop, and a tick can dispatch in that window:
+    // re-check before the record goes, so a live worker never loses its issue.
+    this.assertDeletable(id);
+    await this.adapter.deleteIssue(id);
+    this.releaseHalt(id); // a deleted issue holds nothing
+    this.claimed.delete(id);
+    await this.workspaceManager.cleanupForIssue(identifier);
+    this.logger.info("issue deleted", { issue_id: id, issue_identifier: identifier });
+    this.scheduleTick(0);
+    this.notify();
+    return { issue_id: id, issue_identifier: identifier };
+  }
+
+  /** A live issue is never deleted out from under its worker — Stop it first (same rule as the halt flow). */
+  private assertDeletable(id: string): void {
+    const run = this.running.get(id);
+    if (run) {
+      throw new OrchestratorError("conflict", `issue ${run.identifier} is running; stop it before deleting it`);
+    }
+    const retry = this.retry_attempts.get(id);
+    if (retry) {
+      throw new OrchestratorError("conflict", `issue ${retry.identifier} has a pending retry; stop it before deleting it`);
+    }
   }
 
   // ---- agent selection ----
@@ -1078,6 +1153,7 @@ export class Orchestrator {
         delivery_mode: this.config.workspace_delivery_mode,
         review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
         can_create: this.canCreateIssues(),
+        can_edit: this.canEditIssues(),
         can_board: this.canBoard(),
         can_set_agent: this.canSetAgent(),
       },
@@ -1100,14 +1176,21 @@ export class Orchestrator {
       // fetch — the console polls this route, and listing every issue each time
       // would re-read the whole tracker for one row.
       let issue: Issue | undefined;
+      let lookedUp = false;
       try {
         issue = (await this.adapter.fetchIssuesByIds([known.issue_id]))[0];
+        lookedUp = true;
       } catch {
         issue = undefined;
       }
       if (issue) {
         known.state = issue.state;
         known.delivery = issue.delivery ?? null;
+        applyEditableFields(known, issue);
+      } else if (lookedUp) {
+        // The record is gone (deleted): the retained log still renders, but there
+        // is nothing left to edit or remove. A failed lookup is not proof of that.
+        known.tracked = false;
       }
       return this.withPersistedTranscript(known);
     }
@@ -1125,6 +1208,10 @@ export class Orchestrator {
       issue_id: issue.id,
       status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
       state: issue.state,
+      title: issue.title,
+      description: issue.description,
+      priority: issue.priority,
+      labels: issue.labels,
       agent: this.resolveAgentKind(issue),
       delivery: issue.delivery ?? null,
       workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
@@ -1168,6 +1255,10 @@ export class Orchestrator {
           issue_identifier: identifier,
           issue_id: id,
           status: "running",
+          title: e.issue.title,
+          description: e.issue.description,
+          priority: e.issue.priority,
+          labels: e.issue.labels,
           workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
           running: {
             session_id: e.session.session_id,
@@ -1242,6 +1333,14 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/** Copy the tracker's editable fields onto a detail view so the console can prefill Edit. */
+function applyEditableFields(view: IssueDetailView, issue: Issue): void {
+  view.title = issue.title;
+  view.description = issue.description;
+  view.priority = issue.priority;
+  view.labels = issue.labels;
+}
+
 export interface SnapshotView {
   generated_at: string;
   counts: { running: number; retrying: number; halted: number };
@@ -1267,6 +1366,7 @@ export interface SnapshotView {
     /** State delivered issues wait in (null on scratch projects). */
     review_state: string | null;
     can_create: boolean;
+    can_edit: boolean;
     can_board: boolean;
     can_set_agent: boolean;
   };
@@ -1322,6 +1422,13 @@ export interface IssueDetailView {
   status: string;
   /** Tracker state, present when the issue is not live (live runs carry it under `running`). */
   state?: string;
+  /** False once the tracker record is gone (deleted) and only the retained log remains. */
+  tracked?: boolean;
+  /** Editable tracker fields, so the console can prefill the edit form (extension). */
+  title?: string;
+  description?: string | null;
+  priority?: number | null;
+  labels?: string[];
   /** Effective agent backend that would run this issue. */
   agent?: string;
   /** Recorded deliverable (repository projects), enriched from the tracker. */
