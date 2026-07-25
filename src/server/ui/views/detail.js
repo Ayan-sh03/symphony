@@ -68,10 +68,12 @@ function deliveryPanel(d) {
  * Operator CRUD for this issue (extension): edit its fields, or remove it entirely.
  * Delete is a two-click confirm held in the store (no window.confirm), and is
  * refused for a live issue — the run must be stopped first, same rule as the API.
+ * Hidden once the record is gone (`tracked: false`): the log outlives the issue,
+ * but there is nothing left to act on.
  */
 function issueActions(d) {
   const m = (store.state && store.state.meta) || {};
-  if (!m.can_edit) return nothing;
+  if (!m.can_edit || d.tracked === false) return nothing;
   const live = d.status === "running" || d.status === "retrying";
   const armed = store.armDelete === d.issue_id;
   return html`<div class="dactions">
@@ -82,6 +84,7 @@ function issueActions(d) {
         ? html`<button class="btn sm danger" data-del-id=${d.issue_id} title="Remove this issue from the tracker for good">Confirm delete</button>
             <button class="btn sm" data-del-cancel="1" title="Keep the issue">Cancel</button>`
         : html`<button class="btn sm" data-del-arm=${d.issue_id} title="Remove this issue from the tracker">🗑 Delete</button>`}
+    <span class="sr-only" role="status" aria-live="polite">${armed ? "Delete armed: confirm to remove " + d.issue_identifier + ", or cancel to keep it." : ""}</span>
   </div>`;
 }
 

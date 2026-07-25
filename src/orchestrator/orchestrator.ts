@@ -7,7 +7,7 @@ import type { Issue, AgentUpdate, LiveSession, IssueDelivery } from "../domain/t
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
-import type { TrackerAdapter } from "../tracker/types.ts";
+import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
 import { WorkspaceManager } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
 import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
@@ -279,11 +279,18 @@ export class Orchestrator {
   }
 
   /** Amend an issue's editable fields, then poll promptly so the board reflects it. */
-  async updateIssue(id: string, patch: import("../tracker/types.ts").IssuePatch): Promise<Issue> {
+  async updateIssue(id: string, patch: IssuePatch): Promise<Issue> {
     if (!this.canEditIssues() || !this.adapter.updateIssue) {
       throw new OrchestratorError("not_supported", "the active tracker does not support editing issues");
     }
     const issue = await this.adapter.updateIssue(id, patch);
+    // A live run keeps the issue it was dispatched with (its prompt is already
+    // rendered), but the detail view reads that snapshot — refresh the editable
+    // fields on a fresh object so the console stops showing pre-edit values.
+    const live = this.running.get(id);
+    if (live) {
+      live.issue = { ...live.issue, title: issue.title, description: issue.description, priority: issue.priority, labels: issue.labels };
+    }
     this.logger.info("issue updated", { issue_id: id, issue_identifier: issue.identifier });
     this.scheduleTick(0);
     this.notify();
@@ -296,19 +303,14 @@ export class Orchestrator {
    * worker is never left writing back to a record that no longer exists. A halted
    * entry is cleared so the hold and its claim are released. The in-memory run
    * history survives on purpose: the detail log stays readable after the issue is gone.
+   * The workspace goes with the record, under the usual cleanup rules — a dirty or
+   * unverifiable worktree is preserved, and the issue branch is never deleted.
    */
   async deleteIssue(id: string): Promise<{ issue_id: string; issue_identifier: string }> {
     if (!this.canEditIssues() || !this.adapter.deleteIssue) {
       throw new OrchestratorError("not_supported", "the active tracker does not support deleting issues");
     }
-    const run = this.running.get(id);
-    if (run) {
-      throw new OrchestratorError("conflict", `issue ${run.identifier} is running; stop it before deleting it`);
-    }
-    const retry = this.retry_attempts.get(id);
-    if (retry) {
-      throw new OrchestratorError("conflict", `issue ${retry.identifier} has a pending retry; stop it before deleting it`);
-    }
+    this.assertDeletable(id);
     let identifier = this.halted.get(id)?.identifier ?? id;
     let known = false;
     try {
@@ -321,13 +323,29 @@ export class Orchestrator {
       throw new OrchestratorError("upstream_failed", String((err as Error).message ?? err));
     }
     if (!known) throw new OrchestratorError("not_found", `unknown issue ${id}`);
+    // The lookup above yields the loop, and a tick can dispatch in that window:
+    // re-check before the record goes, so a live worker never loses its issue.
+    this.assertDeletable(id);
     await this.adapter.deleteIssue(id);
     this.releaseHalt(id); // a deleted issue holds nothing
     this.claimed.delete(id);
+    await this.workspaceManager.cleanupForIssue(identifier);
     this.logger.info("issue deleted", { issue_id: id, issue_identifier: identifier });
     this.scheduleTick(0);
     this.notify();
     return { issue_id: id, issue_identifier: identifier };
+  }
+
+  /** A live issue is never deleted out from under its worker — Stop it first (same rule as the halt flow). */
+  private assertDeletable(id: string): void {
+    const run = this.running.get(id);
+    if (run) {
+      throw new OrchestratorError("conflict", `issue ${run.identifier} is running; stop it before deleting it`);
+    }
+    const retry = this.retry_attempts.get(id);
+    if (retry) {
+      throw new OrchestratorError("conflict", `issue ${retry.identifier} has a pending retry; stop it before deleting it`);
+    }
   }
 
   // ---- agent selection ----
@@ -1158,15 +1176,21 @@ export class Orchestrator {
       // fetch — the console polls this route, and listing every issue each time
       // would re-read the whole tracker for one row.
       let issue: Issue | undefined;
+      let lookedUp = false;
       try {
         issue = (await this.adapter.fetchIssuesByIds([known.issue_id]))[0];
+        lookedUp = true;
       } catch {
         issue = undefined;
       }
       if (issue) {
         known.state = issue.state;
         known.delivery = issue.delivery ?? null;
-        withEditableFields(known, issue);
+        applyEditableFields(known, issue);
+      } else if (lookedUp) {
+        // The record is gone (deleted): the retained log still renders, but there
+        // is nothing left to edit or remove. A failed lookup is not proof of that.
+        known.tracked = false;
       }
       return this.withPersistedTranscript(known);
     }
@@ -1310,7 +1334,7 @@ function round1(n: number): number {
 }
 
 /** Copy the tracker's editable fields onto a detail view so the console can prefill Edit. */
-function withEditableFields(view: IssueDetailView, issue: Issue): void {
+function applyEditableFields(view: IssueDetailView, issue: Issue): void {
   view.title = issue.title;
   view.description = issue.description;
   view.priority = issue.priority;
@@ -1398,6 +1422,8 @@ export interface IssueDetailView {
   status: string;
   /** Tracker state, present when the issue is not live (live runs carry it under `running`). */
   state?: string;
+  /** False once the tracker record is gone (deleted) and only the retained log remains. */
+  tracked?: boolean;
   /** Editable tracker fields, so the console can prefill the edit form (extension). */
   title?: string;
   description?: string | null;

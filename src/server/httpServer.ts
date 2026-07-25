@@ -231,9 +231,7 @@ export class SymphonyHttpServer {
         .catch((err) => {
           // Distinguish "this project/issue can't be pushed" from "the push itself
           // failed", so the console can tell the operator which one it is.
-          const code = err instanceof OrchestratorError ? err.code : "push_failed";
-          const status = code === "not_supported" ? 501 : code === "not_found" ? 404 : code === "upstream_failed" ? 502 : 409;
-          this.json(res, status, { error: { code, message: String((err as Error).message ?? err) } });
+          this.json(res, this.actionStatus(err, 409), { error: { code: this.actionCode(err, "push_failed"), message: String((err as Error).message ?? err) } });
         });
       return;
     }
@@ -347,7 +345,13 @@ export class SymphonyHttpServer {
     const patch: IssuePatch = {};
     if ("title" in body) patch.title = String(body.title ?? "").trim();
     if ("description" in body) patch.description = typeof body.description === "string" ? body.description : null;
-    if ("priority" in body) patch.priority = body.priority == null || body.priority === "" ? null : Number(body.priority);
+    if ("priority" in body) {
+      const p = body.priority;
+      if (p != null && p !== "" && typeof p !== "number" && typeof p !== "string") {
+        return this.json(res, 400, { error: { code: "bad_request", message: "priority must be an integer or null" } });
+      }
+      patch.priority = p == null || p === "" ? null : Number(p);
+    }
     if ("labels" in body) {
       if (!Array.isArray(body.labels)) {
         return this.json(res, 400, { error: { code: "bad_request", message: "labels must be an array" } });
@@ -374,10 +378,14 @@ export class SymphonyHttpServer {
     }
   }
 
-  /** Map an operator-action failure onto a status: a live issue is a bad request, not a 5xx. */
+  /** Map an operator-action failure onto a status: a live issue is a conflict, not a 5xx. */
   private actionStatus(err: unknown, fallback: number): number {
     if (!(err instanceof OrchestratorError)) return fallback;
-    return err.code === "not_supported" ? 501 : err.code === "not_found" ? 404 : err.code === "upstream_failed" ? 502 : 400;
+    if (err.code === "not_supported") return 501;
+    if (err.code === "not_found") return 404;
+    if (err.code === "upstream_failed") return 502;
+    if (err.code === "conflict") return 409;
+    return fallback;
   }
   private actionCode(err: unknown, fallback: string): string {
     return err instanceof OrchestratorError ? err.code : fallback;

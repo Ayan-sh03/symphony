@@ -419,12 +419,14 @@ test("updateIssue amends the tracker record and is reflected on the board", asyn
 
 test("deleteIssue refuses a pending retry, then succeeds once stopped, keeping the log", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
-  const { issuesDir, wfPath, workflow, config } = setup("fail");
+  const { dir, issuesDir, wfPath, workflow, config } = setup("fail");
+  const ws = path.join(dir, "ws", "T-1");
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
   await orch.start();
   try {
     const retried = await waitFor(() => orch.snapshot().counts.retrying >= 1);
     assert.ok(retried, "precondition: a retry is pending");
+    assert.ok(fs.existsSync(ws), "precondition: the run created a workspace");
     await assert.rejects(() => orch.deleteIssue("T-1"), /pending retry/, "a retrying issue must be stopped first");
     assert.ok(fs.existsSync(path.join(issuesDir, "T-1.json")), "the refused delete left the record alone");
 
@@ -436,6 +438,10 @@ test("deleteIssue refuses a pending retry, then succeeds once stopped, keeping t
     assert.equal(fs.existsSync(path.join(issuesDir, "T-1.json")), false);
     assert.equal(orch.snapshot().counts.halted, 0, "deleting releases the hold and its claim");
     assert.equal((await orch.board()).issues.length, 0);
+    assert.equal(fs.existsSync(ws), false, "the workspace goes with the record it belonged to");
+
+    // Nothing is left to act on, so the console hides Edit/Delete for the ghost.
+    assert.equal((await orch.issueDetailFor("T-1"))?.tracked, false);
 
     // The retained log outlives the issue so the detail page stays readable.
     assert.ok(orch.issueDetail("T-1")?.recent_events.length, "in-memory history survives the delete");
@@ -446,7 +452,7 @@ test("deleteIssue refuses a pending retry, then succeeds once stopped, keeping t
   }
 });
 
-test("deleteIssue refuses a running issue", async () => {
+test("deleteIssue refuses a running issue; editing one is visible on its detail view", async () => {
   let release: (() => void) | null = null;
   registerAgentFactory({
     kind: "fake-hang",
@@ -473,6 +479,11 @@ test("deleteIssue refuses a running issue", async () => {
     assert.ok(started, "precondition: a session is running");
     await assert.rejects(() => orch.deleteIssue("T-1"), /is running/);
     assert.ok(fs.existsSync(path.join(issuesDir, "T-1.json")), "a live issue's record is never removed");
+
+    // Editing a running issue is allowed; the detail view reads the dispatched
+    // snapshot, so that snapshot has to pick the amended fields up.
+    await orch.updateIssue("T-1", { title: "renamed mid-run" });
+    assert.equal(orch.issueDetail("T-1")?.title, "renamed mid-run");
   } finally {
     orch.stop();
   }

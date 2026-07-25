@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { ProjectManager } from "../src/project/manager.ts";
 import { saveManifest } from "../src/project/manifest.ts";
 import { SymphonyHttpServer } from "../src/server/httpServer.ts";
+import { OrchestratorError, type OrchestratorErrorCode } from "../src/orchestrator/orchestrator.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -226,6 +227,7 @@ test("PATCH /issues/<id> rejects an empty or invalid patch; unsupported methods 
       [{}, /at least one of/],
       [{ title: "   " }, /title cannot be blank/],
       [{ priority: 1.5 }, /priority must be an integer/],
+      [{ priority: true }, /priority must be an integer or null/],
       [{ labels: "docs" }, /labels must be an array/],
     ];
     for (const [payload, message] of cases) {
@@ -257,6 +259,23 @@ test("PATCH/DELETE /issues/<id> 501 when the tracker cannot edit", async () => {
       });
       assert.equal(res.status, 501, `${method} should report the capability, not a bad request`);
       assert.equal(((await res.json()) as any).error.code, "not_supported");
+    }
+  });
+});
+
+test("DELETE /issues/<id> maps orchestrator failures onto their own status", async () => {
+  await withServer(async (base, mgr) => {
+    const orch = mgr.get("a")!.orchestrator as unknown as { deleteIssue(id: string): Promise<unknown> };
+    const cases: [OrchestratorErrorCode, number][] = [
+      ["conflict", 409], // running or retrying: the operator must Stop it first
+      ["upstream_failed", 502],
+      ["not_found", 404],
+    ];
+    for (const [code, status] of cases) {
+      orch.deleteIssue = () => Promise.reject(new OrchestratorError(code, `simulated ${code}`));
+      const res = await fetch(`${base}/api/v1/projects/a/issues/A-1`, { method: "DELETE" });
+      assert.equal(res.status, status, `${code} should answer ${status}`);
+      assert.equal(((await res.json()) as any).error.code, code);
     }
   });
 });
