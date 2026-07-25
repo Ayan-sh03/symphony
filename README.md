@@ -44,7 +44,7 @@ A `Dockerfile` and `docker-compose.yml` are included for a one-command
 containerized deploy. The image is `node:24-slim` + the source tree + production
 deps (no build step), runs as a non-root user, and exposes the console on
 `8420`. `docker compose up` brings it up with the file tracker; state (per-issue
-workspaces and `history.db`) persists in a named volume, and `issues/` +
+workspaces) persists in a named volume, and `issues/` +
 `WORKFLOW.md` are bind-mounted from the host so you can edit them without a
 rebuild:
 
