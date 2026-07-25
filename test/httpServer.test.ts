@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { AddressInfo } from "node:net";
 import { ProjectManager } from "../src/project/manager.ts";
 import { saveManifest } from "../src/project/manifest.ts";
 import { SymphonyHttpServer } from "../src/server/httpServer.ts";
@@ -165,6 +166,29 @@ test("POST /issues persists the per-task agent override and rejects unknown kind
     const err = (await bad.json()) as any;
     assert.match(err.error.message, /unknown agent\.kind/);
   });
+});
+
+test("a blank or whitespace host is treated as unset (binds loopback, not ::)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-host-"));
+  project(root, "a", "A-1");
+  const mp = path.join(root, "projects.json");
+  saveManifest(mp, [{ id: "a", name: "A", workflow: "./a/WORKFLOW.md" }]);
+  for (const bad of ["", "   ", "\t"]) {
+    const mgr = ProjectManager.fromManifest(mp, silent);
+    const server = new SymphonyHttpServer({ manager: mgr, logger: silent, port: 0, host: bad });
+    await server.listen();
+    try {
+      // Node binds "" to `::` (all interfaces); a blank host must NOT survive as
+      // "" — it must fall back to loopback so the unauthenticated console is
+      // never silently exposed (SPEC §13.7).
+      const addr = server.address() as AddressInfo;
+      assert.ok(addr, "server should be listening");
+      assert.equal(addr.address, "127.0.0.1", `blank host "${JSON.stringify(bad)}" should bind loopback, not ::`);
+    } finally {
+      server.close();
+      mgr.stopAll();
+    }
+  }
 });
 
 test("board views are isolated per project", async () => {
