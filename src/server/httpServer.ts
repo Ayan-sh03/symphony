@@ -47,7 +47,11 @@ export class SymphonyHttpServer {
   constructor(opts: HttpServerOptions) {
     this.opts = opts;
     this.port = opts.port;
-    this.host = opts.host ?? "127.0.0.1";
+    // A blank/whitespace-only host is treated as unset: Node binds "" to `::`,
+    // which would silently expose the unauthenticated console. Default loopback
+    // (SPEC §13.7).
+    const trimmed = opts.host != null ? opts.host.trim() : "";
+    this.host = trimmed || "127.0.0.1";
     this.server = http.createServer((req, res) => this.handle(req, res));
   }
 
@@ -64,6 +68,11 @@ export class SymphonyHttpServer {
 
   close(): void {
     this.server.close();
+  }
+
+  /** Bound socket address (for tests/observability); null until the server listens. */
+  address(): AddressInfo | string | null {
+    return this.server.address();
   }
 
   private handle(req: http.IncomingMessage, res: http.ServerResponse): void {

@@ -101,8 +101,12 @@ async function main(): Promise<void> {
   const effectivePort = args.port ?? manager.get(manager.firstId())?.orchestrator.serverPort() ?? null;
   let httpServer: SymphonyHttpServer | null = null;
   if (effectivePort !== null && effectivePort !== undefined) {
-    // Bind address: --host flag overrides SYMPHONY_HOST env, default loopback (SPEC §13.7).
-    const effectiveHost = args.host ?? process.env.SYMPHONY_HOST ?? null;
+    // Bind address: --host flag overrides SYMPHONY_HOST env, default loopback
+    // (SPEC §13.7). A blank/whitespace-only value is treated as unset so that
+    // `SYMPHONY_HOST=` in an env file can't silently widen the bind to `::`.
+    const hostFlag = args.host != null ? args.host.trim() : "";
+    const hostEnv = process.env.SYMPHONY_HOST != null ? process.env.SYMPHONY_HOST.trim() : "";
+    const effectiveHost = hostFlag || hostEnv || null;
     httpServer = new SymphonyHttpServer({ manager, logger, port: effectivePort, host: effectiveHost ?? undefined });
     try {
       await httpServer.listen();
