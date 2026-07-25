@@ -1,7 +1,7 @@
 # One-command containerized deploy (SPEC §13.7). Brings up the console on :8420
-# with the file tracker. State (workspaces + history.db) persists in a named
-# volume; issues/ and WORKFLOW.md are bind-mounted from the host so you can edit
-# them without rebuilding the image. Agent CLIs are not in the image — see README.
+# with the file tracker. State (per-issue workspaces) persists in a named volume;
+# issues/ and WORKFLOW.md are bind-mounted from the host so you can edit them
+# without rebuilding the image. Agent CLIs are not in the image — see README.
 services:
   symphony:
     build: .
@@ -9,10 +9,11 @@ services:
     ports:
       - "8420:8420"
     environment:
-      # Set to 0.0.0.0 in the image so the console is reachable on the host.
+      # Explicit opt-in: the image binds loopback by default; publishing the port
+      # requires the wildcard so the console is reachable on the host.
       SYMPHONY_HOST: 0.0.0.0
     volumes:
-      # Per-project persistent state: per-issue git-free workspaces + history.db.
+      # Per-project persistent state: per-issue git-free workspaces.
       - symphony-data:/app/.symphony
       # Editable from the host without a rebuild.
       - ./issues:/app/issues
