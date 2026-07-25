@@ -5,6 +5,7 @@ import { fetchState, fetchBoard, loadDetail } from "./api.js";
 export function hashFor(name, id) {
   const base = "#/" + encodeURIComponent(store.pid);
   if (name === "detail") return base + "/issue/" + encodeURIComponent(id);
+  if (name === "edit") return base + "/issue/" + encodeURIComponent(id) + "/edit";
   if (name === "new") return base + "/new";
   if (name === "integrate") return base + "/integrate";
   if (name === "add-project") return base + "/add-project";
@@ -18,7 +19,10 @@ function parseHash() {
   const p = decodeURIComponent(parts[0]);
   if (validPid(p)) { store.pid = p; savePid(p); } else return { name: "board" };
   const rest = parts.slice(1);
-  if (rest[0] === "issue" && rest[1]) return { name: "detail", id: decodeURIComponent(rest[1]) };
+  if (rest[0] === "issue" && rest[1]) {
+    const id = decodeURIComponent(rest[1]);
+    return rest[2] === "edit" ? { name: "edit", id } : { name: "detail", id };
+  }
   if (rest[0] === "new") return { name: "new" };
   if (rest[0] === "integrate") return { name: "integrate" };
   if (rest[0] === "add-project") return { name: "add-project" };
@@ -50,9 +54,12 @@ export function applyRoute() {
     changed = true;
   }
   store.route = next;
-  if (store.route.name === "detail") {
+  // The edit form is fed by the same detail payload; it is loaded on route entry
+  // only (never re-polled), so nothing repaints over what the operator is typing.
+  if (store.route.name === "detail" || store.route.name === "edit") {
     if (changed) { store.detailData = null; store.detailErr = null; loadDetail(store.route.id); }
   } else { store.detailData = null; store.detailErr = null; }
+  if (changed) store.armDelete = null; // leaving the page disarms the confirm
   rerender();
   if (changed) {
     window.scrollTo(0, 0);

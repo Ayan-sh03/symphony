@@ -102,6 +102,8 @@ All issue routes are scoped by project id: `/api/v1/projects/<pid>/…`. A singl
 | `/api/v1/projects/<pid>/state` | GET | Get full state |
 | `/api/v1/projects/<pid>/issues` | GET | Get all issues (board) |
 | `/api/v1/projects/<pid>/issues` | POST | Create issue: `{ "identifier": "SYM-3", "title": "...", "state": "backlog" }` |
+| `/api/v1/projects/<pid>/issues/<id>` | PATCH | Edit issue: any of `{ "title", "description", "priority", "labels" }` |
+| `/api/v1/projects/<pid>/issues/<id>` | DELETE | Delete issue (refused while it is running or retrying — stop it first) |
 | `/api/v1/projects/<pid>/issues/<id>/state` | POST | Change state: `{"state":"todo"}` |
 | `/api/v1/projects/<pid>/issues/<id>/stop` | POST | Stop a running session or pending retry; hold the issue for a manual state change |
 | `/api/v1/projects/<pid>/refresh` | POST | Poll now |

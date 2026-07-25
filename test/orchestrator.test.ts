@@ -390,6 +390,94 @@ test("stopIssue terminates a running session and holds the issue for the operato
   }
 });
 
+test("updateIssue amends the tracker record and is reflected on the board", async () => {
+  registerAgentFactory(makeFakeFactory("fail"));
+  const { issuesDir, wfPath, workflow, config } = setup("fail");
+  // Park the issue so nothing dispatches while we edit it.
+  fs.writeFileSync(
+    path.join(issuesDir, "T-1.json"),
+    JSON.stringify({ id: "T-1", identifier: "T-1", title: "task", description: "do it", state: "backlog" }),
+  );
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    assert.equal(orch.canEditIssues(), true);
+    const updated = await orch.updateIssue("T-1", { title: "renamed", labels: ["docs"] });
+    assert.equal(updated.title, "renamed");
+    const row = (await orch.board()).issues.find((i) => i.id === "T-1")!;
+    assert.equal(row.title, "renamed");
+    assert.deepEqual(row.labels, ["docs"]);
+    // The edit form is fed by the detail payload, so it must carry the editable fields.
+    const detail = await orch.issueDetailFor("T-1");
+    assert.equal(detail!.title, "renamed");
+    assert.equal(detail!.description, "do it");
+    assert.deepEqual(detail!.labels, ["docs"]);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("deleteIssue refuses a pending retry, then succeeds once stopped, keeping the log", async () => {
+  registerAgentFactory(makeFakeFactory("fail"));
+  const { issuesDir, wfPath, workflow, config } = setup("fail");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const retried = await waitFor(() => orch.snapshot().counts.retrying >= 1);
+    assert.ok(retried, "precondition: a retry is pending");
+    await assert.rejects(() => orch.deleteIssue("T-1"), /pending retry/, "a retrying issue must be stopped first");
+    assert.ok(fs.existsSync(path.join(issuesDir, "T-1.json")), "the refused delete left the record alone");
+
+    // Stop puts it on the operator hold; deleting then releases the hold with it.
+    assert.ok(orch.stopIssue("T-1"));
+    assert.equal(orch.snapshot().counts.halted, 1);
+    const gone = await orch.deleteIssue("T-1");
+    assert.equal(gone.issue_identifier, "T-1");
+    assert.equal(fs.existsSync(path.join(issuesDir, "T-1.json")), false);
+    assert.equal(orch.snapshot().counts.halted, 0, "deleting releases the hold and its claim");
+    assert.equal((await orch.board()).issues.length, 0);
+
+    // The retained log outlives the issue so the detail page stays readable.
+    assert.ok(orch.issueDetail("T-1")?.recent_events.length, "in-memory history survives the delete");
+
+    await assert.rejects(() => orch.deleteIssue("T-1"), /unknown issue/, "deleting twice is a not-found");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("deleteIssue refuses a running issue", async () => {
+  let release: (() => void) | null = null;
+  registerAgentFactory({
+    kind: "fake-hang",
+    create(_opts: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        runTurn() {
+          return new Promise((resolve) => { release = () => resolve({ status: "failed", error: "session stopped" }); });
+        },
+        stop() { release?.(); },
+      };
+    },
+  });
+  const { issuesDir, wfPath } = setup("fail");
+  const src = fs.readFileSync(wfPath, "utf8").replace("kind: fake-fail", "kind: fake-hang");
+  fs.writeFileSync(wfPath, src);
+  const wf = parseWorkflow(src);
+  const orch = new Orchestrator({ config: buildConfig(wf, wfPath), workflow: wf, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const started = await waitFor(() => orch.snapshot().counts.running >= 1);
+    assert.ok(started, "precondition: a session is running");
+    await assert.rejects(() => orch.deleteIssue("T-1"), /is running/);
+    assert.ok(fs.existsSync(path.join(issuesDir, "T-1.json")), "a live issue's record is never removed");
+  } finally {
+    orch.stop();
+  }
+});
+
 // ---- delivery flow (repository-backed workspaces) ----
 
 /** Git repo the project's workspaces branch from. */

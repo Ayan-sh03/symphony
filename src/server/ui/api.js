@@ -17,17 +17,23 @@ export function fetchBoard() {
     .catch(() => {});
 }
 
+// Detail and edit share one payload; a late response for a page we have left is dropped.
+function viewingDetail(identifier) {
+  const r = store.route;
+  return (r.name === "detail" || r.name === "edit") && r.id === identifier;
+}
+
 export function loadDetail(identifier) {
   return fetch(apiBase() + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
     .then((res) => {
-      if (store.route.name !== "detail" || store.route.id !== identifier) return;
+      if (!viewingDetail(identifier)) return;
       if (res.ok) { store.detailData = res.j; store.detailErr = null; }
       else { store.detailData = null; store.detailErr = (res.j.error && res.j.error.message) || "Not found"; }
       rerender();
     })
     .catch(() => {
-      if (store.route.name !== "detail" || store.route.id !== identifier) return;
+      if (!viewingDetail(identifier)) return;
       if (!store.detailData) { store.detailErr = "Failed to load detail."; rerender(); }
     });
 }
@@ -104,6 +110,20 @@ export function stopIssue(id, btn) {
       return Promise.all([fetchState(), fetchBoard()]);
     })
     .catch((ex) => { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); });
+}
+
+/** Remove an issue from the tracker. Resolves true when it is gone (caller navigates). */
+export function deleteIssue(id, btn) {
+  if (btn) btn.classList.add("busy");
+  return fetch(apiBase() + "/issues/" + encodeURIComponent(id), { method: "DELETE" })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then((res) => {
+      if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "failed");
+      store.armDelete = null;
+      toast("Deleted " + res.j.issue_identifier, "ok");
+      return true;
+    })
+    .catch((ex) => { toast(String(ex.message || ex), "err"); if (btn) btn.classList.remove("busy"); return false; });
 }
 
 export function pollNow(btn) {

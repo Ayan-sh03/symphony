@@ -3,6 +3,7 @@
  * what the old innerHTML console had to hand-approximate with patchDetail(). */
 import { html, nothing } from "../vendor/lit-html/lit-html.js";
 import { store } from "../store.js";
+import { hashFor } from "../router.js";
 import { pageHead } from "./page.js";
 import { ago, dur, until, nfmt, badge, eventKind, logKind, logLabel, shortTime } from "../format.js";
 
@@ -63,6 +64,27 @@ function deliveryPanel(d) {
   </div>`;
 }
 
+/**
+ * Operator CRUD for this issue (extension): edit its fields, or remove it entirely.
+ * Delete is a two-click confirm held in the store (no window.confirm), and is
+ * refused for a live issue — the run must be stopped first, same rule as the API.
+ */
+function issueActions(d) {
+  const m = (store.state && store.state.meta) || {};
+  if (!m.can_edit) return nothing;
+  const live = d.status === "running" || d.status === "retrying";
+  const armed = store.armDelete === d.issue_id;
+  return html`<div class="dactions">
+    <button class="btn sm" data-nav=${hashFor("edit", d.issue_identifier)} title="Edit this issue's title, description, priority and labels">✎ Edit</button>
+    ${live
+      ? html`<button class="btn sm" disabled title="Stop the run before deleting this issue">🗑 Delete</button>`
+      : armed
+        ? html`<button class="btn sm danger" data-del-id=${d.issue_id} title="Remove this issue from the tracker for good">Confirm delete</button>
+            <button class="btn sm" data-del-cancel="1" title="Keep the issue">Cancel</button>`
+        : html`<button class="btn sm" data-del-arm=${d.issue_id} title="Remove this issue from the tracker">🗑 Delete</button>`}
+  </div>`;
+}
+
 export function detailPage(d) {
   const run = d.running, ret = d.retry;
   const statusKind = d.status === "running" || d.status === "queued" ? "active"
@@ -93,6 +115,7 @@ export function detailPage(d) {
       ${d.agent ? fact("agent", mono(d.agent)) : nothing}
       ${run ? html`${fact("turns", mono(run.turn_count))}${fact("tokens", mono(nfmt(run.tokens && run.tokens.total_tokens)))}${fact("elapsed", mono(dur(run.started_at)))}` : d.ended_at ? fact("ended", ago(d.ended_at)) : nothing}
     </div>
+    ${issueActions(d)}
     <div class="detail-grid"><div>${logView(d.recent_events || [])}</div>
     <div><div class="aside-card"><dl class="kv">${rows.map((r) => html`<dt>${r[0]}</dt><dd>${r[1]}</dd>`)}</dl></div>${deliveryPanel(d)}</div></div></div>`;
 }

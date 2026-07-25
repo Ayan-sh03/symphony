@@ -273,6 +273,63 @@ export class Orchestrator {
     return issue;
   }
 
+  /** Whether the active adapter supports editing/removing issues (console Edit/Delete). */
+  canEditIssues(): boolean {
+    return typeof this.adapter.supportsEdit === "function" && this.adapter.supportsEdit();
+  }
+
+  /** Amend an issue's editable fields, then poll promptly so the board reflects it. */
+  async updateIssue(id: string, patch: import("../tracker/types.ts").IssuePatch): Promise<Issue> {
+    if (!this.canEditIssues() || !this.adapter.updateIssue) {
+      throw new OrchestratorError("not_supported", "the active tracker does not support editing issues");
+    }
+    const issue = await this.adapter.updateIssue(id, patch);
+    this.logger.info("issue updated", { issue_id: id, issue_identifier: issue.identifier });
+    this.scheduleTick(0);
+    this.notify();
+    return issue;
+  }
+
+  /**
+   * Remove an issue from the tracker. Refused while it is running or has a pending
+   * retry — the operator must Stop it first, same rule as the halt flow — so a live
+   * worker is never left writing back to a record that no longer exists. A halted
+   * entry is cleared so the hold and its claim are released. The in-memory run
+   * history survives on purpose: the detail log stays readable after the issue is gone.
+   */
+  async deleteIssue(id: string): Promise<{ issue_id: string; issue_identifier: string }> {
+    if (!this.canEditIssues() || !this.adapter.deleteIssue) {
+      throw new OrchestratorError("not_supported", "the active tracker does not support deleting issues");
+    }
+    const run = this.running.get(id);
+    if (run) {
+      throw new OrchestratorError("conflict", `issue ${run.identifier} is running; stop it before deleting it`);
+    }
+    const retry = this.retry_attempts.get(id);
+    if (retry) {
+      throw new OrchestratorError("conflict", `issue ${retry.identifier} has a pending retry; stop it before deleting it`);
+    }
+    let identifier = this.halted.get(id)?.identifier ?? id;
+    let known = false;
+    try {
+      const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
+      if (issue) {
+        identifier = issue.identifier;
+        known = true;
+      }
+    } catch (err) {
+      throw new OrchestratorError("upstream_failed", String((err as Error).message ?? err));
+    }
+    if (!known) throw new OrchestratorError("not_found", `unknown issue ${id}`);
+    await this.adapter.deleteIssue(id);
+    this.releaseHalt(id); // a deleted issue holds nothing
+    this.claimed.delete(id);
+    this.logger.info("issue deleted", { issue_id: id, issue_identifier: identifier });
+    this.scheduleTick(0);
+    this.notify();
+    return { issue_id: id, issue_identifier: identifier };
+  }
+
   // ---- agent selection ----
 
   /** This project's configured server.port (SPEC §13.7), or null. Used only for the host's default bind. */
@@ -1078,6 +1135,7 @@ export class Orchestrator {
         delivery_mode: this.config.workspace_delivery_mode,
         review_state: this.deliveryEnabled() ? this.config.tracker.review_state : null,
         can_create: this.canCreateIssues(),
+        can_edit: this.canEditIssues(),
         can_board: this.canBoard(),
         can_set_agent: this.canSetAgent(),
       },
@@ -1108,6 +1166,7 @@ export class Orchestrator {
       if (issue) {
         known.state = issue.state;
         known.delivery = issue.delivery ?? null;
+        withEditableFields(known, issue);
       }
       return this.withPersistedTranscript(known);
     }
@@ -1125,6 +1184,10 @@ export class Orchestrator {
       issue_id: issue.id,
       status: this.isTerminalState(issue.state) ? "idle" : this.isActiveState(issue.state) ? "queued" : "idle",
       state: issue.state,
+      title: issue.title,
+      description: issue.description,
+      priority: issue.priority,
+      labels: issue.labels,
       agent: this.resolveAgentKind(issue),
       delivery: issue.delivery ?? null,
       workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
@@ -1168,6 +1231,10 @@ export class Orchestrator {
           issue_identifier: identifier,
           issue_id: id,
           status: "running",
+          title: e.issue.title,
+          description: e.issue.description,
+          priority: e.issue.priority,
+          labels: e.issue.labels,
           workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
           running: {
             session_id: e.session.session_id,
@@ -1242,6 +1309,14 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/** Copy the tracker's editable fields onto a detail view so the console can prefill Edit. */
+function withEditableFields(view: IssueDetailView, issue: Issue): void {
+  view.title = issue.title;
+  view.description = issue.description;
+  view.priority = issue.priority;
+  view.labels = issue.labels;
+}
+
 export interface SnapshotView {
   generated_at: string;
   counts: { running: number; retrying: number; halted: number };
@@ -1267,6 +1342,7 @@ export interface SnapshotView {
     /** State delivered issues wait in (null on scratch projects). */
     review_state: string | null;
     can_create: boolean;
+    can_edit: boolean;
     can_board: boolean;
     can_set_agent: boolean;
   };
@@ -1322,6 +1398,11 @@ export interface IssueDetailView {
   status: string;
   /** Tracker state, present when the issue is not live (live runs carry it under `running`). */
   state?: string;
+  /** Editable tracker fields, so the console can prefill the edit form (extension). */
+  title?: string;
+  description?: string | null;
+  priority?: number | null;
+  labels?: string[];
   /** Effective agent backend that would run this issue. */
   agent?: string;
   /** Recorded deliverable (repository projects), enriched from the tracker. */

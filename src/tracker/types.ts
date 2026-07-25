@@ -55,6 +55,19 @@ export interface NewIssueInput {
   agent?: string | null;
 }
 
+/**
+ * Editable fields of an existing work item (OPTIONAL adapter capability). Only the
+ * keys present are written. `identifier` is deliberately absent: it keys the record
+ * (and the workspace), so a rename is a delete + create. State and the per-task
+ * agent keep their dedicated `setIssueState`/`setIssueAgent` endpoints.
+ */
+export interface IssuePatch {
+  title?: string;
+  description?: string | null;
+  priority?: number | null;
+  labels?: string[];
+}
+
 export interface TrackerAdapter {
   readonly kind: string;
 
@@ -75,6 +88,15 @@ export interface TrackerAdapter {
    */
   supportsCreate?(): boolean;
   createIssue?(input: NewIssueInput): Promise<Issue>;
+
+  /**
+   * OPTIONAL edit capability (extension beyond the read kernel). When present, the
+   * console and API can amend or remove work items instead of forcing the operator
+   * to hand-edit provider records. Both are gated by the same `supportsEdit`.
+   */
+  supportsEdit?(): boolean;
+  updateIssue?(id: string, patch: IssuePatch): Promise<Issue>;
+  deleteIssue?(id: string): Promise<void>;
 
   /**
    * OPTIONAL board capability: list every work item regardless of state, and move

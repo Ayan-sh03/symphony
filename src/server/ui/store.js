@@ -18,6 +18,7 @@ export const store = {
   detailData: null,  // cached detail payload for the open issue
   detailErr: null,   // error string if the detail fetch failed
   projMenuOpen: false,
+  armDelete: null,   // issue id whose Delete button is armed (two-click confirm)
   auto: true,
   conn: "live",      // live | stale | down
   lastOk: Date.now(),
