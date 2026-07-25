@@ -15,3 +15,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Verifies the image builds. Does not run agents — codex/opencode CLIs are
+      # not in the image. See README §Docker.
+      - run: docker build .

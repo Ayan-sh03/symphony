@@ -38,6 +38,39 @@ npm test        # node --test test/
 npm run typecheck
 ```
 
+### Docker
+
+A `Dockerfile` and `docker-compose.yml` are included for a one-command
+containerized deploy. The image is `node:24-slim` + the source tree + production
+deps (no build step), runs as a non-root user, and exposes the console on
+`8420`. `docker compose up` brings it up with the file tracker; state (per-issue
+workspaces and `history.db`) persists in a named volume, and `issues/` +
+`WORKFLOW.md` are bind-mounted from the host so you can edit them without a
+rebuild:
+
+```bash
+docker compose up          # console on http://localhost:8420
+docker compose restart     # state survives restart
+```
+
+The HTTP server binds loopback by default. To expose the console (the container
+needs this), set `SYMPHONY_HOST=0.0.0.0` — either via the env var or the `--host`
+flag. The compose file sets it for you.
+
+**Agent CLIs are not in the image.** Symphony orchestrates external `codex` /
+`opencode` binaries, which are intentionally not bundled. To run real agents in a
+container, either:
+
+- **Mount** the CLIs (and their config dirs) from the host, e.g. extend the
+  `volumes:` in `docker-compose.yml` to bind `/usr/local/bin/codex` and the
+  `~/.codex` / `~/.config/opencode` directories into the container, or
+- **Extend** the image with a downstream `FROM symphony:local` stage that installs
+  the CLIs.
+
+Without the CLIs, the container still serves the console and the file tracker,
+but issuing an active-state issue will fail its dispatch preflight with a missing
+agent error. CI builds the image (`docker build .`) but does not run agents.
+
 ## The Console
 
 The web UI shows a **Board** of issues grouped by state (backlog, active, done). Completed work stays visible.
