@@ -20,12 +20,14 @@ interface CliArgs {
   workflowPath: string | null;
   manifestPath: string | null;
   port: number | null;
+  host: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   let workflowPath: string | null = null;
   let manifestPath: string | null = null;
   let port: number | null = null;
+  let host: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--port") {
@@ -34,6 +36,12 @@ function parseArgs(argv: string[]): CliArgs {
       port = Math.trunc(Number(v));
     } else if (a.startsWith("--port=")) {
       port = Math.trunc(Number(a.slice("--port=".length)));
+    } else if (a === "--host") {
+      const v = argv[++i];
+      if (v === undefined) throw new Error("--host requires a value");
+      host = v;
+    } else if (a.startsWith("--host=")) {
+      host = a.slice("--host=".length);
     } else if (a === "--projects") {
       const v = argv[++i];
       if (v === undefined) throw new Error("--projects requires a path to a manifest JSON file");
@@ -41,13 +49,13 @@ function parseArgs(argv: string[]): CliArgs {
     } else if (a.startsWith("--projects=")) {
       manifestPath = a.slice("--projects=".length);
     } else if (a === "-h" || a === "--help") {
-      process.stdout.write("Usage: symphony [path-to-WORKFLOW.md] [--projects <manifest.json>] [--port N]\n");
+      process.stdout.write("Usage: symphony [path-to-WORKFLOW.md] [--projects <manifest.json>] [--port N] [--host <addr>]\n");
       process.exit(0);
     } else if (!a.startsWith("-")) {
       workflowPath = a;
     }
   }
-  return { workflowPath, manifestPath, port };
+  return { workflowPath, manifestPath, port, host };
 }
 
 async function main(): Promise<void> {
@@ -93,7 +101,9 @@ async function main(): Promise<void> {
   const effectivePort = args.port ?? manager.get(manager.firstId())?.orchestrator.serverPort() ?? null;
   let httpServer: SymphonyHttpServer | null = null;
   if (effectivePort !== null && effectivePort !== undefined) {
-    httpServer = new SymphonyHttpServer({ manager, logger, port: effectivePort });
+    // Bind address: --host flag overrides SYMPHONY_HOST env, default loopback (SPEC §13.7).
+    const effectiveHost = args.host ?? process.env.SYMPHONY_HOST ?? null;
+    httpServer = new SymphonyHttpServer({ manager, logger, port: effectivePort, host: effectiveHost ?? undefined });
     try {
       await httpServer.listen();
     } catch (err) {
