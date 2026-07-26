@@ -729,3 +729,181 @@ test("an issue moved to terminal mid-turn finishes as delivered, not a failed/ca
     orch.stop();
   }
 });
+
+// ---- follow-up issues / work streams (SPEC Appendix B.5) ----
+
+/**
+ * Backend that holds each turn open for `holdMs` and records, per workspace path,
+ * how many sessions were ever live at once. Two issues sharing a stream share a
+ * workspace, so anything above 1 means they collided in it.
+ */
+function makeConcurrencyFactory(kind: string, holdMs: number) {
+  const live = new Map<string, number>();
+  const peak = new Map<string, number>();
+  let peakOverall = 0;
+  let liveOverall = 0;
+  const factory: AgentFactory = {
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      const ws = opts.workspacePath;
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          const n = (live.get(ws) ?? 0) + 1;
+          live.set(ws, n);
+          liveOverall += 1;
+          peak.set(ws, Math.max(peak.get(ws) ?? 0, n));
+          peakOverall = Math.max(peakOverall, liveOverall);
+          try {
+            await new Promise((r) => setTimeout(r, holdMs));
+            fs.writeFileSync(
+              path.join(ws, "SYMPHONY_RESULT.json"),
+              JSON.stringify({ state: "done", comment: `worked in ${path.basename(ws)}` }),
+            );
+            return { status: "completed" } as const;
+          } finally {
+            live.set(ws, (live.get(ws) ?? 1) - 1);
+            liveOverall -= 1;
+          }
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+  return { factory, peakFor: (ws: string) => peak.get(ws) ?? 0, peakOverall: () => peakOverall };
+}
+
+/** Project with `issues` pre-written as records, workspaces plain directories. */
+function setupWith(kind: string, records: Record<string, unknown>[], extraAgent = "") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-stream-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  for (const rec of records) {
+    fs.writeFileSync(path.join(issuesDir, `${rec.identifier}.json`), JSON.stringify(rec));
+  }
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo", "in progress"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 100
+workspace:
+  root: ./ws
+agent:
+  kind: ${kind}
+  max_turns: 1
+  max_concurrent_agents: 2
+  max_retry_backoff_ms: 2000
+${extraAgent}---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  return { dir, issuesDir, wfPath, workflow, config };
+}
+
+const todo = (identifier: string, over: Record<string, unknown> = {}) => ({
+  id: identifier, identifier, title: `task ${identifier}`, description: "x", state: "todo", dispatchable: true, ...over,
+});
+
+test("a follow-up freezes the parent's stream, so a chain stays on one branch", async () => {
+  registerAgentFactory(makeFakeFactory("done"));
+  const { issuesDir, wfPath, workflow, config } = setupWith("fake-done", [todo("S-1", { state: "backlog" })]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  try {
+    assert.equal(orch.canFollowUp(), true);
+    const child = await orch.createIssue({ identifier: "S-1-a", title: "review fixes", state: "backlog", follow_up_for: "S-1" });
+    assert.equal(child.follow_up_for, "S-1");
+    assert.equal(child.stream_identifier, "S-1");
+
+    // A follow-up of the follow-up still names the branch the first issue opened.
+    const grandchild = await orch.createIssue({ identifier: "S-1-b", title: "more review fixes", state: "backlog", follow_up_for: "S-1-a" });
+    assert.equal(grandchild.follow_up_for, "S-1-a", "lineage points at the issue it answers");
+    assert.equal(grandchild.stream_identifier, "S-1", "…but the work stream is still the original");
+
+    // All three share one workspace path, which is what keeps them on one branch.
+    const paths = await Promise.all(["S-1", "S-1-a", "S-1-b"].map(async (i) => (await orch.issueDetailFor(i))!.workspace.path));
+    assert.equal(new Set(paths).size, 1, "one workspace per stream");
+
+    // An ordinary issue is untouched: its own stream, its own workspace.
+    const plain = await orch.createIssue({ identifier: "S-2", title: "unrelated", state: "backlog" });
+    assert.equal(plain.stream_identifier, null);
+    assert.notEqual((await orch.issueDetailFor("S-2"))!.workspace.path, paths[0]);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("follow-up creation refuses an unknown parent and self-reference", async () => {
+  registerAgentFactory(makeFakeFactory("done"));
+  const { wfPath, workflow, config } = setupWith("fake-done", [todo("S-1", { state: "backlog" })]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  try {
+    await assert.rejects(
+      () => orch.createIssue({ identifier: "S-9", title: "orphan", follow_up_for: "NOPE-1" }),
+      (e: Error) => e.name === "OrchestratorError" && /unknown issue NOPE-1/.test(e.message),
+    );
+    await assert.rejects(
+      () => orch.createIssue({ identifier: "S-8", title: "ouroboros", follow_up_for: "S-8" }),
+      (e: Error) => e.name === "OrchestratorError" && /cannot follow up on itself/.test(e.message),
+    );
+  } finally {
+    orch.stop();
+  }
+});
+
+test("issues sharing a stream never run at the same time; separate streams still do", async () => {
+  const { factory, peakFor, peakOverall } = makeConcurrencyFactory("fake-serial", 400);
+  registerAgentFactory(factory);
+  const { dir, wfPath, workflow, config } = setupWith("fake-serial", [
+    todo("Q-1"),
+    todo("Q-1-a", { follow_up_for: "Q-1", stream_identifier: "Q-1" }),
+    todo("Q-2"),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const shared = path.join(dir, "ws", "Q-1");
+    const done = await waitFor(
+      () => ["Q-1", "Q-1-a", "Q-2"].every((i) => {
+        const rec = JSON.parse(fs.readFileSync(path.join(dir, "issues", `${i}.json`), "utf8"));
+        return rec.state === "done";
+      }),
+      15000,
+    );
+    assert.ok(done, "every issue in the stream still gets worked, just one at a time");
+    assert.equal(peakFor(shared), 1, "the shared workspace never had two live sessions");
+    assert.ok(peakOverall() >= 2, "unrelated streams still run concurrently");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("deleting one issue of a stream leaves the shared workspace for its siblings", async () => {
+  registerAgentFactory(makeFakeFactory("done"));
+  const { dir, wfPath, workflow, config } = setupWith("fake-done", [
+    todo("D-1", { state: "backlog" }),
+    todo("D-1-a", { state: "backlog", follow_up_for: "D-1", stream_identifier: "D-1" }),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  try {
+    const shared = path.join(dir, "ws", "D-1");
+    fs.mkdirSync(shared, { recursive: true });
+    fs.writeFileSync(path.join(shared, "work.txt"), "in progress\n");
+
+    await orch.deleteIssue("D-1");
+    assert.ok(fs.existsSync(shared), "the follow-up still needs the workspace it shares");
+
+    // Once the last member goes, so does the workspace.
+    await orch.deleteIssue("D-1-a");
+    assert.ok(!fs.existsSync(shared), "nothing left in the stream, nothing left to keep");
+  } finally {
+    orch.stop();
+  }
+});

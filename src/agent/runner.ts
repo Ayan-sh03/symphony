@@ -26,6 +26,14 @@ export interface RunnerDeps {
   config: ServiceConfigValues;
   /** Resolved agent backend for this run (per-issue override → default → config). */
   agentKind: string;
+  /**
+   * Work stream this run belongs to (SPEC Appendix B.5): the identifier whose
+   * workspace and branch it uses. Equals the issue's own identifier for ordinary
+   * issues; a follow-up names the issue it continues.
+   */
+  stream: string;
+  /** True when this issue is a follow-up, so its branch must already exist. */
+  isFollowUp: boolean;
   promptTemplate: string;
   adapter: TrackerAdapter;
   workspaceManager: WorkspaceManager;
@@ -60,14 +68,15 @@ export async function runAgentAttempt(
   const log = (msg: string, extra: Record<string, unknown> = {}) =>
     deps.logger.info(msg, { issue_id: issue.id, issue_identifier: issue.identifier, ...extra });
 
-  // 1. Workspace
+  // 1. Workspace (the stream's, which for a follow-up is the parent's worktree)
   let workspace;
   try {
-    workspace = await deps.workspaceManager.createForIssue(issue.identifier);
+    workspace = await deps.workspaceManager.createForIssue(deps.stream, deps.isFollowUp);
   } catch (err) {
     return { kind: "abnormal", reason: `workspace error: ${(err as Error).message}` };
   }
   const wsPath = workspace.path;
+  const branch = deps.workspaceManager.deliveryBranchFor(deps.stream);
 
   // 2. before_run hook (fatal to attempt)
   const beforeOk = await deps.workspaceManager.runBeforeRun(wsPath);
@@ -119,7 +128,7 @@ export async function runAgentAttempt(
       let prompt: string;
       try {
         prompt = turnNumber === 1
-          ? renderPrompt(deps.promptTemplate, issue, attempt)
+          ? renderPrompt(deps.promptTemplate, issue, attempt, branch)
           : continuationPrompt(issue, turnNumber, maxTurns);
       } catch (err) {
         const reason = err instanceof PromptError ? `${err.errorClass}: ${err.message}` : `prompt error: ${String(err)}`;

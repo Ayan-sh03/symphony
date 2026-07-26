@@ -257,3 +257,23 @@ test("delivery: absent or shapeless records normalize to null", async () => {
   assert.equal(all.find((i) => i.id === "A")!.delivery, null);
   assert.equal(all.find((i) => i.id === "B")!.delivery, null, "delivery without a branch is invalid");
 });
+
+test("follow-up fields round-trip on create and are never rewritten by an edit", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "parent", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  assert.equal(a.supportsFollowUp(), true);
+
+  const parent = (await a.listAllIssues()).find((i) => i.id === "A")!;
+  assert.equal(parent.follow_up_for, null, "an ordinary issue leads its own stream");
+  assert.equal(parent.stream_identifier, null);
+
+  const child = await a.createIssue({ identifier: "A-1-a", title: "review fixes", follow_up_for: "A-1", stream_identifier: "A-1" });
+  assert.equal(child.follow_up_for, "A-1");
+  assert.equal(child.stream_identifier, "A-1");
+
+  // The stream picks the branch, so an edit must not be able to move it.
+  const edited = await a.updateIssue(child.id, { title: "renamed", labels: ["review"] });
+  assert.equal(edited.title, "renamed");
+  assert.equal(edited.stream_identifier, "A-1", "the stream survives an edit untouched");
+  assert.equal(edited.follow_up_for, "A-1");
+});
