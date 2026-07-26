@@ -179,7 +179,10 @@ export class WorkspaceManager {
           ? ["worktree", "add", "-b", branch, wsPath, ...(base.ref ? [base.ref] : [])]
           : ["worktree", "add", wsPath, branch];
         await this.git(repo, addArgs);
+        // A branch we did not create has no recorded base; recover one now, while the
+        // reflog that knows where it came from is still likely to be there.
         if (existing === null) await this.recordBase(repo, branch, base);
+        else await this.baseFor(repo, branch);
         created_now = true;
       } catch (err) {
         throw new WorkspaceError(`failed to create git worktree ${wsPath}: ${(err as Error).message}`);
@@ -291,11 +294,12 @@ export class WorkspaceManager {
     const uncommitted = (await this.uncommittedPaths(wsPath)) ?? [];
     const commitSha = (await this.git(wsPath, ["rev-parse", "HEAD"], true))?.trim() || null;
     const branchExists = await this.branchExists(branch);
-    // What the branch was actually cut from, recorded at creation. The live
-    // lookup is only a fallback for worktrees created before that was recorded;
-    // the repo's HEAD may have moved since, which is exactly why we store it.
-    const stored = await this.storedBase(repo, branch);
-    const base = stored.ref ?? (await this.resolveBase(repo)).ref;
+    // What the branch was actually cut from: recorded at creation, or recovered from the
+    // branch's reflog when it never was. Resolving it live is the last resort, and a poor
+    // one — the repo's HEAD may have moved to an unrelated branch since, which is exactly
+    // why the base is stored in the first place.
+    const stored = await this.baseFor(repo, branch);
+    const base = stored.ref ?? stored.sha ?? (await this.resolveBase(repo)).ref;
     // Diffing from the recorded start commit is exact; the ref name is a
     // best-effort stand-in when we only have that.
     const from = stored.sha ?? base;
@@ -343,6 +347,45 @@ export class WorkspaceManager {
     const ref = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.base`], true))?.trim() || null;
     const sha = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.baseSha`], true))?.trim() || null;
     return { ref, sha };
+  }
+
+  /**
+   * The branch's base, recovering it when it was never recorded.
+   *
+   * `recordBase` only ever fires when Symphony creates the branch, so a branch that
+   * already existed — cut by hand, or by a build from before bases were recorded — has
+   * none, permanently. Delivery then falls back to whatever ref the repository happens to
+   * have checked out, and a diff against an unrelated branch credits that branch's commits
+   * to the issue.
+   *
+   * Git still knows the answer: the oldest entry in the branch's own reflog is the commit
+   * it was created at. That is used once, verified to actually be an ancestor of the branch
+   * (a force-moved branch's creation entry may no longer be one), and then recorded like
+   * any other base so the recovery happens a single time while reflogs are still around.
+   */
+  private async baseFor(repo: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
+    const stored = await this.storedBase(repo, branch);
+    if (stored.ref || stored.sha) return stored;
+    const sha = await this.branchCreationCommit(repo, branch);
+    if (!sha) return stored;
+    // No ref name is recoverable — the branch it was cut from may be long gone — so the
+    // commit itself becomes the base. It is exact, which the ref name never was.
+    await this.recordBase(repo, branch, { ref: null, sha });
+    this.opts.logger.info("recovered a missing branch base from the reflog", { branch, base_sha: sha });
+    return { ref: null, sha };
+  }
+
+  /** The commit a branch was created at, per its reflog; null when unknown or unusable. */
+  private async branchCreationCommit(repo: string, branch: string): Promise<string | null> {
+    const out = await this.git(repo, ["reflog", "show", "--format=%H", `refs/heads/${branch}`], true);
+    if (!out) return null; // no reflog for this ref (expired, or never had one)
+    const lines = out.split(/\r?\n/).filter((l) => l.trim() !== "");
+    const created = lines.at(-1)?.trim();
+    if (!created) return null;
+    // The branch must still descend from it; otherwise the branch was reset or force-moved
+    // and its creation point says nothing useful about what it contains now.
+    const ok = await this.git(repo, ["merge-base", "--is-ancestor", created, branch], true);
+    return ok === null ? null : created;
   }
 
   /**
