@@ -53,6 +53,10 @@ export interface NewIssueInput {
   labels?: string[];
   /** OPTIONAL per-task agent backend override. */
   agent?: string | null;
+  /** OPTIONAL follow-up lineage: the identifier this issue follows up on. */
+  follow_up_for?: string | null;
+  /** OPTIONAL work stream to join (resolved by the caller, never by the adapter). */
+  stream_identifier?: string | null;
 }
 
 /**
@@ -60,6 +64,10 @@ export interface NewIssueInput {
  * keys present are written. `identifier` is deliberately absent: it keys the record
  * (and the workspace), so a rename is a delete + create. State and the per-task
  * agent keep their dedicated `setIssueState`/`setIssueAgent` endpoints.
+ *
+ * The follow-up fields are absent for the same reason as `identifier`: `stream_identifier`
+ * picks the branch and workspace, so editing it would move an issue's work mid-life.
+ * Changing a follow-up link is a delete + create.
  */
 export interface IssuePatch {
   title?: string;
@@ -88,6 +96,14 @@ export interface TrackerAdapter {
    */
   supportsCreate?(): boolean;
   createIssue?(input: NewIssueInput): Promise<Issue>;
+
+  /**
+   * OPTIONAL follow-up capability (extension, SPEC Appendix B.5): the adapter persists
+   * and returns `follow_up_for`/`stream_identifier`, so a new issue can join an existing
+   * issue's branch instead of cutting its own. Requires `supportsCreate`. Adapters
+   * without it simply never offer follow-ups; nothing else changes.
+   */
+  supportsFollowUp?(): boolean;
 
   /**
    * OPTIONAL edit capability (extension beyond the read kernel). When present, the

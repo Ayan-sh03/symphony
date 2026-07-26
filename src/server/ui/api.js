@@ -17,10 +17,11 @@ export function fetchBoard() {
     .catch(() => {});
 }
 
-// Detail and edit share one payload; a late response for a page we have left is dropped.
+// Detail, edit and follow-up share one payload; a late response for a page we have
+// left is dropped.
 function viewingDetail(identifier) {
   const r = store.route;
-  return (r.name === "detail" || r.name === "edit") && r.id === identifier;
+  return (r.name === "detail" || r.name === "edit" || r.name === "followup") && r.id === identifier;
 }
 
 export function loadDetail(identifier) {

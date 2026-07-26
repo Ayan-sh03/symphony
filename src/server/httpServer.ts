@@ -202,6 +202,18 @@ export class SymphonyHttpServer {
         .catch((err) => this.json(res, this.actionStatus(err, 400), { error: { code: this.actionCode(err, "delete_failed"), message: String((err as Error).message ?? err) } }));
       return;
     }
+    // Open a follow-up on an existing issue: same branch, same workspace, so review
+    // work does not diverge onto a second branch (SPEC Appendix B.5). The parent comes
+    // from the path, never the body, so the console cannot mis-address one.
+    const followUpMatch = rest.match(/^\/issues\/([^/]+)\/follow-up$/);
+    if (followUpMatch) {
+      if (method !== "POST") return this.methodNotAllowed(res);
+      if (!orch.canFollowUp()) {
+        return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support follow-up issues" } });
+      }
+      void this.createIssue(orch, req, res, decodeURIComponent(followUpMatch[1]!));
+      return;
+    }
     const stateMatch = rest.match(/^\/issues\/([^/]+)\/state$/);
     if (stateMatch) {
       if (method !== "POST") return this.methodNotAllowed(res);
@@ -308,15 +320,22 @@ export class SymphonyHttpServer {
     }
   }
 
-  private async createIssue(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  /**
+   * Create an issue. `parent` (from the `/issues/<id>/follow-up` route) makes it a
+   * follow-up: it joins that issue's work stream and delivers onto the same branch
+   * instead of cutting its own (SPEC Appendix B.5).
+   */
+  private async createIssue(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse, parent?: string): Promise<void> {
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(req);
     } catch {
       return this.json(res, 400, { error: { code: "bad_request", message: "invalid JSON body" } });
     }
+    const followUpFor = parent ?? (typeof body.follow_up_for === "string" && body.follow_up_for.trim() !== "" ? body.follow_up_for.trim() : null);
     try {
       const issue = await orch.createIssue({
+        follow_up_for: followUpFor,
         identifier: String(body.identifier ?? ""),
         title: String(body.title ?? ""),
         description: typeof body.description === "string" ? body.description : null,
@@ -325,9 +344,20 @@ export class SymphonyHttpServer {
         labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
         agent: typeof body.agent === "string" && body.agent.trim() !== "" ? body.agent.trim() : null,
       });
-      this.json(res, 201, { created: true, issue: { id: issue.id, identifier: issue.identifier, state: issue.state } });
+      this.json(res, 201, {
+        created: true,
+        issue: {
+          id: issue.id,
+          identifier: issue.identifier,
+          state: issue.state,
+          follow_up_for: issue.follow_up_for,
+          stream_identifier: issue.stream_identifier,
+        },
+      });
     } catch (err) {
-      this.json(res, 400, { error: { code: "create_failed", message: String((err as Error).message ?? err) } });
+      // An unknown parent or a tracker that cannot do follow-ups is not a malformed
+      // request, so those keep their own status (404/501/409).
+      this.json(res, this.actionStatus(err, 400), { error: { code: this.actionCode(err, "create_failed"), message: String((err as Error).message ?? err) } });
     }
   }
 

@@ -2368,3 +2368,56 @@ Terminal cleanup (§8.6, §9.4) is narrowed in repository mode. The implementati
 - Git invocations are subprocesses on the host's event path; an implementation SHOULD run
   them asynchronously so a slow repository or a network push cannot stall polling,
   reconciliation, or the status surface for other issues and projects.
+
+### B.5 Follow-up Issues (Work Streams)
+
+Review turns one delivered branch into more work. Filing that work as an ordinary issue
+would open a *second* branch from the base, so the fix and the thing it fixes live apart
+and have to be reconciled later. A **follow-up** avoids that: it is a normal issue that
+joins an existing issue's **work stream** and therefore delivers onto the same branch, in
+the same workspace, on top of what is already there.
+
+Two OPTIONAL issue fields carry it (§4.1.1):
+
+- `follow_up_for` — identifier of the issue this one continues. Lineage only.
+- `stream_identifier` — the identifier whose branch and workspace this issue uses. Absent
+  means the issue leads its own stream, which is every ordinary issue.
+
+- The stream MUST be **frozen at creation** as the parent's own stream (`parent.stream_identifier`
+  if it has one, else `parent.identifier`), not recomputed by walking `follow_up_for` later.
+  A chain of follow-ups therefore all name the branch the first issue opened; there is no walk
+  to cycle, and deleting a middle issue cannot strand a child on a fresh branch.
+- Both fields MUST be immutable after creation. `stream_identifier` selects the branch and
+  workspace, so editing it would move an issue's work; changing a link is delete + create.
+- A stream identifier reaches both a branch name and a filesystem path, so it MUST be
+  validated before it is stored, and a stored value that fails validation MUST be ignored
+  in favour of the issue's own identifier rather than passed to git.
+- Creating a follow-up MUST fail when the parent does not exist, and it is a tracker
+  capability (§11): adapters that cannot persist the two fields simply do not offer it.
+
+**Scheduling.** Workspace resolution (§4.2, §9.2) and branch naming (B.1) key off the
+stream, not the issue identifier. One workspace per stream therefore implies:
+
+- At most one member of a stream in flight at a time. An implementation MUST NOT dispatch an
+  issue whose stream is already owned — including on any path that bypasses ordinary
+  candidate selection, such as a retry timer. Members of a stream are a queue, not parallel
+  work.
+- Ownership MUST outlive the run itself, because the workspace does. A stream is owned while
+  a member is running, while a finished member's delivery is still being recorded or its
+  workspace removed, while a member has a pending retry (a normal exit resolves into a
+  delivery only when its continuation timer fires), and while a member is halted (a stopped
+  run can leave half-finished work in the workspace). Releasing the stream at worker exit is
+  not sufficient: a sibling admitted in that window works in a workspace that is about to be
+  measured and cleaned on another issue's behalf, and its own delivery can be lost.
+- Deferring an issue because its stream is busy is not a failed attempt and SHOULD NOT
+  consume a retry.
+- A follow-up's workspace MUST NOT create the stream's branch: it continues work that
+  already exists, so a missing branch means the stream was merged away or renamed, and
+  cutting a new one from the base would be exactly the divergence this feature prevents.
+
+**Delivery and cleanup.** A follow-up's delivery (B.2) records the stream's branch, and
+because the base was recorded when that branch was cut, the changed-file set stays
+cumulative for the whole stream. Cleanup (B.3) is narrowed once more: an implementation
+MUST NOT remove a stream's workspace while another issue still belongs to that stream —
+including when one member is deleted — and when stream membership cannot be determined it
+MUST preserve the workspace, on the same reasoning as the dirty-worktree rule.

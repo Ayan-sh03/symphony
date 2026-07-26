@@ -173,6 +173,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .brow .bkey { font-weight: 600; white-space: nowrap; }
 .brow .btitle { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 40px; }
 .brow .prio { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; }
+/* Follow-up lineage: quiet, and never squeezes the title out of the row. */
+.brow .lineage { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
 .brow .actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
 .run-ind { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; font-weight: 550; white-space: nowrap; }
 .run-ind .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s var(--ease) infinite; }
@@ -228,6 +230,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .warn-text { color: var(--warn); font-size: 12.5px; }
 .files { max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
 .file { padding: 2px 0; }
+/* Stream members read as a list of links, not paths: keep them on one line. */
+.file .bkey { font-weight: 600; }
+.file .sub { margin-left: 6px; }
 .dactions { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
 /* Announced to assistive tech, invisible on screen (the two-click delete confirm). */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

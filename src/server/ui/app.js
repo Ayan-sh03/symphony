@@ -13,7 +13,7 @@ import { toast } from "./toast.js";
 import { headerView } from "./views/header.js";
 import { boardBody } from "./views/board.js";
 import { detailPage } from "./views/detail.js";
-import { createPage, editPage, addProjectPage } from "./views/forms.js";
+import { createPage, editPage, followUpPage, addProjectPage } from "./views/forms.js";
 import { integratePage } from "./views/integrate.js";
 import { pageHead, notFoundPage } from "./views/page.js";
 
@@ -35,10 +35,13 @@ function routeBody(m) {
   if (r.name === "new") return m.can_create ? createPage() : notFoundPage("Creating issues is not supported by this tracker.");
   if (r.name === "integrate") return integratePage();
   if (r.name === "add-project") return store.canAdd ? addProjectPage() : notFoundPage("Adding projects is not enabled on this host.");
-  if (r.name === "detail" || r.name === "edit") {
+  if (r.name === "detail" || r.name === "edit" || r.name === "followup") {
     if (store.detailErr) return notFoundPage(store.detailErr);
     if (!store.detailData) return html`${pageHead(r.id, "")}<div class="page"><p class="sub">Loading…</p></div>`;
     if (r.name === "detail") return detailPage(store.detailData);
+    if (r.name === "followup") {
+      return m.can_follow_up ? followUpPage(store.detailData) : notFoundPage("Follow-up issues are not supported by this tracker.");
+    }
     return m.can_edit ? editPage(store.detailData) : notFoundPage("Editing issues is not supported by this tracker.");
   }
   return boardBody(m);

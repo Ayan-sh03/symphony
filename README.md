@@ -92,6 +92,17 @@ Get the same log via `GET /api/v1/<identifier>` → `recent_events`.
 
 New issues land in the `backlog` state. They do not run until you move them to `todo`. Click **Start** or use `POST /api/v1/issues/<id>/state {"state":"todo"}`.
 
+### Follow-ups (Same Branch)
+
+Review comes back on a delivered branch. Filing the fixes as a new issue would open a
+second branch off the base, leaving you to reconcile the two later. Press **↳ Follow-up**
+on the issue instead: the new issue joins the same *work stream*, so it reuses that
+workspace and commits onto the same branch, on top of what is already there. Its delivery
+covers the whole branch, not just the fixes.
+
+Follow-ups of follow-ups still name the original branch. Issues in one stream run one at a
+time — they share a worktree — while unrelated issues keep running in parallel.
+
 ### HTTP API Routes
 
 All issue routes are scoped by project id: `/api/v1/projects/<pid>/…`. A single-workflow host has one project named `default`.
@@ -104,6 +115,7 @@ All issue routes are scoped by project id: `/api/v1/projects/<pid>/…`. A singl
 | `/api/v1/projects/<pid>/issues` | POST | Create issue: `{ "identifier": "SYM-3", "title": "...", "state": "backlog" }` |
 | `/api/v1/projects/<pid>/issues/<id>` | PATCH | Edit issue: any of `{ "title", "description", "priority", "labels" }` |
 | `/api/v1/projects/<pid>/issues/<id>` | DELETE | Delete issue and its workspace (409 while it is running or retrying — stop it first) |
+| `/api/v1/projects/<pid>/issues/<id>/follow-up` | POST | Create an issue that continues this one on the **same branch** (review fixes); same body as create |
 | `/api/v1/projects/<pid>/issues/<id>/state` | POST | Change state: `{"state":"todo"}` |
 | `/api/v1/projects/<pid>/issues/<id>/stop` | POST | Stop a running session or pending retry; hold the issue for a manual state change |
 | `/api/v1/projects/<pid>/refresh` | POST | Poll now |
@@ -242,6 +254,8 @@ Reference: SPEC §11.2.
 - `labels`: trimmed, lowercased, deduplicated
 - `priority`: integer 1–4 or null (lower number = higher priority)
 - `dispatchable`: from file (default `true`)
+- `follow_up_for` / `stream_identifier`: carried as-is (see Follow-ups); absent = the issue
+  leads its own stream
 - Timestamps: pass through as strings or null
 
 ### Malformed Records

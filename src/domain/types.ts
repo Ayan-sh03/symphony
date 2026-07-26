@@ -58,6 +58,20 @@ export interface Issue {
    * agent kind, this issue runs on that backend instead of the effective default.
    */
   agent: string | null;
+  /**
+   * Identifier of the issue this one follows up on (extension, SPEC Appendix B.5).
+   * Lineage only — it records who asked for the follow-up; the branch and workspace
+   * come from `stream_identifier`.
+   */
+  follow_up_for: string | null;
+  /**
+   * Work stream this issue belongs to (extension, SPEC Appendix B.5): the identifier
+   * whose branch and workspace it shares. Null means the issue is its own stream,
+   * which is every ordinary issue. Frozen at creation from the parent's own stream,
+   * so a chain of follow-ups all name the original — no walk, no cycles, and deleting
+   * a middle issue cannot strand a child on a fresh branch.
+   */
+  stream_identifier: string | null;
   /** Recorded delivery, present on repository-backed issues that reached review (extension). */
   delivery?: IssueDelivery | null;
   created_at: string | null;

@@ -8,6 +8,12 @@
  * removes only the disposable worktree — never the branch — and refuses to
  * remove a worktree that still holds uncommitted work or whose branch is gone.
  *
+ * Every method here is keyed by a *work stream* identifier, not by an issue id.
+ * For an ordinary issue the two are the same string; for a follow-up (SPEC
+ * Appendix B.5) the stream is the issue it continues, which is how several issues
+ * come to share one branch and one worktree. Resolving an issue to its stream is
+ * the orchestrator's job — this class never talks to a tracker.
+ *
  * Every git call here is async: the host runs all projects, their agents' stdio
  * and the console on one event loop, so a synchronous `worktree add` (or worse,
  * a network `push`) would freeze the whole service for its duration.
@@ -44,6 +50,18 @@ export function workspaceKey(identifier: string): string {
   if (sanitized === identifier) return sanitized;
   const hash = crypto.createHash("sha256").update(identifier, "utf8").digest("hex").slice(0, 16); // 64 bits
   return `${sanitized}-${hash}`;
+}
+
+/**
+ * Whether a string is safe to use as a work stream key (SPEC Appendix B.5). A stream
+ * feeds both the branch template and the workspace path, so it is checked before it is
+ * ever stored: no leading dash (git would read the branch as an option), no `..`, and
+ * nothing outside the characters a branch name and a path can both carry.
+ */
+export function isSafeStreamIdentifier(value: string): boolean {
+  if (value === "" || value.length > 200) return false;
+  if (value.startsWith("-") || value.includes("..")) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value);
 }
 
 /** Repository delivery settings (extension); null repository = plain empty workspaces. */
@@ -105,13 +123,18 @@ export class WorkspaceManager {
     this.opts.branchTemplate = repo.branch_template;
   }
 
-  /** The issue branch name from the configured template (extension). */
-  branchNameFor(identifier: string): string {
-    return (this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE).replaceAll("{identifier}", identifier);
+  /** The branch name for a work stream, from the configured template (extension). */
+  branchNameFor(stream: string): string {
+    return (this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE).replaceAll("{identifier}", stream);
   }
 
-  workspacePathFor(identifier: string): string {
-    const key = workspaceKey(identifier);
+  /** The branch a stream delivers on, or null when this project has no repository. */
+  deliveryBranchFor(stream: string): string | null {
+    return this.opts.repository ? this.branchNameFor(stream) : null;
+  }
+
+  workspacePathFor(stream: string): string {
+    const key = workspaceKey(stream);
     const p = path.normalize(path.join(this.opts.root, key));
     this.assertInsideRoot(p);
     return p;
@@ -128,12 +151,18 @@ export class WorkspaceManager {
   }
 
   /**
-   * Ensure the per-issue workspace exists, running `after_create` only on fresh
+   * Ensure the stream's workspace exists, running `after_create` only on fresh
    * creation (SPEC §9.2). Returns the logical Workspace record.
+   *
+   * `requireExistingBranch` (follow-ups, SPEC Appendix B.5) forbids creating the
+   * branch: a follow-up joins work that already exists, so a missing branch means
+   * the stream was merged away or renamed. Cutting a fresh one from the base would
+   * silently fork the work — the exact divergence follow-ups exist to prevent — so
+   * this fails loudly instead and lets an operator decide.
    */
-  async createForIssue(identifier: string): Promise<Workspace> {
-    const key = workspaceKey(identifier);
-    const wsPath = this.workspacePathFor(identifier);
+  async createForIssue(stream: string, requireExistingBranch = false): Promise<Workspace> {
+    const key = workspaceKey(stream);
+    const wsPath = this.workspacePathFor(stream);
     let created_now = false;
 
     let stat: fs.Stats | null = null;
@@ -159,11 +188,22 @@ export class WorkspaceManager {
         }
         fs.rmSync(wsPath, { recursive: true, force: true });
         stat = null;
+      } else {
+        // Reuse is the normal path for a follow-up, so check what we are reusing:
+        // a worktree left on some other branch would take the run's commits to the
+        // wrong place, and there is no safe way to switch it (it may hold work).
+        const expected = this.branchNameFor(stream);
+        const actual = (await this.git(wsPath, ["branch", "--show-current"], true))?.trim();
+        if (actual !== expected) {
+          throw new WorkspaceError(
+            `workspace ${wsPath} is checked out on ${actual || "a detached HEAD"}, expected ${expected}; resolve it by hand`,
+          );
+        }
       }
     }
     if (!stat && this.opts.repository) {
       const repo = this.opts.repository;
-      const branch = this.branchNameFor(identifier);
+      const branch = this.branchNameFor(stream);
       try {
         fs.mkdirSync(path.dirname(wsPath), { recursive: true });
         // Forget registrations whose directory was removed out of band: without
@@ -171,6 +211,11 @@ export class WorkspaceManager {
         // never run again.
         await this.git(repo, ["worktree", "prune"], true);
         const existing = await this.git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
+        if (existing === null && requireExistingBranch) {
+          throw new WorkspaceError(
+            `branch ${branch} no longer exists in the repository; a follow-up continues an existing branch and will not cut a new one`,
+          );
+        }
         // New branches are cut from the configured base (default: the repo's
         // current branch). The base is recorded now, while it is still true —
         // the repo's HEAD may have moved on by the time the run delivers.
@@ -182,6 +227,7 @@ export class WorkspaceManager {
         if (existing === null) await this.recordBase(repo, branch, base);
         created_now = true;
       } catch (err) {
+        if (err instanceof WorkspaceError) throw err; // already a precise diagnosis
         throw new WorkspaceError(`failed to create git worktree ${wsPath}: ${(err as Error).message}`);
       }
     } else if (!stat) {
@@ -206,7 +252,7 @@ export class WorkspaceManager {
         } catch {
           /* best effort */
         }
-        throw new WorkspaceError(`after_create hook failed for ${identifier}`);
+        throw new WorkspaceError(`after_create hook failed for ${stream}`);
       }
     }
 
@@ -227,25 +273,29 @@ export class WorkspaceManager {
     await this.runHook("after_run", this.opts.hooks.after_run, wsPath);
   }
 
-  /** Remove a workspace, running `before_remove` first (SPEC §9.4). Used for terminal issues. */
-  async cleanupForIssue(identifier: string): Promise<void> {
-    const wsPath = this.workspacePathFor(identifier);
+  /**
+   * Remove a stream's workspace, running `before_remove` first (SPEC §9.4). Used for
+   * terminal issues. The caller is responsible for not cleaning a stream that another
+   * issue still belongs to (SPEC Appendix B.5) — this class cannot see the tracker.
+   */
+  async cleanupForIssue(stream: string): Promise<void> {
+    const wsPath = this.workspacePathFor(stream);
     if (!fs.existsSync(wsPath)) return;
     if (this.opts.hooks.before_remove) {
       await this.runHook("before_remove", this.opts.hooks.before_remove, wsPath);
     }
     if (this.opts.repository) {
-      const branch = this.branchNameFor(identifier);
+      const branch = this.branchNameFor(stream);
       const dirty = await this.uncommittedPaths(wsPath);
       if (dirty === null || dirty.length > 0) {
         // Hard rule: never delete the only copy of uncommitted work — and when we
         // cannot verify cleanliness, preserve rather than risk it (extension).
-        this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { issue_identifier: identifier, path: wsPath, changes: dirty === null ? "(git status failed)" : dirty.join(", ") });
+        this.opts.logger.warn("workspace preserved because git worktree has uncommitted changes", { stream, path: wsPath, changes: dirty === null ? "(git status failed)" : dirty.join(", ") });
         return;
       }
       if (!(await this.branchExists(branch))) {
         // Without the branch ref, removing the worktree would drop committed work too.
-        this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", { issue_identifier: identifier, path: wsPath, branch });
+        this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", { stream, path: wsPath, branch });
         return;
       }
       try {
@@ -263,17 +313,17 @@ export class WorkspaceManager {
           await this.git(wsPath, ["checkout", "--", name], true);
         }
         await this.git(this.opts.repository, ["worktree", "remove", wsPath]);
-        this.opts.logger.info("git worktree cleaned; issue branch retained", { issue_identifier: identifier, path: wsPath, branch });
+        this.opts.logger.info("git worktree cleaned; issue branch retained", { stream, path: wsPath, branch });
       } catch (err) {
-        this.opts.logger.warn("git worktree cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
+        this.opts.logger.warn("git worktree cleanup failed", { stream, path: wsPath, error: String(err) });
       }
       return;
     }
     try {
       fs.rmSync(wsPath, { recursive: true, force: true });
-      this.opts.logger.info("workspace cleaned", { issue_identifier: identifier, path: wsPath });
+      this.opts.logger.info("workspace cleaned", { stream, path: wsPath });
     } catch (err) {
-      this.opts.logger.warn("workspace cleanup failed", { issue_identifier: identifier, path: wsPath, error: String(err) });
+      this.opts.logger.warn("workspace cleanup failed", { stream, path: wsPath, error: String(err) });
     }
   }
 
@@ -282,12 +332,12 @@ export class WorkspaceManager {
    * the base, and any uncommitted paths still in the worktree. Returns null when
    * this is not a repository project or the worktree is already gone.
    */
-  async deliveryInfo(identifier: string): Promise<WorkspaceDeliveryInfo | null> {
+  async deliveryInfo(stream: string): Promise<WorkspaceDeliveryInfo | null> {
     if (!this.opts.repository) return null;
-    const wsPath = this.workspacePathFor(identifier);
+    const wsPath = this.workspacePathFor(stream);
     if (!fs.existsSync(wsPath)) return null;
     const repo = this.opts.repository;
-    const branch = this.branchNameFor(identifier);
+    const branch = this.branchNameFor(stream);
     const uncommitted = (await this.uncommittedPaths(wsPath)) ?? [];
     const commitSha = (await this.git(wsPath, ["rev-parse", "HEAD"], true))?.trim() || null;
     const branchExists = await this.branchExists(branch);

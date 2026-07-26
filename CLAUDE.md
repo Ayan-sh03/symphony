@@ -74,6 +74,20 @@ Pushing (`workspace.delivery_mode: push|pr`) is a manual console action only. `W
 is the self-dev instance of this. **All git in `workspace/manager.ts` is async on purpose** —
 every project, agent and the console share one event loop.
 
+**Follow-ups / work streams (extension, SPEC Appendix B.5).** An issue may carry
+`follow_up_for` (lineage) and `stream_identifier` (the identifier whose branch and
+workspace it shares), both set at creation and immutable. The workspace manager is keyed
+by *stream*, not issue id — `Orchestrator.streamOf()` resolves it, and everything that
+touches a workspace passes the result. So a review follow-up lands on the branch it is
+answering instead of forking a second one from base. The invariant that falls out: one
+workspace per stream means **one member of a stream in flight at a time**, enforced in
+`shouldDispatch` and again in `onRetryTimer` (which bypasses it). `busyStreams()` is the
+whole rule and deliberately outlives `running` — it also covers finalizing, retrying and
+halted members, because each still owns the workspace; releasing at worker exit lets a
+sibling into a worktree that is about to be cleaned for someone else. Cleanup likewise
+refuses any stream that still has a member. Ordinary issues are their own stream and
+behave exactly as before.
+
 The console is a small client-side app in `src/server/ui/` — plain browser ES
 modules rendered with **lit-html** (no bundler, no build step): the server serves
 the files from disk at `/ui/*` (`httpServer.ts`, which also maps

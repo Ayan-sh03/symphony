@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { WorkspaceManager, workspaceKey, WorkspaceError } from "../src/workspace/manager.ts";
+import { WorkspaceManager, workspaceKey, WorkspaceError, isSafeStreamIdentifier } from "../src/workspace/manager.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -299,4 +299,78 @@ test("a scratch file committed by an earlier run neither counts as delivery nor 
   await wm.cleanupForIssue("SCRATCH-2");
   assert.ok(!fs.existsSync(ws.path), "worktree removed even though a scratch file is tracked");
   assert.equal(git(repo, ["show", "issue/SCRATCH-2:work.txt"]), "real work\n");
+});
+
+// ---- work streams / follow-ups (SPEC Appendix B.5) ----
+
+test("a follow-up reuses the stream's worktree and lands on the same branch", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+
+  // The original issue runs and delivers; cleanup keeps the branch, drops the worktree.
+  const first = await wm.createForIssue("STREAM-1");
+  fs.writeFileSync(path.join(first.path, "feature.ts"), "export const x = 1;\n");
+  git(first.path, ["add", "feature.ts"]);
+  git(first.path, ["commit", "-qm", "first pass"]);
+  await wm.cleanupForIssue("STREAM-1");
+  assert.ok(!fs.existsSync(first.path));
+
+  // The follow-up asks for the same stream: same path, same branch, earlier work present.
+  const second = await wm.createForIssue("STREAM-1", true);
+  assert.equal(second.path, first.path, "one workspace per stream");
+  assert.equal(git(second.path, ["branch", "--show-current"]).trim(), "issue/STREAM-1");
+  assert.ok(fs.existsSync(path.join(second.path, "feature.ts")), "the branch's earlier work is there to continue");
+
+  // And it delivers onto the same branch, diffed from the original base.
+  fs.writeFileSync(path.join(second.path, "review-fix.ts"), "export const y = 2;\n");
+  git(second.path, ["add", "review-fix.ts"]);
+  git(second.path, ["commit", "-qm", "address review"]);
+  const info = (await wm.deliveryInfo("STREAM-1"))!;
+  assert.equal(info.branch, "issue/STREAM-1");
+  assert.deepEqual(info.files_changed.sort(), ["feature.ts", "review-fix.ts"], "the delivery stays cumulative");
+});
+
+test("a follow-up refuses to re-cut a branch that no longer exists", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("STREAM-2");
+  await wm.cleanupForIssue("STREAM-2");
+  // The operator merged and deleted the branch before the follow-up ran.
+  git(repo, ["branch", "-D", "issue/STREAM-2"]);
+
+  await assert.rejects(
+    () => wm.createForIssue("STREAM-2", true),
+    (e: Error) => e instanceof WorkspaceError && /will not cut a new one/.test(e.message),
+    "silently branching from base again is the divergence follow-ups exist to prevent",
+  );
+  // An ordinary issue is unaffected: it may still open its branch.
+  const plainRun = await wm.createForIssue("STREAM-2");
+  assert.equal(git(plainRun.path, ["branch", "--show-current"]).trim(), "issue/STREAM-2");
+});
+
+test("reuse refuses a worktree parked on some other branch", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("STREAM-3");
+  // Something moved the worktree off the issue branch; committing there would
+  // deliver the work to the wrong place.
+  git(ws.path, ["checkout", "-qb", "somewhere-else"]);
+
+  await assert.rejects(
+    () => wm.createForIssue("STREAM-3"),
+    (e: Error) => e instanceof WorkspaceError && /expected issue\/STREAM-3/.test(e.message),
+  );
+});
+
+test("stream identifiers that could reach git as options are rejected", () => {
+  assert.equal(isSafeStreamIdentifier("SYM-12"), true);
+  assert.equal(isSafeStreamIdentifier("team/SYM-12.2"), true);
+  assert.equal(isSafeStreamIdentifier("--upload-pack=touch pwned"), false);
+  assert.equal(isSafeStreamIdentifier("../escape"), false);
+  assert.equal(isSafeStreamIdentifier("a..b"), false);
+  assert.equal(isSafeStreamIdentifier(""), false);
+  assert.equal(isSafeStreamIdentifier("has space"), false);
 });
