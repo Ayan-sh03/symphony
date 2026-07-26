@@ -80,9 +80,13 @@ workspace it shares), both set at creation and immutable. The workspace manager 
 by *stream*, not issue id — `Orchestrator.streamOf()` resolves it, and everything that
 touches a workspace passes the result. So a review follow-up lands on the branch it is
 answering instead of forking a second one from base. The invariant that falls out: one
-workspace per stream means **one live run per stream**, enforced in `shouldDispatch` and
-again in `onRetryTimer` (which bypasses it); cleanup refuses any stream that still has a
-member. Ordinary issues are their own stream and behave exactly as before.
+workspace per stream means **one member of a stream in flight at a time**, enforced in
+`shouldDispatch` and again in `onRetryTimer` (which bypasses it). `busyStreams()` is the
+whole rule and deliberately outlives `running` — it also covers finalizing, retrying and
+halted members, because each still owns the workspace; releasing at worker exit lets a
+sibling into a worktree that is about to be cleaned for someone else. Cleanup likewise
+refuses any stream that still has a member. Ordinary issues are their own stream and
+behave exactly as before.
 
 The console is a small client-side app in `src/server/ui/` — plain browser ES
 modules rendered with **lit-html** (no bundler, no build step): the server serves

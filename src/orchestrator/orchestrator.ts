@@ -156,6 +156,8 @@ export class Orchestrator {
   private retry_attempts = new Map<string, RetryEntry>();
   private halted = new Map<string, HaltedEntry>();
   private completed = new Set<string>();
+  /** Streams whose delivery/cleanup is still in flight — busy, though nothing is running. */
+  private finalizing = new Set<string>();
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
@@ -234,14 +236,43 @@ export class Orchestrator {
   }
 
   /**
-   * Streams with a live run. One workspace and one branch per stream means at most one
-   * run per stream — its members are a queue, not parallel work. Retrying/halted issues
-   * are excluded on purpose: they hold no worktree, and their claim already blocks them.
+   * Streams that already have an owner. One workspace and one branch per stream means at
+   * most one member of a stream may be in flight — they are a queue, not parallel work.
+   *
+   * Ownership deliberately outlives the running set, because so does the workspace:
+   * - `running` — a live turn is in the worktree.
+   * - `finalizing` — the run ended, but its delivery is still being read out of the
+   *   worktree, and the worktree may still be being removed.
+   * - `retry_attempts` — a finished turn's outcome is not resolved yet. This is the gap
+   *   that matters most: a normal exit schedules a continuation retry, and the issue's
+   *   delivery is only recorded when that timer fires. A sibling let in beforehand runs
+   *   in a worktree that is about to be measured and cleaned for someone else.
+   * - `halted` — a stopped run can leave half-finished work in the worktree; mixing a
+   *   sibling into it would put both on the branch. The hold ends when the operator
+   *   changes the halted issue's state, which is the same thing that frees its claim.
    */
   private busyStreams(): Set<string> {
-    const out = new Set<string>();
+    const out = new Set<string>(this.finalizing);
     for (const [, e] of this.running) out.add(e.stream);
+    for (const [, r] of this.retry_attempts) out.add(r.stream);
+    for (const [, h] of this.halted) out.add(h.stream);
     return out;
+  }
+
+  /**
+   * Run the post-run delivery/cleanup for a stream with that stream held busy, so nothing
+   * is dispatched into the worktree while it is being measured and removed.
+   */
+  private async windDownStream(identifier: string, issueId: string, stream: string): Promise<void> {
+    this.finalizing.add(stream);
+    try {
+      await this.finalizeDelivery(identifier, issueId, stream);
+      await this.cleanupStream(stream, issueId);
+    } finally {
+      this.finalizing.delete(stream);
+      // The stream is free now; let a queued sibling go without waiting for the next tick.
+      this.scheduleTick(0);
+    }
   }
 
   // ---- config validation (SPEC §6.3) ----
@@ -789,11 +820,9 @@ export class Orchestrator {
     // a reconciliation terminate releases the claim as before.
     if (term) {
       if (term.cleanupWorkspace) {
-        // Record the deliverable (branch/commit/files) before the worktree goes.
-        void (async () => {
-          await this.finalizeDelivery(entry.identifier, issueId, entry.stream);
-          await this.cleanupStream(entry.stream, issueId);
-        })();
+        // Record the deliverable (branch/commit/files) before the worktree goes. The
+        // entry has already left `running`, so the stream is held busy for the duration.
+        void this.windDownStream(entry.identifier, issueId, entry.stream);
       }
       if (this.halted.has(issueId)) {
         this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
@@ -1046,9 +1075,9 @@ export class Orchestrator {
     }
     const stream = this.streamOf(issue);
     if (this.isTerminalState(issue.state)) {
-      // Record the deliverable (branch/commit/files) before the worktree goes.
-      await this.finalizeDelivery(issue.identifier, issue.id, stream);
-      void this.cleanupStream(stream, issue.id);
+      // Record the deliverable (branch/commit/files) before the worktree goes, with the
+      // stream held so a sibling cannot be dispatched into the worktree meanwhile.
+      void this.windDownStream(issue.identifier, issue.id, stream);
       this.claimed.delete(issueId);
       this.notify();
       return;

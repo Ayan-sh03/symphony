@@ -2398,9 +2398,17 @@ Two OPTIONAL issue fields carry it (§4.1.1):
 **Scheduling.** Workspace resolution (§4.2, §9.2) and branch naming (B.1) key off the
 stream, not the issue identifier. One workspace per stream therefore implies:
 
-- At most one run per stream at a time. An implementation MUST NOT dispatch an issue whose
-  stream already has a live run — including on any path that bypasses ordinary candidate
-  selection, such as a retry timer. Members of a stream are a queue, not parallel work.
+- At most one member of a stream in flight at a time. An implementation MUST NOT dispatch an
+  issue whose stream is already owned — including on any path that bypasses ordinary
+  candidate selection, such as a retry timer. Members of a stream are a queue, not parallel
+  work.
+- Ownership MUST outlive the run itself, because the workspace does. A stream is owned while
+  a member is running, while a finished member's delivery is still being recorded or its
+  workspace removed, while a member has a pending retry (a normal exit resolves into a
+  delivery only when its continuation timer fires), and while a member is halted (a stopped
+  run can leave half-finished work in the workspace). Releasing the stream at worker exit is
+  not sufficient: a sibling admitted in that window works in a workspace that is about to be
+  measured and cleaned on another issue's behalf, and its own delivery can be lost.
 - Deferring an issue because its stream is busy is not a failed attempt and SHOULD NOT
   consume a retry.
 - A follow-up's workspace MUST NOT create the stream's branch: it continues work that

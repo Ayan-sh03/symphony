@@ -907,3 +907,101 @@ test("deleting one issue of a stream leaves the shared workspace for its sibling
     orch.stop();
   }
 });
+
+/**
+ * Repo-mode backend that commits real work, holds the turn open, and records how many
+ * sessions were ever live at once in each workspace. The git delivery path is where the
+ * post-run window is widest: several awaited `git` subprocesses run after the entry has
+ * already left the running set.
+ */
+function makeGitConcurrencyFactory(kind: string, holdMs: number) {
+  const live = new Map<string, number>();
+  const peak = new Map<string, number>();
+  const factory: AgentFactory = {
+    kind,
+    create(o: AgentSessionOptions): AgentSession {
+      const ws = o.workspacePath;
+      const id = o.issue.identifier;
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          const n = (live.get(ws) ?? 0) + 1;
+          live.set(ws, n);
+          peak.set(ws, Math.max(peak.get(ws) ?? 0, n));
+          try {
+            fs.writeFileSync(path.join(ws, `${id}.txt`), `work from ${id}\n`);
+            git(ws, ["add", `${id}.txt`]);
+            git(ws, ["commit", "-qm", `work for ${id}`]);
+            await new Promise((r) => setTimeout(r, holdMs));
+            fs.writeFileSync(
+              path.join(ws, "SYMPHONY_RESULT.json"),
+              JSON.stringify({ state: "done", comment: `${id} done`, tests: "npm test: ok" }),
+            );
+            return { status: "completed" } as const;
+          } finally {
+            live.set(ws, (live.get(ws) ?? 1) - 1);
+          }
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+  return { factory, peakFor: (ws: string) => peak.get(ws) ?? 0 };
+}
+
+test("a stream stays busy while its delivery is recorded and its worktree removed", async () => {
+  const { factory, peakFor } = makeGitConcurrencyFactory("fake-git-stream", 150);
+  registerAgentFactory(factory);
+  const repo = initRepo();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-stream-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  // Two issues on one branch: the follow-up must wait for the parent's delivery to be
+  // read out of the worktree and the worktree removed, not just for its turn to end.
+  fs.writeFileSync(path.join(issuesDir, "R-1.json"),
+    JSON.stringify({ id: "R-1", identifier: "R-1", title: "first pass", description: "x", state: "todo", dispatchable: true }));
+  fs.writeFileSync(path.join(issuesDir, "R-1-a.json"),
+    JSON.stringify({ id: "R-1-a", identifier: "R-1-a", title: "review fixes", description: "x", state: "todo",
+      dispatchable: true, follow_up_for: "R-1", stream_identifier: "R-1" }));
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo", "in progress"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 100
+workspace:
+  root: ./ws
+  repository: "${repo.replace(/\\/g, "/")}"
+agent:
+  kind: fake-git-stream
+  max_turns: 1
+  max_concurrent_agents: 2
+  max_retry_backoff_ms: 2000
+---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const read = (i: string) => JSON.parse(fs.readFileSync(path.join(issuesDir, `${i}.json`), "utf8"));
+    const both = await waitFor(() => read("R-1").state === "review" && read("R-1-a").state === "review", 20000);
+    assert.ok(both, "both issues deliver");
+    assert.equal(peakFor(path.join(dir, "ws", "R-1")), 1, "never two live sessions in the shared worktree");
+
+    // Both landed on the one branch, and the second delivery covers the whole stream.
+    assert.equal(read("R-1").delivery.branch, "issue/R-1");
+    assert.equal(read("R-1-a").delivery.branch, "issue/R-1");
+    assert.deepEqual(read("R-1-a").delivery.files_changed.sort(), ["R-1-a.txt", "R-1.txt"]);
+    assert.equal(read("R-1-a").delivery.needs_attention, false, "the sibling's run must not contaminate the delivery");
+  } finally {
+    orch.stop();
+  }
+});
