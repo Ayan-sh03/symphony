@@ -73,11 +73,17 @@ function deliveryPanel(d) {
  */
 function issueActions(d) {
   const m = (store.state && store.state.meta) || {};
-  if (!m.can_edit || d.tracked === false) return nothing;
+  if (d.tracked === false) return nothing;
+  const followUp = m.can_follow_up
+    ? html`<button class="btn sm" data-nav=${hashFor("followup", d.issue_identifier)}
+        title="Open a follow-up that continues this issue's branch instead of starting a new one">↳ Follow-up</button>`
+    : nothing;
+  if (!m.can_edit) return followUp === nothing ? nothing : html`<div class="dactions">${followUp}</div>`;
   const live = d.status === "running" || d.status === "retrying";
   const armed = store.armDelete === d.issue_id;
   return html`<div class="dactions">
     <button class="btn sm" data-nav=${hashFor("edit", d.issue_identifier)} title="Edit this issue's title, description, priority and labels">✎ Edit</button>
+    ${followUp}
     ${live
       ? html`<button class="btn sm" disabled title="Stop the run before deleting this issue">🗑 Delete</button>`
       : armed
@@ -85,6 +91,26 @@ function issueActions(d) {
             <button class="btn sm" data-del-cancel="1" title="Keep the issue">Cancel</button>`
         : html`<button class="btn sm" data-del-arm=${d.issue_id} title="Remove this issue from the tracker">🗑 Delete</button>`}
     <span class="sr-only" role="status" aria-live="polite">${armed ? "Delete armed: confirm to remove " + d.issue_identifier + ", or cancel to keep it." : ""}</span>
+  </div>`;
+}
+
+// Work stream (SPEC Appendix B.5): who this issue continues, and who continues it.
+// Everything in one stream shares a branch and a workspace, so it reads as one thread
+// of work rather than a set of unrelated issues.
+function streamPanel(d) {
+  const stream = d.stream || d.issue_identifier;
+  const issues = (store.board && store.board.issues) || [];
+  const members = issues.filter((i) => i.stream === stream && i.identifier !== d.issue_identifier);
+  if (!d.follow_up_for && !members.length) return nothing;
+  const link = (identifier) => html`<a class="bkey" href=${hashFor("detail", identifier)}>${identifier}</a>`;
+  return html`<div class="aside-card">
+    <div class="log-head" style="margin-top:0">Work stream <span class="count">${members.length + 1}</span></div>
+    <p class="sub">${d.follow_up_for
+      ? html`Continues ${link(d.follow_up_for)} — same branch, same workspace.`
+      : html`Other issues continue this one on its branch.`}</p>
+    ${members.length ? html`<div class="files">${members.map((i) => html`<div class="file">
+      ${link(i.identifier)} <span class="sub">${i.title}</span>
+      ${i.follow_up_for === d.issue_identifier ? badge("follows this", "") : nothing}</div>`)}</div>` : nothing}
   </div>`;
 }
 
@@ -120,5 +146,5 @@ export function detailPage(d) {
     </div>
     ${issueActions(d)}
     <div class="detail-grid"><div>${logView(d.recent_events || [])}</div>
-    <div><div class="aside-card"><dl class="kv">${rows.map((r) => html`<dt>${r[0]}</dt><dd>${r[1]}</dd>`)}</dl></div>${deliveryPanel(d)}</div></div></div>`;
+    <div><div class="aside-card"><dl class="kv">${rows.map((r) => html`<dt>${r[0]}</dt><dd>${r[1]}</dd>`)}</dl></div>${streamPanel(d)}${deliveryPanel(d)}</div></div></div>`;
 }

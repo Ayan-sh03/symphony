@@ -42,6 +42,10 @@ function boardRow(i, b, m) {
   const key = i.url
     ? html`<a class="bkey" href=${i.url} target="_blank" rel="noopener" @click=${stop}>${i.identifier}</a>`
     : html`<span class="bkey">${i.identifier}</span>`;
+  // A follow-up delivers onto the branch of the issue it continues, so say whose.
+  const lineage = i.follow_up_for
+    ? html`<span class="lineage" title=${"Continues " + i.follow_up_for + " on the same branch"}>↳ ${i.follow_up_for}</span>`
+    : nothing;
   let actions;
   if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>
     <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"} title="Stop the session and park this issue in the backlog">Hold</button>
@@ -58,6 +62,7 @@ function boardRow(i, b, m) {
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;
   else actions = html`<button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>▸ Start</button>`;
   return html`<div class="brow clk" data-open=${i.identifier}>${key}<span class="btitle">${i.title}</span>
+    ${lineage}
     ${i.priority != null ? html`<span class="prio">P${i.priority}</span>` : nothing}
     ${agentControl(i, m)}
     <div class="actions">${actions}</div></div>`;
@@ -72,7 +77,11 @@ function boardSection(m) {
   const total = board.issues.length;
   if (!total) return section("Board", total, emptyRunning(m));
   const groups = board.order.map((st) => {
-    const items = board.issues.filter((i) => i.state.toLowerCase() === st.toLowerCase());
+    // Sorted by stream so an issue and its follow-ups sit together: they are one
+    // thread of work on one branch, and reading them apart is misleading.
+    const items = board.issues
+      .filter((i) => i.state.toLowerCase() === st.toLowerCase())
+      .sort((a, b) => (a.stream || "").localeCompare(b.stream || "") || a.identifier.localeCompare(b.identifier));
     if (!items.length) return nothing;
     const lc = st.toLowerCase();
     const review = (board.review_state || "").toLowerCase();

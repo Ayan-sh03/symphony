@@ -524,6 +524,7 @@ export class Orchestrator {
         follow_up_for: i.follow_up_for,
         // Always concrete, so the console can group a stream without re-deriving it.
         stream: this.streamOf(i),
+        delivery_branch: i.delivery?.branch ?? null,
       };
     });
     return {
@@ -1564,6 +1565,8 @@ export interface BoardIssueView {
   follow_up_for: string | null;
   /** Work stream owning this issue's branch/workspace; its own identifier when it leads one. */
   stream: string;
+  /** Branch of the recorded delivery, or null — lets the console name a stream's branch. */
+  delivery_branch: string | null;
 }
 
 export interface BoardView {

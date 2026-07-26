@@ -6,6 +6,7 @@ export function hashFor(name, id) {
   const base = "#/" + encodeURIComponent(store.pid);
   if (name === "detail") return base + "/issue/" + encodeURIComponent(id);
   if (name === "edit") return base + "/issue/" + encodeURIComponent(id) + "/edit";
+  if (name === "followup") return base + "/issue/" + encodeURIComponent(id) + "/follow-up";
   if (name === "new") return base + "/new";
   if (name === "integrate") return base + "/integrate";
   if (name === "add-project") return base + "/add-project";
@@ -21,7 +22,9 @@ function parseHash() {
   const rest = parts.slice(1);
   if (rest[0] === "issue" && rest[1]) {
     const id = decodeURIComponent(rest[1]);
-    return rest[2] === "edit" ? { name: "edit", id } : { name: "detail", id };
+    if (rest[2] === "edit") return { name: "edit", id };
+    if (rest[2] === "follow-up") return { name: "followup", id };
+    return { name: "detail", id };
   }
   if (rest[0] === "new") return { name: "new" };
   if (rest[0] === "integrate") return { name: "integrate" };
@@ -54,9 +57,9 @@ export function applyRoute() {
     changed = true;
   }
   store.route = next;
-  // The edit form is fed by the same detail payload; it is loaded on route entry
-  // only (never re-polled), so nothing repaints over what the operator is typing.
-  if (store.route.name === "detail" || store.route.name === "edit") {
+  // The edit and follow-up forms are fed by the same detail payload; it is loaded on
+  // route entry only (never re-polled), so nothing repaints over what the operator is typing.
+  if (store.route.name === "detail" || store.route.name === "edit" || store.route.name === "followup") {
     if (changed) { store.detailData = null; store.detailErr = null; loadDetail(store.route.id); }
   } else { store.detailData = null; store.detailErr = null; }
   if (changed) store.armDelete = null; // leaving the page disarms the confirm
