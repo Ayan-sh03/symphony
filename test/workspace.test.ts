@@ -181,9 +181,10 @@ test("the recorded base survives the repo's HEAD moving on after the branch was 
   assert.deepEqual(info.files_changed, ["feature.ts"], "diff is against the cut point, so unrelated work stays out");
 });
 
-test("a detached-HEAD repo still branches and records no base ref", async () => {
+test("a detached-HEAD repo still branches and reports the exact base commit", async () => {
   const repo = initRepo();
   git(repo, ["checkout", "-q", "--detach"]);
+  const cutFrom = git(repo, ["rev-parse", "HEAD"]).trim();
   const root = path.join(repo, ".symphony", "workspaces");
   const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
   const ws = await wm.createForIssue("DET-1");
@@ -191,7 +192,9 @@ test("a detached-HEAD repo still branches and records no base ref", async () => 
   git(ws.path, ["add", "feature.ts"]);
   git(ws.path, ["commit", "-qm", "add feature"]);
   const info = (await wm.deliveryInfo("DET-1"))!;
-  assert.equal(info.base_branch, null, "no branch name to record, and never an empty string");
+  // There is no branch name to report, so the base is the commit itself — exact, and
+  // never an empty string. It must not fall back to some unrelated ref.
+  assert.equal(info.base_branch, cutFrom);
   assert.deepEqual(info.files_changed, ["feature.ts"], "the recorded start commit still anchors the diff");
 });
 
@@ -299,6 +302,89 @@ test("a scratch file committed by an earlier run neither counts as delivery nor 
   await wm.cleanupForIssue("SCRATCH-2");
   assert.ok(!fs.existsSync(ws.path), "worktree removed even though a scratch file is tracked");
   assert.equal(git(repo, ["show", "issue/SCRATCH-2:work.txt"]), "real work\n");
+});
+
+// ---- recovering a base that was never recorded ----
+
+/** Repo with `release` cut from master, and an issue branch cut from `release`. */
+function repoWithLegacyBranch(): { repo: string; forkPoint: string } {
+  const repo = initRepo();
+  git(repo, ["branch", "-M", "master"]);
+  git(repo, ["checkout", "-qb", "release"]);
+  fs.writeFileSync(path.join(repo, "release-only.txt"), "belongs to release\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "release work"]);
+  const forkPoint = git(repo, ["rev-parse", "HEAD"]).trim();
+  // Created outside Symphony (by hand, or by a build from before bases were recorded),
+  // so nothing is in the repository config for it.
+  git(repo, ["branch", "issue/LEG-1"]);
+  return { repo, forkPoint };
+}
+
+test("a branch with no recorded base recovers it from the reflog, once", async () => {
+  const { repo, forkPoint } = repoWithLegacyBranch();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]), "nothing recorded yet");
+
+  const ws = await wm.createForIssue("LEG-1");
+  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
+    "the branch's creation commit becomes its base");
+
+  // Recovered once and then left alone: the branch moving on must not move its base.
+  fs.writeFileSync(path.join(ws.path, "later.txt"), "more work\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "later work"]);
+  await wm.deliveryInfo("LEG-1");
+  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
+    "the recovered base is stable");
+});
+
+test("a recovered base keeps another branch's commits out of the delivery", async () => {
+  const { repo } = repoWithLegacyBranch();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+
+  const ws = await wm.createForIssue("LEG-1");
+  fs.writeFileSync(path.join(ws.path, "the-issue-work.txt"), "the only thing this issue did\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "issue work"]);
+  // The operator wanders back to an unrelated branch before the run delivers. Without a
+  // recorded base this is what made the delivery diff against master and blame the issue
+  // for `release-only.txt`.
+  git(repo, ["checkout", "-q", "master"]);
+
+  const info = (await wm.deliveryInfo("LEG-1"))!;
+  assert.deepEqual(info.files_changed, ["the-issue-work.txt"], "only the issue's own work is delivered");
+  assert.ok(!info.files_changed.includes("release-only.txt"), "release's commits are not credited to the issue");
+});
+
+test("a force-moved branch is not given a bogus recovered base", async () => {
+  const { repo } = repoWithLegacyBranch();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  // Reset the branch onto master: its creation commit is no longer an ancestor, so it says
+  // nothing about what the branch holds now.
+  git(repo, ["branch", "-f", "issue/LEG-1", "master"]);
+
+  await wm.createForIssue("LEG-1");
+  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]),
+    "no base is invented for a branch that was moved off its creation point");
+});
+
+test("a base recorded at creation is never overwritten by recovery", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const cutFrom = git(repo, ["branch", "--show-current"]).trim();
+  const ws = await wm.createForIssue("REC-1");
+  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/REC-1.base"]).trim(), cutFrom);
+
+  await wm.cleanupForIssue("REC-1");
+  await wm.createForIssue("REC-1"); // adopting the existing branch on a later run
+  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/REC-1.base"]).trim(), cutFrom,
+    "the ref name recorded at creation still stands");
+  assert.equal((await wm.deliveryInfo("REC-1"))!.base_branch, cutFrom);
 });
 
 // ---- work streams / follow-ups (SPEC Appendix B.5) ----

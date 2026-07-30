@@ -2331,6 +2331,17 @@ Extension config (under `workspace`, plus one `tracker` key):
   it does not exist yet.
 - The base the branch was cut from MUST be recorded at creation time, not recomputed at
   delivery: the repository's HEAD may move while the run is in flight.
+- An implementation MUST NOT treat "no recorded base" as "diff against whatever is checked
+  out now". A branch it did not create has no recorded base — cut by hand, or by an older
+  build — and resolving one at delivery can pick an unrelated ref, whose commits are then
+  reported as the issue's own work. Where the version control system still knows where the
+  branch began (git records it in the branch's reflog), the implementation SHOULD recover
+  that, verify the branch still descends from it, and record it like any other base so the
+  recovery happens once. A base that cannot be established is reported as unknown rather
+  than guessed.
+- The recorded base MAY be a commit rather than a ref name: a ref name is not always
+  recoverable (a detached HEAD has none, and the branch a legacy issue branch was cut from
+  may be long gone), and the commit is exact where the name never was.
 - The runner's scratch files (§10.1) MUST be kept out of the branch — they are workspace
   transport, not deliverable content.
 - Workspace reuse (§9.2) applies to the worktree. An implementation SHOULD tolerate a

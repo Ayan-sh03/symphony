@@ -20,7 +20,12 @@ export interface IssueDelivery {
   branch: string;
   /** Head commit of the issue branch at delivery time. */
   commit_sha: string | null;
-  /** Base the branch was cut from (configured base_branch, else the repo branch at creation). */
+  /**
+   * Base the branch was cut from: the configured base_branch, else the repo branch at
+   * creation. A commit SHA when no ref name is knowable — a detached HEAD has none, and a
+   * branch Symphony did not create has its base recovered from the reflog. Null when it
+   * could not be established at all; never a guess.
+   */
   base_branch: string | null;
   /** Files changed on the branch relative to the base (merge-base diff). */
   files_changed: string[];
