@@ -290,3 +290,52 @@ test("board views are isolated per project", async () => {
     assert.deepEqual(bIds, ["B-1"]);
   });
 });
+
+test("POST /issues/<id>/follow-up joins the parent's work stream", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/issues/A-1/follow-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-1-a", title: "address review comments", state: "backlog" }),
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as any;
+    assert.equal(body.issue.follow_up_for, "A-1");
+    assert.equal(body.issue.stream_identifier, "A-1", "it delivers onto the parent's branch");
+
+    const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+    const row = board.issues.find((i: { identifier: string }) => i.identifier === "A-1-a");
+    assert.equal(row.follow_up_for, "A-1");
+    assert.equal(row.stream, "A-1");
+    // The parent leads its own stream, so the board can group the two together.
+    assert.equal(board.issues.find((i: { identifier: string }) => i.identifier === "A-1").stream, "A-1");
+
+    // The detail view puts both issues in one workspace — the point of the feature.
+    const parent = (await (await fetch(`${base}/api/v1/projects/a/A-1`)).json()) as any;
+    const child = (await (await fetch(`${base}/api/v1/projects/a/A-1-a`)).json()) as any;
+    assert.equal(child.workspace.path, parent.workspace.path);
+    assert.equal(child.follow_up_for, "A-1");
+  });
+});
+
+test("POST /issues/<id>/follow-up 404s on an unknown parent and 501s without the capability", async () => {
+  await withServer(async (base, mgr) => {
+    const missing = await fetch(`${base}/api/v1/projects/a/issues/NOPE-1/follow-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-9", title: "orphan", state: "backlog" }),
+    });
+    assert.equal(missing.status, 404, "an unknown parent is not a malformed request");
+    assert.equal(((await missing.json()) as any).error.code, "not_found");
+
+    // Simulate an adapter without the optional follow-up capability.
+    (mgr.get("a")!.orchestrator as unknown as { canFollowUp(): boolean }).canFollowUp = () => false;
+    const unsupported = await fetch(`${base}/api/v1/projects/a/issues/A-1/follow-up`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-8", title: "nope", state: "backlog" }),
+    });
+    assert.equal(unsupported.status, 501);
+    assert.equal(((await unsupported.json()) as any).error.code, "not_supported");
+  });
+});

@@ -8,7 +8,7 @@ import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
-import { WorkspaceManager } from "../workspace/manager.ts";
+import { WorkspaceManager, isSafeStreamIdentifier } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
 import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
@@ -38,6 +38,8 @@ interface LogEvent {
 
 interface RunningEntry {
   identifier: string;
+  /** Work stream (SPEC Appendix B.5): the identifier owning this run's workspace/branch. */
+  stream: string;
   issue: Issue;
   session: LiveSession;
   retry_attempt: number | null;
@@ -59,6 +61,7 @@ interface RunningEntry {
 /** Retained activity log for a finished/terminated run, so logs survive the run. */
 interface FinishedLog {
   identifier: string;
+  stream: string;
   url: string | null;
   events: LogEvent[];
   ended_at: string;
@@ -80,6 +83,7 @@ const TERMINAL_GRACE_MS = 120000;
 interface RetryEntry {
   issue_id: string;
   identifier: string;
+  stream: string;
   attempt: number;
   due_at_ms: number;
   timer: NodeJS.Timeout;
@@ -93,6 +97,7 @@ interface RetryEntry {
  */
 export interface HaltedEntry {
   identifier: string;
+  stream: string;
   reason: string;
   attempts: number;
   halted_at: string;
@@ -151,6 +156,8 @@ export class Orchestrator {
   private retry_attempts = new Map<string, RetryEntry>();
   private halted = new Map<string, HaltedEntry>();
   private completed = new Set<string>();
+  /** Streams whose delivery/cleanup is still in flight — busy, though nothing is running. */
+  private finalizing = new Set<string>();
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
@@ -213,6 +220,61 @@ export class Orchestrator {
     return true;
   }
 
+  // ---- work streams (SPEC Appendix B.5) ----
+
+  /**
+   * The work stream an issue belongs to: the identifier whose workspace and branch it
+   * uses. An ordinary issue is its own stream; a follow-up carries the stream it joined,
+   * frozen at creation, so several issues deliver onto one branch instead of forking it.
+   */
+  private streamOf(issue: Issue): string {
+    const s = issue.stream_identifier?.trim();
+    // A stream that would not have been accepted at creation (hand-edited record) is
+    // ignored rather than fed to git: the issue falls back to being its own stream.
+    if (s && isSafeStreamIdentifier(s)) return s;
+    return issue.identifier;
+  }
+
+  /**
+   * Streams that already have an owner. One workspace and one branch per stream means at
+   * most one member of a stream may be in flight — they are a queue, not parallel work.
+   *
+   * Ownership deliberately outlives the running set, because so does the workspace:
+   * - `running` — a live turn is in the worktree.
+   * - `finalizing` — the run ended, but its delivery is still being read out of the
+   *   worktree, and the worktree may still be being removed.
+   * - `retry_attempts` — a finished turn's outcome is not resolved yet. This is the gap
+   *   that matters most: a normal exit schedules a continuation retry, and the issue's
+   *   delivery is only recorded when that timer fires. A sibling let in beforehand runs
+   *   in a worktree that is about to be measured and cleaned for someone else.
+   * - `halted` — a stopped run can leave half-finished work in the worktree; mixing a
+   *   sibling into it would put both on the branch. The hold ends when the operator
+   *   changes the halted issue's state, which is the same thing that frees its claim.
+   */
+  private busyStreams(): Set<string> {
+    const out = new Set<string>(this.finalizing);
+    for (const [, e] of this.running) out.add(e.stream);
+    for (const [, r] of this.retry_attempts) out.add(r.stream);
+    for (const [, h] of this.halted) out.add(h.stream);
+    return out;
+  }
+
+  /**
+   * Run the post-run delivery/cleanup for a stream with that stream held busy, so nothing
+   * is dispatched into the worktree while it is being measured and removed.
+   */
+  private async windDownStream(identifier: string, issueId: string, stream: string): Promise<void> {
+    this.finalizing.add(stream);
+    try {
+      await this.finalizeDelivery(identifier, issueId, stream);
+      await this.cleanupStream(stream, issueId);
+    } finally {
+      this.finalizing.delete(stream);
+      // The stream is free now; let a queued sibling go without waiting for the next tick.
+      this.scheduleTick(0);
+    }
+  }
+
   // ---- config validation (SPEC §6.3) ----
 
   validateDispatchConfig(): ValidationResult {
@@ -266,11 +328,65 @@ export class Orchestrator {
       throw new Error("the active tracker does not support creating issues");
     }
     if (input.agent && !isSupportedAgentKind(input.agent)) throw new Error(`unknown agent.kind: ${input.agent}`);
-    const issue = await this.adapter.createIssue(input);
-    this.logger.info("issue created", { issue_id: issue.id, issue_identifier: issue.identifier });
+    const resolved = await this.resolveFollowUp(input);
+    const issue = await this.adapter.createIssue(resolved);
+    this.logger.info("issue created", {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      follow_up_for: issue.follow_up_for ?? "",
+      stream: this.streamOf(issue),
+    });
     this.scheduleTick(0);
     this.notify();
     return issue;
+  }
+
+  /** Whether follow-up issues can be created on this project (adapter capability + create). */
+  canFollowUp(): boolean {
+    return this.canCreateIssues() && typeof this.adapter.supportsFollowUp === "function" && this.adapter.supportsFollowUp();
+  }
+
+  /**
+   * Resolve a create request's follow-up link into a frozen work stream (SPEC Appendix
+   * B.5). The parent must exist now, and the stream stored is the parent's *own* stream,
+   * so a chain of follow-ups all name the branch the first issue opened. Requests without
+   * `follow_up_for` pass through untouched — including the stream field, which callers
+   * never set directly: it is derived here or not at all.
+   */
+  private async resolveFollowUp(
+    input: import("../tracker/types.ts").NewIssueInput,
+  ): Promise<import("../tracker/types.ts").NewIssueInput> {
+    const parentRef = input.follow_up_for?.trim();
+    if (!parentRef) return { ...input, follow_up_for: null, stream_identifier: null };
+    if (!this.canFollowUp()) {
+      throw new OrchestratorError("not_supported", "the active tracker does not support follow-up issues");
+    }
+    if (parentRef === input.identifier.trim()) {
+      throw new OrchestratorError("conflict", "an issue cannot follow up on itself");
+    }
+    const parent = await this.findByRef(parentRef);
+    if (!parent) throw new OrchestratorError("not_found", `unknown issue ${parentRef}`);
+    const stream = this.streamOf(parent);
+    if (!isSafeStreamIdentifier(stream)) {
+      throw new OrchestratorError("conflict", `issue ${parent.identifier} cannot back a branch: unsafe identifier`);
+    }
+    return { ...input, follow_up_for: parent.identifier, stream_identifier: stream };
+  }
+
+  /** Find an issue by dispatch id or by identifier — the console sends either. */
+  private async findByRef(ref: string): Promise<Issue | null> {
+    try {
+      const byId = (await this.adapter.fetchIssuesByIds([ref]))[0];
+      if (byId) return byId;
+    } catch {
+      /* fall through to the identifier lookup */
+    }
+    if (!this.adapter.listAllIssues) return null;
+    try {
+      return (await this.adapter.listAllIssues()).find((i) => i.identifier === ref) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** Whether the active adapter supports editing/removing issues (console Edit/Delete). */
@@ -304,7 +420,8 @@ export class Orchestrator {
    * entry is cleared so the hold and its claim are released. The in-memory run
    * history survives on purpose: the detail log stays readable after the issue is gone.
    * The workspace goes with the record, under the usual cleanup rules — a dirty or
-   * unverifiable worktree is preserved, and the issue branch is never deleted.
+   * unverifiable worktree is preserved, the issue branch is never deleted, and a
+   * workspace shared with the issue's follow-ups stays put.
    */
   async deleteIssue(id: string): Promise<{ issue_id: string; issue_identifier: string }> {
     if (!this.canEditIssues() || !this.adapter.deleteIssue) {
@@ -312,11 +429,13 @@ export class Orchestrator {
     }
     this.assertDeletable(id);
     let identifier = this.halted.get(id)?.identifier ?? id;
+    let stream = this.halted.get(id)?.stream ?? identifier;
     let known = false;
     try {
       const issue = (await this.adapter.fetchIssuesByIds([id]))[0];
       if (issue) {
         identifier = issue.identifier;
+        stream = this.streamOf(issue);
         known = true;
       }
     } catch (err) {
@@ -329,7 +448,9 @@ export class Orchestrator {
     await this.adapter.deleteIssue(id);
     this.releaseHalt(id); // a deleted issue holds nothing
     this.claimed.delete(id);
-    await this.workspaceManager.cleanupForIssue(identifier);
+    // Deleting one member of a work stream must not take the shared workspace with
+    // it — its siblings still deliver onto that branch (SPEC Appendix B.5).
+    await this.cleanupStream(stream, id);
     this.logger.info("issue deleted", { issue_id: id, issue_identifier: identifier });
     this.scheduleTick(0);
     this.notify();
@@ -431,6 +552,10 @@ export class Orchestrator {
         agent: this.resolveAgentKind(i), // effective backend
         agent_override: i.agent,          // explicit per-task choice, or null
         needs_attention: i.delivery?.needs_attention === true,
+        follow_up_for: i.follow_up_for,
+        // Always concrete, so the console can group a stream without re-deriving it.
+        stream: this.streamOf(i),
+        delivery_branch: i.delivery?.branch ?? null,
       };
     });
     return {
@@ -499,9 +624,14 @@ export class Orchestrator {
         }
       }
 
+      // Recomputed as we go: dispatching one member of a stream must block its
+      // siblings for the rest of this tick, not just the ones already running.
+      const busy = this.busyStreams();
       for (const issue of this.sortForDispatch(issues)) {
         if (this.availableSlots() <= 0) break;
-        if (this.shouldDispatch(issue)) this.dispatch(issue, null);
+        if (!this.shouldDispatch(issue, busy)) continue;
+        busy.add(this.streamOf(issue));
+        this.dispatch(issue, null);
       }
       this.notify();
     } finally {
@@ -511,7 +641,7 @@ export class Orchestrator {
 
   // ---- candidate selection (SPEC §8.2) ----
 
-  private shouldDispatch(issue: Issue): boolean {
+  private shouldDispatch(issue: Issue, busy: Set<string>): boolean {
     if (!issue.id || !issue.identifier || !issue.title || !issue.state) return false;
     if (!this.isActiveState(issue.state) || this.isTerminalState(issue.state)) return false;
     if (!issue.dispatchable) return false;
@@ -520,6 +650,10 @@ export class Orchestrator {
     if (this.claimed.has(issue.id)) return false;
     if (this.availableSlots() <= 0) return false;
     if (!this.perStateSlotAvailable(issue.state)) return false;
+    // One workspace and one branch per stream: a sibling follow-up runs next tick,
+    // not concurrently (SPEC Appendix B.5). No claim is taken — the issue stays a
+    // plain candidate, so whichever member is ready first simply goes first.
+    if (busy.has(this.streamOf(issue))) return false;
     return true;
   }
 
@@ -558,8 +692,10 @@ export class Orchestrator {
 
   private dispatch(issue: Issue, attempt: number | null): void {
     const agentKind = this.resolveAgentKind(issue);
+    const stream = this.streamOf(issue);
     const entry: RunningEntry = {
       identifier: issue.identifier,
+      stream,
       issue,
       session: freshSession(),
       retry_attempt: attempt,
@@ -576,7 +712,7 @@ export class Orchestrator {
     this.claimed.add(issue.id);
     this.cancelRetry(issue.id);
 
-    this.logger.info("dispatch", { issue_id: issue.id, issue_identifier: issue.identifier, agent: agentKind, attempt: attempt ?? "" });
+    this.logger.info("dispatch", { issue_id: issue.id, issue_identifier: issue.identifier, agent: agentKind, stream, attempt: attempt ?? "" });
 
     const childEnv = this.buildChildEnv();
     entry.workerDone = (async () => {
@@ -585,6 +721,8 @@ export class Orchestrator {
         exit = await runAgentAttempt(issue, attempt, {
           config: this.config,
           agentKind,
+          stream,
+          isFollowUp: stream !== issue.identifier,
           promptTemplate: this.promptTemplate,
           adapter: this.adapter,
           workspaceManager: this.workspaceManager,
@@ -682,11 +820,9 @@ export class Orchestrator {
     // a reconciliation terminate releases the claim as before.
     if (term) {
       if (term.cleanupWorkspace) {
-        // Record the deliverable (branch/commit/files) before the worktree goes.
-        void (async () => {
-          await this.finalizeDelivery(entry.identifier, issueId);
-          await this.workspaceManager.cleanupForIssue(entry.identifier);
-        })();
+        // Record the deliverable (branch/commit/files) before the worktree goes. The
+        // entry has already left `running`, so the stream is held busy for the duration.
+        void this.windDownStream(entry.identifier, issueId, entry.stream);
       }
       if (this.halted.has(issueId)) {
         this.logger.info("run stopped by operator; holding issue", { issue_id: issueId, issue_identifier: entry.identifier });
@@ -704,22 +840,22 @@ export class Orchestrator {
     if (exit.kind === "normal") {
       this.completed.add(issueId); // bookkeeping only (SPEC §7.1)
       // Short continuation retry to re-check activity (SPEC §7.1, §8.4).
-      this.scheduleRetry(issueId, 1, entry.identifier, null, /*continuation*/ true);
+      this.scheduleRetry(issueId, 1, entry.identifier, entry.stream, null, /*continuation*/ true);
       this.logger.info("worker completed", { issue_id: issueId, issue_identifier: entry.identifier });
     } else {
       const nextAttempt = (entry.retry_attempt ?? 0) + 1;
-      this.scheduleRetry(issueId, nextAttempt, entry.identifier, exit.reason ?? "worker failed", false);
+      this.scheduleRetry(issueId, nextAttempt, entry.identifier, entry.stream, exit.reason ?? "worker failed", false);
       this.logger.warn("worker failed; retrying", { issue_id: issueId, issue_identifier: entry.identifier, attempt: nextAttempt, reason: exit.reason });
     }
     this.notify();
   }
 
   /** SPEC §8.4 backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
-  private scheduleRetry(issueId: string, attempt: number, identifier: string, error: string | null, continuation: boolean): void {
+  private scheduleRetry(issueId: string, attempt: number, identifier: string, stream: string, error: string | null, continuation: boolean): void {
     // Failure-retry cap (extension): past the limit, halt instead of rescheduling.
     const cap = this.config.max_retry_attempts;
     if (!continuation && cap > 0 && attempt > cap) {
-      this.halt(issueId, identifier, `retry limit reached (${cap}): ${error ?? "worker failed"}`, attempt - 1);
+      this.halt(issueId, identifier, stream, `retry limit reached (${cap}): ${error ?? "worker failed"}`, attempt - 1);
       return;
     }
     this.cancelRetry(issueId);
@@ -732,6 +868,7 @@ export class Orchestrator {
     this.retry_attempts.set(issueId, {
       issue_id: issueId,
       identifier,
+      stream,
       attempt,
       due_at_ms: Date.now() + delay,
       timer,
@@ -749,9 +886,9 @@ export class Orchestrator {
   }
 
   /** Stop retrying an issue but keep its claim so ticks cannot re-dispatch it. */
-  private halt(issueId: string, identifier: string, reason: string, attempts: number): void {
+  private halt(issueId: string, identifier: string, stream: string, reason: string, attempts: number): void {
     this.cancelRetry(issueId);
-    this.halted.set(issueId, { identifier, reason, attempts, halted_at: new Date().toISOString() });
+    this.halted.set(issueId, { identifier, stream, reason, attempts, halted_at: new Date().toISOString() });
     this.claimed.add(issueId);
     this.logger.warn("retries halted; waiting for operator", { issue_id: issueId, issue_identifier: identifier, reason, attempts });
     this.notify();
@@ -767,13 +904,13 @@ export class Orchestrator {
     const run = this.running.get(issueId);
     if (run) {
       // Halt before terminating so onWorkerExit sees the hold and keeps the claim.
-      this.halt(issueId, run.identifier, "stopped by operator", run.retry_attempt ?? 0);
+      this.halt(issueId, run.identifier, run.stream, "stopped by operator", run.retry_attempt ?? 0);
       this.terminateRunning(issueId, false);
       return this.halted.get(issueId) ?? null;
     }
     const r = this.retry_attempts.get(issueId);
     if (!r) return null;
-    this.halt(issueId, r.identifier, "stopped by operator", r.attempt);
+    this.halt(issueId, r.identifier, r.stream, "stopped by operator", r.attempt);
     return this.halted.get(issueId) ?? null;
   }
 
@@ -792,6 +929,39 @@ export class Orchestrator {
   }
 
   /**
+   * Clean a stream's workspace, unless another issue still belongs to that stream
+   * (SPEC Appendix B.5). Follow-ups share one worktree, so one member finishing must
+   * not delete the workspace its siblings are queued to work in. `finishedId` is the
+   * issue that just ended — it is excluded from the check whatever state it is in.
+   *
+   * A tracker that cannot list its issues cannot answer the question. Streams only
+   * exist where issues can be created with a parent, which needs the same board
+   * capability, so in practice that case has no follow-ups; a plain issue is its own
+   * stream and cleans up as before.
+   */
+  private async cleanupStream(stream: string, finishedId: string): Promise<void> {
+    if (this.adapter.listAllIssues) {
+      try {
+        const all = await this.adapter.listAllIssues();
+        const sibling = all.find((i) => i.id !== finishedId && this.streamOf(i) === stream && !this.isTerminalState(i.state));
+        if (sibling) {
+          this.logger.info("workspace kept; another issue still belongs to this work stream", {
+            stream,
+            issue_identifier: sibling.identifier,
+          });
+          return;
+        }
+      } catch (err) {
+        // Unknown membership: keeping a workspace costs disk, deleting one a sibling
+        // still needs costs its work. Same trade-off as the manager's dirty check.
+        this.logger.warn("stream membership unknown; keeping workspace", { stream, error: String(err) });
+        return;
+      }
+    }
+    await this.workspaceManager.cleanupForIssue(stream);
+  }
+
+  /**
    * Record the deliverable for an issue that just reached the success terminal
    * state (the first configured terminal state), then move it to the review
    * state instead of leaving it done: the operator inspects/merges the branch
@@ -800,7 +970,7 @@ export class Orchestrator {
    * worktree is preserved by the workspace manager's own guards. No-op for
    * scratch projects and for other terminal states (e.g. canceled).
    */
-  private async finalizeDelivery(identifier: string, issueId: string): Promise<void> {
+  private async finalizeDelivery(identifier: string, issueId: string, stream: string): Promise<void> {
     if (!this.deliveryEnabled()) return;
     let fresh: Issue | undefined;
     try {
@@ -811,7 +981,9 @@ export class Orchestrator {
     if (!fresh) return;
     const doneState = this.config.tracker.terminal_states[0];
     if (!doneState || this.normState(fresh.state) !== this.normState(doneState)) return;
-    const info = await this.workspaceManager.deliveryInfo(identifier);
+    // Keyed by stream: a follow-up delivers the branch it continued, and the base
+    // recorded when that branch was cut still applies, so the diff stays cumulative.
+    const info = await this.workspaceManager.deliveryInfo(stream);
     if (!info) return; // worktree already gone: nothing to record from
 
     const reasons: string[] = [];
@@ -891,7 +1063,7 @@ export class Orchestrator {
     try {
       refreshed = await this.adapter.fetchIssuesByIds([issueId]);
     } catch {
-      this.scheduleRetry(issueId, retry.attempt + 1, retry.identifier, "retry refresh failed", false);
+      this.scheduleRetry(issueId, retry.attempt + 1, retry.identifier, retry.stream, "retry refresh failed", false);
       return;
     }
 
@@ -901,10 +1073,11 @@ export class Orchestrator {
       this.notify();
       return;
     }
+    const stream = this.streamOf(issue);
     if (this.isTerminalState(issue.state)) {
-      // Record the deliverable (branch/commit/files) before the worktree goes.
-      await this.finalizeDelivery(issue.identifier, issue.id);
-      void this.workspaceManager.cleanupForIssue(issue.identifier);
+      // Record the deliverable (branch/commit/files) before the worktree goes, with the
+      // stream held so a sibling cannot be dispatched into the worktree meanwhile.
+      void this.windDownStream(issue.identifier, issue.id, stream);
       this.claimed.delete(issueId);
       this.notify();
       return;
@@ -915,7 +1088,17 @@ export class Orchestrator {
       return;
     }
     if (this.availableSlots() <= 0 || !this.perStateSlotAvailable(issue.state)) {
-      this.scheduleRetry(issueId, retry.attempt + 1, issue.identifier, "no available orchestrator slots", false);
+      this.scheduleRetry(issueId, retry.attempt + 1, issue.identifier, stream, "no available orchestrator slots", false);
+      this.notify();
+      return;
+    }
+    // This path bypasses shouldDispatch, so it repeats the one-run-per-stream rule
+    // (SPEC Appendix B.5). Waiting on a sibling is not a failure, so it does not
+    // become another backoff attempt: the claim is released and the ordinary poll
+    // loop re-dispatches this issue once the stream is free.
+    if (this.busyStreams().has(stream)) {
+      this.logger.info("retry deferred; work stream is busy", { issue_id: issueId, issue_identifier: issue.identifier, stream });
+      this.claimed.delete(issueId);
       this.notify();
       return;
     }
@@ -1018,6 +1201,7 @@ export class Orchestrator {
   private archiveLog(issueId: string, entry: RunningEntry, outcome: string, lastError: string | null): void {
     this.history.set(issueId, {
       identifier: entry.identifier,
+      stream: entry.stream,
       url: entry.issue.url,
       events: entry.events.slice(-MAX_EVENTS),
       ended_at: new Date().toISOString(),
@@ -1037,8 +1221,11 @@ export class Orchestrator {
   private async startupTerminalCleanup(): Promise<void> {
     try {
       const terminal = await this.adapter.fetchIssuesByStates(this.config.tracker.terminal_states);
-      for (const issue of terminal) {
-        await this.workspaceManager.cleanupForIssue(issue.identifier);
+      // Deduplicated by stream: several terminal follow-ups name one workspace, and
+      // cleanupStream still refuses any stream with a live member (Appendix B.5).
+      const streams = new Set(terminal.map((i) => this.streamOf(i)));
+      for (const stream of streams) {
+        await this.cleanupStream(stream, "");
       }
     } catch (err) {
       this.logger.warn("startup terminal cleanup failed; continuing", { error: String(err) });
@@ -1156,6 +1343,7 @@ export class Orchestrator {
         can_edit: this.canEditIssues(),
         can_board: this.canBoard(),
         can_set_agent: this.canSetAgent(),
+        can_follow_up: this.canFollowUp(),
       },
     };
   }
@@ -1214,7 +1402,9 @@ export class Orchestrator {
       labels: issue.labels,
       agent: this.resolveAgentKind(issue),
       delivery: issue.delivery ?? null,
-      workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+      follow_up_for: issue.follow_up_for,
+      stream: this.streamOf(issue),
+      workspace: { path: this.workspaceManager.workspacePathFor(this.streamOf(issue)) },
       running: null,
       retry: null,
       last_error: null,
@@ -1259,7 +1449,9 @@ export class Orchestrator {
           description: e.issue.description,
           priority: e.issue.priority,
           labels: e.issue.labels,
-          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          follow_up_for: e.issue.follow_up_for,
+          stream: e.stream,
+          workspace: { path: this.workspaceManager.workspacePathFor(e.stream) },
           running: {
             session_id: e.session.session_id,
             turn_count: e.session.turn_count,
@@ -1287,7 +1479,8 @@ export class Orchestrator {
           issue_identifier: identifier,
           issue_id: id,
           status: "retrying",
-          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          stream: r.stream,
+          workspace: { path: this.workspaceManager.workspacePathFor(r.stream) },
           running: null,
           retry: { attempt: r.attempt, due_at: new Date(r.due_at_ms).toISOString(), error: r.error },
           last_error: r.error,
@@ -1301,7 +1494,8 @@ export class Orchestrator {
           issue_identifier: identifier,
           issue_id: id,
           status: "halted",
-          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          stream: h.stream,
+          workspace: { path: this.workspaceManager.workspacePathFor(h.stream) },
           running: null,
           retry: null,
           last_error: h.reason,
@@ -1316,7 +1510,8 @@ export class Orchestrator {
           issue_identifier: identifier,
           issue_id: id,
           status: h.outcome,
-          workspace: { path: this.workspaceManager.workspacePathFor(identifier) },
+          stream: h.stream,
+          workspace: { path: this.workspaceManager.workspacePathFor(h.stream) },
           running: null,
           retry: null,
           last_error: h.last_error,
@@ -1339,6 +1534,9 @@ function applyEditableFields(view: IssueDetailView, issue: Issue): void {
   view.description = issue.description;
   view.priority = issue.priority;
   view.labels = issue.labels;
+  // Not editable, but only the tracker record carries it: the runtime views are
+  // built from entries that predate the lookup.
+  view.follow_up_for = issue.follow_up_for;
 }
 
 export interface SnapshotView {
@@ -1369,6 +1567,8 @@ export interface SnapshotView {
     can_edit: boolean;
     can_board: boolean;
     can_set_agent: boolean;
+    /** Whether this project can open follow-up issues on an existing branch. */
+    can_follow_up: boolean;
   };
 }
 
@@ -1390,6 +1590,12 @@ export interface BoardIssueView {
   agent_override: string | null;
   /** Delivery was recorded but flagged unsafe (uncommitted work / missing branch). */
   needs_attention: boolean;
+  /** Issue this one follows up on, or null (SPEC Appendix B.5). */
+  follow_up_for: string | null;
+  /** Work stream owning this issue's branch/workspace; its own identifier when it leads one. */
+  stream: string;
+  /** Branch of the recorded delivery, or null — lets the console name a stream's branch. */
+  delivery_branch: string | null;
 }
 
 export interface BoardView {
@@ -1431,6 +1637,10 @@ export interface IssueDetailView {
   labels?: string[];
   /** Effective agent backend that would run this issue. */
   agent?: string;
+  /** Issue this one follows up on (SPEC Appendix B.5), when the tracker record is available. */
+  follow_up_for?: string | null;
+  /** Work stream owning the workspace/branch shown here. Absent on views built before it is known. */
+  stream?: string;
   /** Recorded deliverable (repository projects), enriched from the tracker. */
   delivery?: IssueDelivery | null;
   workspace: { path: string };

@@ -25,6 +25,10 @@
  * in place and `deleteIssue` removes the issue's file; the identifier keys the record
  * and is immutable (a rename is a delete + create).
  *
+ * Follow-ups (extension, SPEC Appendix B.5): `follow_up_for` and `stream_identifier`
+ * are carried verbatim on the record and written at creation only — `stream_identifier`
+ * picks the branch and workspace, so `updateIssue` never touches either.
+ *
  * Delivery records (extension): `setIssueDelivery` merges a delivery (branch,
  * commit, files, …) onto the issue's `delivery` field, enriching summary/tests
  * from the stored result envelope; the record survives on the issue for review.
@@ -146,6 +150,8 @@ export class FileTrackerAdapter implements TrackerAdapter {
       blocked_by: normalizeBlockers(raw.blocked_by),
       dispatchable,
       agent: typeof raw.agent === "string" && raw.agent.trim() !== "" ? raw.agent.trim() : null,
+      follow_up_for: str(raw.follow_up_for) || null,
+      stream_identifier: str(raw.stream_identifier) || null,
       delivery: normalizeDelivery(raw.delivery),
       created_at: strOrNull(raw.created_at),
       updated_at: strOrNull(raw.updated_at),
@@ -311,6 +317,11 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return true;
   }
 
+  /** Follow-ups are plain fields on the record, so this adapter carries them as-is. */
+  supportsFollowUp(): boolean {
+    return true;
+  }
+
   /** Create a new issue as a JSON file in the tracker directory. */
   async createIssue(input: NewIssueInput): Promise<Issue> {
     const identifier = str(input.identifier);
@@ -342,6 +353,9 @@ export class FileTrackerAdapter implements TrackerAdapter {
       created_at: new Date().toISOString(),
     };
     if (typeof input.agent === "string" && input.agent.trim() !== "") record.agent = input.agent.trim();
+    // Written only when set, so ordinary issues keep the record shape they had.
+    if (str(input.follow_up_for)) record.follow_up_for = str(input.follow_up_for);
+    if (str(input.stream_identifier)) record.stream_identifier = str(input.stream_identifier);
     try {
       fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", "utf8");
     } catch (err) {

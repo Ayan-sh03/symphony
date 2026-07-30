@@ -140,6 +140,99 @@ function submitEdit(e) {
       btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
 }
 
+/**
+ * Open a follow-up on an existing issue: the same fields as a new issue, but the work
+ * lands on the branch this issue already delivered to instead of a fresh one — which is
+ * what makes it usable for review feedback. The parent rides in the URL, not the form.
+ */
+export function followUpPage(d) {
+  const m = (store.state && store.state.meta) || {};
+  const stream = d.stream || d.issue_identifier;
+  const branch = deliveryBranch(d, stream);
+  // Active by default: a follow-up is normally written to be worked on now.
+  let states = (m.active_states || ["todo"]).concat(m.backlog_states || []);
+  if (!states.length) states = ["todo"];
+  return html`${pageHead("Follow-up on " + d.issue_identifier, d.title || "")}
+    <div class="page"><form class="form page-form" id="followupform" autocomplete="off"
+      data-parent-id=${d.issue_id} data-parent=${d.issue_identifier} @submit=${submitFollowUp}>
+    <div class="aside-card" style="margin-bottom:14px">
+      <div class="log-head" style="margin-top:0">Continues ${d.issue_identifier}</div>
+      <p class="sub">This issue joins the same work stream: it reuses the workspace and commits to
+      ${branch ? html`<span class="mono">${branch}</span>` : html`the same branch`}, on top of the work already there —
+      no second branch, nothing to reconcile later. It runs after any sibling still working that branch.</p>
+    </div>
+    <div class="field"><label for="u-id">Identifier <span class="req">*</span></label>
+      <input class="input" id="u-id" name="identifier" .defaultValue=${suggestIdentifier(stream)} required></div>
+    <div class="field"><label for="u-title">Title <span class="req">*</span></label>
+      <input class="input" id="u-title" name="title" placeholder="Address review comments" required></div>
+    <div class="field"><label for="u-desc">Description</label>
+      <textarea class="textarea" id="u-desc" name="description" placeholder="Paste the review feedback. Be specific about what to change — the agent picks up the branch as it stands and reads its history, but it cannot see the review thread."></textarea>
+      <span class="hint">This becomes the agent prompt via {{ issue.description }}.</span></div>
+    ${agentHidden(m)}
+    <div class="row2"><div class="field"><label for="u-state">State</label>
+      <select class="select" id="u-state" name="state">${states.map((s) => html`<option value=${s}>${s}</option>`)}</select>
+      <span class="hint">An active state runs it now; backlog waits.</span></div>
+    <div class="field"><label for="u-prio">Priority</label>
+      <select class="select" id="u-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+    ${agentField(m)}</div>
+    <div class="field"><label for="u-labels">Labels</label>
+      <input class="input" id="u-labels" name="labels" placeholder="review"><span class="hint">Comma-separated.</span></div>
+    <div class="field-err" id="u-err" hidden></div>
+    <div class="form-actions"><button type="button" class="btn" data-nav=${hashFor("detail", d.issue_identifier)}>Cancel</button>
+      <button type="submit" class="btn primary">Create follow-up</button></div>
+  </form></div>`;
+}
+
+/** The branch the stream delivers on, from whichever member already recorded a delivery. */
+function deliveryBranch(d, stream) {
+  if (d.delivery && d.delivery.branch) return d.delivery.branch;
+  const issues = (store.board && store.board.issues) || [];
+  const sibling = issues.find((i) => i.stream === stream && i.delivery_branch);
+  return sibling ? sibling.delivery_branch : null;
+}
+
+/** Next free `<stream>-N`, counting the stream members the board already knows about. */
+function suggestIdentifier(stream) {
+  const issues = (store.board && store.board.issues) || [];
+  const taken = new Set(issues.map((i) => i.identifier));
+  for (let n = 2; n < 100; n++) {
+    const candidate = `${stream}-${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return "";
+}
+
+function submitFollowUp(e) {
+  e.preventDefault();
+  const f = e.target, err = document.getElementById("u-err");
+  err.hidden = true;
+  const parentId = f.getAttribute("data-parent-id"), parent = f.getAttribute("data-parent");
+  const payload = {
+    identifier: f.identifier.value.trim(),
+    title: f.title.value.trim(),
+    description: f.description.value.trim() || null,
+    state: f.state.value || null,
+    priority: f.priority.value ? Number(f.priority.value) : null,
+    agent: f.agent && f.agent.value ? f.agent.value : null,
+    labels: f.labels.value.split(",").map((s) => s.trim()).filter(Boolean),
+  };
+  if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }
+  const btn = f.querySelector("button[type=submit]");
+  btn.classList.add("busy"); btn.dataset.label = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Creating';
+  fetch(apiBase() + "/issues/" + encodeURIComponent(parentId) + "/follow-up", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+  })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then((res) => {
+      if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "create failed");
+      toast("Created " + payload.identifier + " · continues " + parent, "ok");
+      navigate(hashFor("detail", payload.identifier));
+      return Promise.all([fetchState(), fetchBoard()]);
+    })
+    .catch((ex) => { err.textContent = String(ex.message || ex); err.hidden = false;
+      btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
+}
+
 export function addProjectPage() {
   return html`${pageHead("Add project", "")}<div class="page"><form class="form page-form" id="addprojform" autocomplete="off" @submit=${submitAddProject}>
     <div class="field"><label for="f-wf">Workflow path <span class="req">*</span></label>

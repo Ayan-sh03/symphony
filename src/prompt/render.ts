@@ -25,12 +25,14 @@ const engine = new Liquid({
 
 /**
  * Render the per-issue prompt. `attempt` is null on the first run, a 1-based
- * integer on retries/continuations (SPEC §12.3).
+ * integer on retries/continuations (SPEC §12.3). `branch` is the branch the run
+ * delivers on (SPEC Appendix B), null on scratch projects — it is not always
+ * `issue/<identifier>`, since a follow-up delivers on the branch it continues.
  */
-export function renderPrompt(template: string, issue: Issue, attempt: number | null): string {
+export function renderPrompt(template: string, issue: Issue, attempt: number | null, branch: string | null = null): string {
   // Convert issue keys to string-keyed plain object; preserve nested arrays/maps
   // so templates can iterate labels/blockers (SPEC §12.2).
-  const scope = { issue: issueToScope(issue), attempt: attempt };
+  const scope = { issue: issueToScope(issue), attempt: attempt, branch };
   let parsed;
   try {
     parsed = engine.parse(template);
@@ -59,6 +61,8 @@ function issueToScope(issue: Issue): Record<string, unknown> {
     labels: issue.labels,
     blocked_by: issue.blocked_by,
     dispatchable: issue.dispatchable,
+    follow_up_for: issue.follow_up_for,
+    stream_identifier: issue.stream_identifier,
     created_at: issue.created_at,
     updated_at: issue.updated_at,
   };

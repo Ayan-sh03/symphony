@@ -257,6 +257,13 @@ Key rules (see [`README.md`](README.md) → adapter profile, and SPEC §11):
   The orchestrator refuses to delete an issue that is running or has a pending retry, and
   cleans the deleted issue's workspace under the usual rules — an uncommitted or
   unverifiable worktree is preserved, and the issue branch is never deleted.
+- Optional `supportsFollowUp` lights up the detail page's **Follow-up** action (and
+  `POST /issues/<id>/follow-up`, SPEC Appendix B.5). There is no method to implement: you
+  only have to carry two extra fields through `createIssue` and normalization —
+  `follow_up_for` (lineage) and `stream_identifier` (the identifier whose branch and
+  workspace the issue shares) — and never let `updateIssue` rewrite them, since the stream
+  picks the branch. The orchestrator resolves and freezes the stream before it calls you,
+  so an adapter never walks the chain itself.
 - Optional `setIssueDelivery` persists the delivery record for repository-backed projects
   (SPEC Appendix B): branch, commit, base, changed files, and whether the handoff needs a
   human. It is a **merge**, not a write — fields absent from the patch keep their stored

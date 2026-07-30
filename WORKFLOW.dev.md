@@ -68,11 +68,22 @@ milestone spec for a feature of this very project.
 - Read `CLAUDE.md` and the relevant `SPEC.md` sections before changing code, and
   match the surrounding style (files carry a SPEC-citing header comment).
 
-## Your job
+{% if issue.follow_up_for %}
+## This is a follow-up on {{ issue.follow_up_for }}
+
+You are continuing work that already exists on `{{ branch }}`, not starting fresh.
+The description above is the feedback to act on. You are already checked out on that
+branch, so read `git log --oneline` and `git show --stat HEAD` first to see what the
+earlier run built. Add new commits
+on top — never rebase, squash, amend or force-push what is already on the branch,
+and never open a branch of your own. The whole point is that this work and the work
+it answers stay together.
+
+{% endif %}## Your job
 
 1. This workspace is a git worktree of the main repository, already checked out
-   on the branch `issue/{{ issue.identifier }}`. Do not create or switch
-   branches — commit straight to it.
+   on the branch `{{ branch }}`. Do not create or switch branches — commit
+   straight to it.
 2. Implement the issue spec **inside this workspace only**. A copy of the
    full issue is in `SYMPHONY_ISSUE.json`.
 3. Verify your work: run `npm ci` once, then keep `npm test` and
