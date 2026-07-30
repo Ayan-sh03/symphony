@@ -50,7 +50,8 @@ backend by implementing the interface and registering it; no other layer changes
   the migrated SQLite db at `<dataDir>/opencode.db` (read-only) — the old
   `storage/*.json` tree is abandoned. Both keyed by the run's workspace path.
 - **Trackers** — `src/tracker/registry.ts`. Implement the adapter, add its kind.
-  Currently `file` (`fileAdapter.ts`).
+  Kinds: `file` (`fileAdapter.ts`), `github` (`githubAdapter.ts`, REST over stdlib
+  `fetch`; Symphony state is a `sym:<state>` label, PAT read from `provider.token_env`).
 
 **Projects (multi-project host layer, `src/project/`).** A project is one
 `WORKFLOW.md` anchored at a cwd (its issues + workspace resolve relative to that

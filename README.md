@@ -286,6 +286,96 @@ Errors are `AdapterError{category, message}`:
 - `tracker_request`: Request error (e.g., bad parameter)
 - `tracker_response`: Response error (e.g., malformed data)
 
+## GitHub Tracker Adapter Profile
+
+Reference: SPEC §11.2. Issues live in a GitHub repository, read and written over the
+REST API with the stdlib `fetch` — no SDK, no extra dependency.
+
+```yaml
+tracker:
+  kind: github
+  provider:
+    owner: Ayan-sh03
+    repo: symphony
+    token_env: GITHUB_TOKEN
+  backlog_states: ["backlog"]
+  active_states: ["todo", "in progress"]
+  terminal_states: ["done", "canceled"]
+  review_state: review
+```
+
+### Configuration
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `tracker.kind` | `github` | Required |
+| `tracker.provider.owner` | e.g. `Ayan-sh03` | Required; repository owner (user or org) |
+| `tracker.provider.repo` | e.g. `symphony` | Required |
+| `tracker.provider.token_env` | e.g. `GITHUB_TOKEN` | Required; **name** of the env var holding the PAT, never the PAT itself |
+| `tracker.provider.api_base` | `https://api.github.com` (default) | Override for GitHub Enterprise (or a test server) |
+| Secret keys | `token_env` | `secretEnvironmentNames()` returns `[token_env]`, so the PAT is **stripped from the child agent's environment** (SPEC §10.4) — tools run host-side |
+
+The PAT needs `repo` scope (or, fine-grained, read/write on Issues). `gh auth token`
+prints a usable one.
+
+### State Model
+
+GitHub has no state field beyond open/closed, so a Symphony state is **exactly one
+label named `sym:<state>`** — `sym:todo`, `sym:in progress`, `sym:review`, …
+
+| GitHub | Symphony state |
+|--------|----------------|
+| open, `sym:<state>` label | `<state>` |
+| open, no `sym:*` label | `backlog` — conservative, so a stray repo issue is never dispatched by accident |
+| closed, terminal `sym:*` label | that label's state (a cancellation survives) |
+| closed, otherwise | `done` |
+
+`setIssueState` removes every existing `sym:*` label, adds the target one, and closes or
+reopens the issue to match. Terminality on write is decided by an adapter-local set
+(`done`, `canceled`, `cancelled`, `closed`): the adapter receives only
+`tracker.provider`, never the surrounding `terminal_states`, and the SPEC fixes the
+registry signature. The orchestrator still applies your workflow's own state lists to
+everything it reads.
+
+### Field Mapping and Normalization
+
+- `GH-<number>` → `identifier`; `node_id` (falling back to the number) → `id`
+- `title` → `title`, `body` → `description`, `html_url` → `url`, `assignee.login` → `assignee_id`
+- Labels are lowercased and deduplicated; the `sym:*` state label is **not** carried in
+  `labels` — it is state, and Symphony models those separately
+- **Pull requests are ignored**: the issues endpoint returns both, and a PR is not a work item
+- `native_ref`: `{owner, repo, number, node_id, html_url, state_labels}` — `state_labels`
+  holds the literal `sym:*` names so a transition deletes the label that is really there,
+  not the normalized state
+- Listings follow `Link: <…>; rel="next"` to the last page
+- Board and create capabilities are supported; edit, delete, follow-ups and delivery
+  records are not (a GitHub issue has no home for them)
+
+### Agent Tools
+
+Host-side, same names as the file adapter. They mutate the GitHub issue directly.
+
+| Tool | Input | Notes |
+|------|-------|-------|
+| `update_issue_state` | `{state, comment?}` | Comment, then swap the `sym:*` label and open/close |
+| `add_issue_comment` | `{comment}` | Comment only |
+| `set_issue_result` | `{state?, comment?, pr_url?, tests?}` | Summary + tests as one comment, the PR URL as a second, then the state transition |
+
+Unknown tool names return structured failure. A provider fault during a tool call comes
+back as a failed result rather than an exception, so it does not kill the run.
+
+### Error Categories
+
+- `invalid_tracker_config`: missing/blank `owner`, `repo`, or `token_env`
+- `missing_tracker_secret`: the env var named by `token_env` is unset or empty
+- `tracker_request`: network fault, `401`/`403`, or a rate limit (`Retry-After` /
+  exhausted `X-RateLimit-Remaining` → marked retryable, with the delay in the message)
+- `tracker_response`: malformed JSON or an unexpected payload shape
+- `tracker_pagination`: an unusable `Link` header
+
+Tests (`test/githubAdapter.test.ts`) run against a local fake GitHub server on
+`api_base`; no network access and no credentials are needed.
+
 ## Configuration Reference
 
 All fields, defaults, and semantics live in SPEC §6.4.
