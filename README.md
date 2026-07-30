@@ -348,6 +348,11 @@ everything it reads.
   holds the literal `sym:*` names so a transition deletes the label that is really there,
   not the normalized state
 - Listings follow `Link: <…>; rel="next"` to the last page
+- **Read-after-write is by issue number, not by listing.** GitHub serves the issues
+  *list* from an index that trails a write (measured at ~5s for a fresh issue), so a
+  just-created or just-relabelled issue can be missing from it; `GET /issues/{number}`
+  is immediately consistent, and every read-back uses it. The lag is still visible to
+  polling — a new issue takes a few seconds to appear as a dispatch candidate
 - Board and create capabilities are supported; edit, delete, follow-ups and delivery
   records are not (a GitHub issue has no home for them)
 

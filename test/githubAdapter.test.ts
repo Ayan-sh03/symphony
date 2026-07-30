@@ -41,10 +41,16 @@ interface Fake {
 /** A local stand-in for the GitHub REST API. No network, no credentials. */
 async function startFake(
   issues: RawIssue[],
-  opts: { fail?: { status: number; headers?: Record<string, string>; body?: string }; pageSize?: number } = {},
+  opts: {
+    fail?: { status: number; headers?: Record<string, string>; body?: string };
+    pageSize?: number;
+    /** Serve the listing from a snapshot taken at startup, as real GitHub's index lags writes. */
+    staleList?: boolean;
+  } = {},
 ): Promise<Fake> {
   const calls: Call[] = [];
   const store = issues;
+  const snapshot: RawIssue[] = structuredClone(issues);
 
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -81,11 +87,12 @@ async function startFake(
       if (rest[0] !== "issues") return send(404, { message: "not found" });
 
       if (rest.length === 1 && method === "GET") {
-        const size = opts.pageSize ?? Math.max(store.length, 1);
+        const listed = opts.staleList ? snapshot : store;
+        const size = opts.pageSize ?? Math.max(listed.length, 1);
         const page = Number(url.searchParams.get("page") ?? "1");
-        const slice = store.slice((page - 1) * size, page * size);
+        const slice = listed.slice((page - 1) * size, page * size);
         const headers: Record<string, string> = {};
-        if (page * size < store.length) {
+        if (page * size < listed.length) {
           headers.link = `<${base()}/repos/o/r/issues?state=all&per_page=100&page=${page + 1}>; rel="next"`;
         }
         return send(200, slice, headers);
@@ -109,6 +116,7 @@ async function startFake(
       const target = store.find((i) => i.number === number);
       if (!target) return send(404, { message: `no issue ${number}` });
 
+      if (rest.length === 2 && method === "GET") return send(200, target);
       if (rest.length === 2 && method === "PATCH") {
         if (typeof body?.state === "string") target.state = body.state;
         return send(200, target);
@@ -385,6 +393,19 @@ test("setIssueState on a closed issue deletes the label it really has, not its n
   assert.equal(fake.calls.find((c) => c.method === "DELETE")?.path, "/repos/o/r/issues/1/labels/sym:review");
   assert.deepEqual(fake.issues[0]!.labels, [{ name: "sym:todo" }]);
   assert.equal(fake.issues[0]!.state, "open"); // reopened for a non-terminal state
+  await fake.close();
+});
+
+test("read-back after a write goes by number, so a lagging listing cannot stale it", async () => {
+  // Real GitHub serves the issues *list* from an index that trails a write by a
+  // second or so; the by-number endpoint is immediately consistent.
+  const fake = await startFake([openIssue()], { staleList: true });
+  const a = adapterFor(fake);
+
+  const moved = await a.setIssueState("NODE1", "review");
+  assert.equal(moved.state, "review"); // fresh, despite the listing still saying todo
+  assert.ok(fake.calls.some((c) => c.method === "GET" && c.path === "/repos/o/r/issues/1"));
+  assert.equal((await a.listAllIssues())[0]!.state, "todo"); // the listing really is stale
   await fake.close();
 });
 

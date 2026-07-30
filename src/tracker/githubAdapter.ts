@@ -327,8 +327,9 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     const target = str(state);
     if (!target) throw new AdapterError("invalid_tracker_config", "state is required");
     const issue = await this.findById(id);
-    await this.applyState(numberOf(issue), issue, target);
-    return this.refresh(id);
+    const number = numberOf(issue);
+    await this.applyState(number, issue, target);
+    return this.fetchByNumber(number);
   }
 
   /** Replace the state label on an issue and open/close it to match. */
@@ -363,10 +364,18 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     return found;
   }
 
-  private async refresh(id: string): Promise<Issue> {
-    const refreshed = await this.fetchIssuesByIds([id]);
-    if (refreshed.length === 0) throw new AdapterError("tracker_response", `issue ${id} not found after update`);
-    return refreshed[0]!;
+  /**
+   * Read one issue back by number. Every read-after-write goes through here rather
+   * than through the listing: GitHub's issues *list* is served from an index that
+   * trails a write by a second or so, so a freshly created or just-relabelled issue
+   * can be missing from it, while the by-number endpoint is immediately consistent.
+   */
+  private async fetchByNumber(number: number): Promise<Issue> {
+    const res = await this.request("GET", `/repos/${enc(this.owner)}/${enc(this.repo)}/issues/${number}`);
+    if (!res.body || typeof res.body !== "object" || Array.isArray(res.body)) {
+      throw new AdapterError("tracker_response", `issue #${number} returned an unexpected payload`);
+    }
+    return this.normalize(res.body as Record<string, unknown>);
   }
 
   // ---- create capability (extension) ----
@@ -396,8 +405,9 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     const created = this.normalize(res.body as Record<string, unknown>);
     // GitHub opens every new issue; a terminal creation state has to be applied after.
     if (TERMINAL_STATES.has(state)) {
-      await this.applyState(numberOf(created), created, state);
-      return this.refresh(created.id);
+      const number = numberOf(created);
+      await this.applyState(number, created, state);
+      return this.fetchByNumber(number);
     }
     return created;
   }
