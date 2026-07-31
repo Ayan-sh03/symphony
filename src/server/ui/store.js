@@ -20,7 +20,7 @@ export const store = {
   projMenuOpen: false,
   armDelete: null,   // issue id whose Delete button is armed (two-click confirm)
   auto: true,
-  conn: "live",      // live | stale | down
+  conn: "poll",      // sse | poll | stale | down
   lastOk: Date.now(),
 };
 

@@ -25,7 +25,7 @@ function projectSwitcher() {
 }
 
 function statusText() {
-  const label = store.conn === "live" ? "Live" : store.conn === "stale" ? "Reconnecting" : "Disconnected";
+  const label = store.conn === "sse" ? "Live (SSE)" : store.conn === "poll" ? "Live (poll)" : store.conn === "stale" ? "Reconnecting" : "Disconnected";
   return label + " · updated " + ago(store.state ? store.state.generated_at : null);
 }
 

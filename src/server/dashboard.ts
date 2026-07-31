@@ -1,8 +1,8 @@
 /**
  * Symphony operational console (SPEC §13.7.1). Server sends a minimal app shell
  * with the first snapshot embedded for instant paint; the client app (`./ui/`,
- * plain ES modules rendered with lit-html, served at `/ui/*`) then polls
- * `/api/v1/projects/<pid>/state` for live updates and drives the control CTAs.
+ * plain ES modules rendered with lit-html, served at `/ui/*`) then opens an SSE
+ * stream for live updates, degrading to polling when the stream is unavailable.
  * Drawn solely from orchestrator state — never required for correctness.
  */
 import type { SnapshotView } from "../orchestrator/orchestrator.ts";
