@@ -111,6 +111,14 @@ export interface WorkspaceDeliveryInfo {
   files_changed: string[];
   uncommitted: string[];
   branch_exists: boolean;
+  /** The commit this stream last delivered; null when it has never delivered. */
+  parent_delivery_sha: string | null;
+  /**
+   * True when the previous delivery is no longer an ancestor of the branch (its
+   * history was rewritten), false when it still is, null when unknown — including
+   * "there was no previous delivery to compare against".
+   */
+  history_rewritten: boolean | null;
 }
 
 export interface WorkspaceManagerOptions {
@@ -429,7 +437,28 @@ export class WorkspaceManager {
       const out = await this.git(repo, ["diff", "--name-only", `${from}...${branch}`], true);
       if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "" && !SCRATCH_FILES.includes(l));
     }
-    return { branch, commit_sha: commitSha, base_branch: base, files_changed: filesChanged, uncommitted, branch_exists: branchExists };
+    // A follow-up continues its stream's branch and must only ever add to it
+    // (SPEC Appendix B.5). Git can settle that in one call: if what the stream
+    // delivered last time is no longer reachable from the branch, the history
+    // under it was rewritten and the earlier, already-reviewed work is gone.
+    const previous = await this.lastDelivery(stream);
+    const parentSha = previous?.commit ?? null;
+    let rewritten: boolean | null = null;
+    if (parentSha && branchExists) {
+      const still = await this.isAncestor(repo, parentSha, branch);
+      // null stays null: git could not tell, which is not the same as "no".
+      rewritten = still === null ? null : !still;
+    }
+    return {
+      branch,
+      commit_sha: commitSha,
+      base_branch: base,
+      files_changed: filesChanged,
+      uncommitted,
+      branch_exists: branchExists,
+      parent_delivery_sha: parentSha,
+      history_rewritten: rewritten,
+    };
   }
 
   /**
@@ -669,6 +698,38 @@ export class WorkspaceManager {
       const detail = err instanceof Error ? err.message : String(err);
       throw new WorkspaceError(`git ${args.join(" ")} failed: ${detail}`);
     }
+  }
+
+  /**
+   * `git()` for a command whose *exit code* is the answer rather than an error.
+   * `git()` collapses every failure to null, which cannot distinguish "no" (1)
+   * from "I could not tell" (128) — a distinction that decides whether Symphony
+   * accuses a delivery of rewriting history.
+   *
+   * Returns null when the code is not a number: a spawn failure puts a string
+   * like `ENOENT` on `err.code`, and reading that as an exit status would turn a
+   * missing git into a confident verdict.
+   */
+  private async gitCode(cwd: string, args: string[]): Promise<number | null> {
+    try {
+      await execFileAsync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+      return 0;
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      return typeof code === "number" ? code : null;
+    }
+  }
+
+  /**
+   * Whether `a` is still reachable from `b`. True/false are git's verdict; null
+   * means it could not be established (bad object, no repository, git missing)
+   * and callers must treat it as unknown, never as "no".
+   */
+  private async isAncestor(repo: string, a: string, b: string): Promise<boolean | null> {
+    const code = await this.gitCode(repo, ["merge-base", "--is-ancestor", a, b]);
+    if (code === 0) return true;
+    if (code === 1) return false;
+    return null;
   }
 
   /**

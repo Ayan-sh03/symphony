@@ -509,6 +509,58 @@ test("the delivery record reads back out of the tag intact", async () => {
   assert.equal((await wm.lastDelivery("TAG-1"))!.commit, next);
 });
 
+test("a stream that rebases what it already delivered is caught; adding to it is not", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("REW-1");
+  fs.writeFileSync(path.join(ws.path, "reviewed.txt"), "work the operator already read\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "first delivery"]);
+  const first = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  const clean = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(clean.parent_delivery_sha, null, "a first delivery has nothing to compare against");
+  assert.equal(clean.history_rewritten, null);
+  await wm.recordDelivery("REW-1", { commit_sha: first });
+
+  // A follow-up that only adds commits — the sanctioned shape.
+  fs.writeFileSync(path.join(ws.path, "follow-up.txt"), "more work\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "follow-up work"]);
+  const added = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(added.parent_delivery_sha, first);
+  assert.equal(added.history_rewritten, false, "building on the branch is not a rewrite");
+
+  // A follow-up that squashes it away — the shape SPEC B.5 forbids. (Amending the
+  // tip would not qualify: the delivered commit stays an ancestor underneath it.)
+  git(ws.path, ["reset", "-q", "--soft", `${first}~1`]);
+  git(ws.path, ["commit", "-qm", "squashed history"]);
+  const rewritten = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(rewritten.parent_delivery_sha, first);
+  assert.equal(rewritten.history_rewritten, true);
+});
+
+test("an ancestry question git cannot answer is unknown, not an accusation", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  // Well-formed but absent: `merge-base --is-ancestor` exits 128, which must not
+  // be read as the exit-1 "no".
+  // @ts-expect-error -- reaching past the public surface for the error path
+  assert.equal(await wm.isAncestor(repo, "0000000000000000000000000000000000000001", "HEAD"), null);
+  const head = git(repo, ["rev-parse", "HEAD"]).trim();
+  git(repo, ["checkout", "-qb", "sidetrack"]);
+  fs.writeFileSync(path.join(repo, "side.txt"), "elsewhere\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "side"]);
+  const side = git(repo, ["rev-parse", "HEAD"]).trim();
+  // @ts-expect-error -- private
+  assert.equal(await wm.isAncestor(repo, side, head), false);
+  // @ts-expect-error -- private
+  assert.equal(await wm.isAncestor(repo, head, side), true);
+});
+
 test("nothing is anchored for a scratch project or a delivery with no commit", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");

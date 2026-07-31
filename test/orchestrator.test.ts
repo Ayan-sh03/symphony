@@ -10,6 +10,7 @@ import type { AgentFactory, AgentSession, AgentSessionOptions } from "../src/age
 import { buildConfig } from "../src/config/config.ts";
 import { parseWorkflow } from "../src/workflow/loader.ts";
 import { Logger } from "../src/logger.ts";
+import { refKey } from "../src/workspace/manager.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
 
@@ -594,6 +595,18 @@ test("repository project: completion records the delivery and lands in review, n
     assert.equal(d.summary, "feature implemented and committed", "summary enriched from the result comment");
     assert.deepEqual(d.files_changed, ["feature.txt"]);
     assert.match(git(repo, ["rev-parse", "issue/T-1"]), new RegExp(`^${d.commit_sha}`), "recorded SHA is the branch head");
+    assert.equal(d.parent_delivery_sha, null, "first delivery on this stream");
+    assert.equal(d.history_rewritten, false);
+
+    // …and git corroborates it: the delivered commit is anchored by a ref, so the
+    // record is no longer a claim git cannot back up.
+    const tagRef = `refs/symphony/tagmeta/${refKey("T-1")}`;
+    assert.equal(git(repo, ["rev-parse", `${tagRef}^{commit}`]).trim(), d.commit_sha,
+      "the delivery is anchored in git, not only in the tracker");
+    assert.equal(JSON.parse(git(repo, ["cat-file", "tag", tagRef]).split("\n\n")[1]!).branch, "issue/T-1",
+      "the tag message carries the delivery record itself");
+    assert.equal(git(repo, ["log", "-1", "--format=%an", "issue/T-1"]).trim(), "Symphony (fake-git-clean)",
+      "the agent's commit is attributed to Symphony");
 
     // …the disposable worktree is gone, but the branch keeps the work in the repo.
     const cleaned = await waitFor(() => !fs.existsSync(wsPath));

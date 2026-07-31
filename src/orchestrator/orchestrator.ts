@@ -989,6 +989,14 @@ export class Orchestrator {
     const reasons: string[] = [];
     if (info.uncommitted.length > 0) reasons.push(`uncommitted changes left in workspace: ${info.uncommitted.join(", ")}`);
     if (!info.branch_exists) reasons.push(`issue branch ${info.branch} is missing in the repository`);
+    // Only when git actually said so: `history_rewritten` is null when it could not
+    // be established, and an unproven accusation would send an operator hunting
+    // for work that was never lost.
+    if (info.history_rewritten === true) {
+      reasons.push(
+        `branch history was rewritten: the previous delivery ${(info.parent_delivery_sha ?? "").slice(0, 7)} is no longer an ancestor of ${info.branch}`,
+      );
+    }
     // `tests` and `summary` are deliberately absent, not null: the adapter fills
     // them from the agent's own result envelope, and an explicit null would be a
     // value that overwrites what it knows.
@@ -996,6 +1004,8 @@ export class Orchestrator {
       branch: info.branch,
       commit_sha: info.commit_sha,
       base_branch: info.base_branch,
+      parent_delivery_sha: info.parent_delivery_sha,
+      history_rewritten: info.history_rewritten === true,
       files_changed: info.files_changed,
       uncommitted: info.uncommitted,
       needs_attention: reasons.length > 0,
