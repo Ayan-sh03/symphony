@@ -89,6 +89,15 @@ sibling into a worktree that is about to be cleaned for someone else. Cleanup li
 refuses any stream that still has a member. Ordinary issues are their own stream and
 behave exactly as before.
 
+**Cost estimation (extension, SPEC Appendix B.6).** `agent.pricing` in `WORKFLOW.md` gives
+rates per million tokens, flat and/or per agent kind. `src/history/cost.ts` is a pure,
+import-free module that turns token counts into money **at read time — never stored**, so
+re-pricing reprices past runs too. `codex_totals` keeps a private `by_agent` breakdown
+because a project can mix backends (per-issue `agent` override) and each kind is priced at
+its own rate; an aggregate computed as `total × one rate` is silently wrong. `archiveLog`
+copies a finished run's final counts + kind onto the retained log so a completed issue's
+detail still shows what it cost.
+
 The console is a small client-side app in `src/server/ui/` — plain browser ES
 modules rendered with **lit-html** (no bundler, no build step): the server serves
 the files from disk at `/ui/*` (`httpServer.ts`, which also maps

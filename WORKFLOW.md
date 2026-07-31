@@ -26,6 +26,17 @@ agent:
   # Give up after this many failed attempts (0 = retry forever). A halted issue
   # stays on the board with Stop/Hold/Retry controls until you change its state.
   max_retry_attempts: 3
+  # Token pricing, per million tokens. Uncomment to put an estimated cost on the
+  # board; leave it off and only raw token counts are shown. Rates given here apply
+  # to every backend; a per-kind block overrides them for that backend. Cost is
+  # computed on read, so editing these reprices everything, including past runs.
+  # pricing:
+  #   input_per_mtok: 1.25
+  #   output_per_mtok: 10
+  #   currency: USD
+  #   opencode:
+  #     input_per_mtok: 3
+  #     output_per_mtok: 15
 
 codex:
   command: codex app-server

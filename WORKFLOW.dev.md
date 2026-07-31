@@ -31,6 +31,16 @@ agent:
   # Keep the cap low: a self-build run that fails 3 times needs a better issue
   # spec, not more attempts. The halted issue waits on the board for review.
   max_retry_attempts: 3
+  # Token pricing per million tokens, so the board carries a running cost. Rates
+  # here cover every backend; a per-kind block overrides them. Costs are computed
+  # on read, never stored — editing these reprices past runs too.
+  pricing:
+    input_per_mtok: 1.25
+    output_per_mtok: 10
+    currency: USD
+    opencode:
+      input_per_mtok: 3
+      output_per_mtok: 15
 
 codex:
   command: codex app-server
