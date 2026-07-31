@@ -283,6 +283,25 @@ test("a worktree git refuses to remove is deleted anyway, and the issue can run 
   assert.equal(git(again.path, ["branch", "--show-current"]).trim(), "issue/STRAND-1", "the issue is not wedged");
 });
 
+test("a removal that failed because the tree stopped being clean preserves it", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  // `before_remove` stands in for the agent subprocess that has not finished
+  // exiting: it writes into the worktree after the cleanliness check has passed,
+  // which is what makes `worktree remove` refuse.
+  const wsPath = path.join(root, "RACE-1");
+  const hooks = { ...defaultHooks(), before_remove: `echo late > "${path.join(wsPath, "late.txt").replace(/\\/g, "/")}"` };
+  const wm = new WorkspaceManager({ root, hooks, logger: silent, repository: repo });
+  const ws = await wm.createForIssue("RACE-1");
+  fs.writeFileSync(path.join(ws.path, "committed.txt"), "safe on the branch\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+
+  await wm.cleanupForIssue("RACE-1");
+  assert.ok(fs.existsSync(ws.path), "the fallback must not delete work git refused to delete");
+  assert.equal(fs.readFileSync(path.join(ws.path, "late.txt"), "utf8").trim(), "late", "the late write survives");
+});
+
 test("a stranded workspace directory names itself in the error that refuses it", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");

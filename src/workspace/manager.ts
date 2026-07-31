@@ -398,6 +398,22 @@ export class WorkspaceManager {
         // it is reproducible from the branch. Ignored files (node_modules, a
         // local .env) go too — exactly as `worktree remove` would have taken
         // them.
+        // Re-check before deleting anything. Removal can fail *because* the tree
+        // stopped being clean: the agent subprocess whose file handle broke the
+        // removal is a process that can still write, and `before_remove` runs in
+        // between. git then refuses precisely because there is unique work here,
+        // which is the one case this fallback must not steamroll. (Ignored files
+        // need no such gate — `worktree remove` deletes those itself.)
+        const stillClean = await this.uncommittedPaths(wsPath);
+        if (stillClean === null || stillClean.length > 0) {
+          this.opts.logger.warn("workspace preserved: git refused to remove it and it is no longer clean", {
+            stream,
+            path: wsPath,
+            error: String(err),
+            changes: stillClean === null ? "(git status failed)" : stillClean.join(", "),
+          });
+          return;
+        }
         this.opts.logger.warn("git worktree removal failed; deleting the directory instead", { stream, path: wsPath, error: String(err) });
         try {
           fs.rmSync(wsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
