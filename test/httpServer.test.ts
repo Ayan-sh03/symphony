@@ -77,6 +77,9 @@ test("project-scoped state hits the right orchestrator; unknown project 404s", a
     assert.equal(ok.status, 200);
     const snap = (await ok.json()) as any;
     assert.ok(snap.meta && Array.isArray(snap.running));
+    // The console reads cost off the wire; unpriced projects must still carry the key.
+    assert.ok("estimated_cost" in snap.codex_totals);
+    assert.equal(snap.codex_totals.estimated_cost, null);
 
     const missing = await fetch(`${base}/api/v1/projects/nope/state`);
     assert.equal(missing.status, 404);
