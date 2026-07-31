@@ -165,7 +165,7 @@ export class Orchestrator {
   private tickTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private refreshQueued = false;
-  private observers: Array<() => void> = [];
+  private observers = new Set<() => void>();
 
   constructor(deps: OrchestratorDeps) {
     this.config = deps.config;
@@ -183,8 +183,10 @@ export class Orchestrator {
     });
   }
 
-  onChange(cb: () => void): void {
-    this.observers.push(cb);
+  /** Subscribe to state changes; callers must dispose subscriptions they no longer need. */
+  onChange(cb: () => void): () => void {
+    this.observers.add(cb);
+    return () => this.observers.delete(cb);
   }
   private notify(): void {
     for (const cb of this.observers) {
