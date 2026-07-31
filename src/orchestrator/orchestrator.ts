@@ -1003,6 +1003,15 @@ export class Orchestrator {
       delivered_at: new Date().toISOString(),
       pushed_at: null,
     };
+    // Anchor the delivery in git before the tracker hears about it, and before
+    // cleanup can remove the worktree: a record the tracker holds but git cannot
+    // corroborate is the failure this exists to prevent. Best effort — the
+    // manager logs what it could not anchor and never throws.
+    try {
+      await this.workspaceManager.recordDelivery(stream, delivery as Record<string, unknown>);
+    } catch (err) {
+      this.logger.warn("could not anchor delivery in git", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+    }
     try {
       if (this.adapter.setIssueDelivery) {
         await this.adapter.setIssueDelivery(issueId, delivery);

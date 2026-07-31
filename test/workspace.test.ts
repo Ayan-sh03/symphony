@@ -456,6 +456,70 @@ test("a base recorded as a ref survives the branch being merged away and pruned"
   assert.equal(baseRef(repo, "GCB-1"), cutFrom, "the ref is a reachability root; local config never was");
 });
 
+test("a delivered commit survives cleanup, branch deletion and gc, and is recoverable", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("GC-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "the whole point\n");
+  git(ws.path, ["add", "delivered.txt"]);
+  git(ws.path, ["commit", "-qm", "deliver issue work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  const info = (await wm.deliveryInfo("GC-1"))!;
+  assert.equal(await wm.recordDelivery("GC-1", { branch: info.branch, commit_sha: sha, files_changed: info.files_changed }), true);
+
+  // Everything routine that used to destroy the commit, in the order it happens.
+  await wm.cleanupForIssue("GC-1");
+  git(repo, ["branch", "-D", "issue/GC-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+
+  git(repo, ["cat-file", "-e", `${sha}^{commit}`]); // throws if it was collected
+  git(repo, ["branch", "--force", "issue/GC-1", `refs/symphony/tagmeta/${refKey("GC-1")}^{}`]);
+  assert.equal(git(repo, ["show", "issue/GC-1:delivered.txt"]), "the whole point\n", "the work is recovered by the documented one-liner");
+});
+
+test("the delivery record reads back out of the tag intact", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  assert.equal(await wm.lastDelivery("TAG-1"), null, "nothing delivered yet");
+
+  const ws = await wm.createForIssue("TAG-1");
+  fs.writeFileSync(path.join(ws.path, "a file with spaces.txt"), "x\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  // Multi-line and tabbed text is the interesting case: the read format is
+  // tab-delimited and takes the tag's subject, i.e. everything up to a blank line.
+  const record = { commit_sha: sha, summary: "line one\nline two\ttabbed", files_changed: ["a file with spaces.txt"] };
+  await wm.recordDelivery("TAG-1", record);
+
+  const read = (await wm.lastDelivery("TAG-1"))!;
+  assert.equal(read.commit, sha, "the ref derefs to the delivered commit, not the tag object");
+  assert.deepEqual(read.record, record);
+
+  // A second delivery on the same stream (a follow-up) must replace, not fail.
+  fs.writeFileSync(path.join(ws.path, "more.txt"), "y\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "follow-up work"]);
+  const next = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  assert.equal(await wm.recordDelivery("TAG-1", { commit_sha: next }), true, "re-delivery is an update, not a create");
+  assert.equal((await wm.lastDelivery("TAG-1"))!.commit, next);
+});
+
+test("nothing is anchored for a scratch project or a delivery with no commit", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  assert.equal(await plain.recordDelivery("NA-1", { commit_sha: "abc" }), false);
+  assert.equal(await plain.lastDelivery("NA-1"), null);
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  await wm.createForIssue("NA-2");
+  assert.equal(await wm.recordDelivery("NA-2", { commit_sha: null }), false, "no commit to anchor");
+});
+
 test("ref names do not collide between streams that differ only in case", () => {
   assert.notEqual(refKey("SYM-10"), refKey("sym-10"));
   assert.equal(refKey("sym-10"), "sym-10", "an already-safe lower-case stream is left alone");

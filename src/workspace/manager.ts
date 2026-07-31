@@ -345,7 +345,14 @@ export class WorkspaceManager {
       }
       if (!(await this.branchExists(branch))) {
         // Without the branch ref, removing the worktree would drop committed work too.
-        this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", { stream, path: wsPath, branch });
+        // The recovery is one command, and this warning is where an operator is
+        // standing when they need it.
+        this.opts.logger.warn("workspace preserved because its issue branch is missing in the repository", {
+          stream,
+          path: wsPath,
+          branch,
+          recover: `git branch --force ${branch} refs/symphony/tagmeta/${refKey(stream)}^{}`,
+        });
         return;
       }
       try {
@@ -423,6 +430,73 @@ export class WorkspaceManager {
       if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "" && !SCRATCH_FILES.includes(l));
     }
     return { branch, commit_sha: commitSha, base_branch: base, files_changed: filesChanged, uncommitted, branch_exists: branchExists };
+  }
+
+  /**
+   * Anchor a delivery in git itself (extension, SPEC Appendix B).
+   *
+   * Until this, `IssueDelivery.commit_sha` was a JSON claim *about* git that git
+   * did not corroborate: once the worktree is cleaned its reflog goes with it, and
+   * an operator who then merges and deletes the issue branch leaves the delivered
+   * commit unreferenced. The next `git gc --prune=now` collects it and the work is
+   * unrecoverable — the record names a commit that no longer exists.
+   *
+   * So the record becomes a git object: an annotated tag carrying the delivery JSON
+   * as its message, pointed at by `refs/symphony/tagmeta/<stream>`. That ref is a
+   * reachability root, so the commit survives everything above, and the whole
+   * record reads back out of `for-each-ref` in one process. Recovering the branch
+   * is then one command:
+   *
+   *     git branch --force <branch> refs/symphony/tagmeta/<stream>^{}
+   *
+   * The base is re-affirmed in the same transaction, so the delivery and the commit
+   * its diff is meaningful against can never disagree.
+   *
+   * Best effort: losing the anchor must not fail a delivery that is otherwise fine,
+   * but it is warned with the sha, which is the last thing standing between the
+   * operator and the lost commit.
+   */
+  async recordDelivery(stream: string, delivery: Record<string, unknown>): Promise<boolean> {
+    const repo = this.opts.repository;
+    const sha = typeof delivery.commit_sha === "string" ? delivery.commit_sha : null;
+    if (!repo || !sha) return false;
+    const branch = this.branchNameFor(stream);
+    if (!(await this.branchExists(branch))) return false; // nothing to anchor
+    const key = refKey(stream);
+    const message = JSON.stringify(delivery); // one line: JSON escapes every \n and \t
+    const tagger = `Symphony <symphony@localhost> ${Math.floor(Date.now() / 1000)} +0000`;
+    const payload = `object ${sha}\ntype commit\ntag ${key}\ntagger ${tagger}\n\n${message}\n`;
+    const tag = (await this.gitIn(repo, ["mktag"], payload, true))?.trim();
+    if (!tag) {
+      this.opts.logger.warn("could not anchor the delivered commit as a tag", { stream, branch, commit_sha: sha });
+      return false;
+    }
+    const updates = [{ ref: `refs/symphony/tagmeta/${key}`, oid: tag }];
+    const base = (await this.baseFor(repo, stream, branch)).sha;
+    if (base) updates.push({ ref: `refs/symphony/base/${key}`, oid: base });
+    const ok = await this.writeRefs(repo, updates);
+    if (!ok) this.opts.logger.warn("could not anchor the delivered commit as a ref", { stream, branch, commit_sha: sha });
+    return ok;
+  }
+
+  /** The stream's last anchored delivery, or null when it has never delivered. */
+  async lastDelivery(stream: string): Promise<{ commit: string; record: Record<string, unknown> } | null> {
+    const repo = this.opts.repository;
+    if (!repo) return null;
+    const out = await this.git(repo, ["for-each-ref", "--format=%(*objectname)%09%(contents:subject)", `refs/symphony/tagmeta/${refKey(stream)}`], true);
+    const line = out?.split(/\r?\n/).find((l) => l.trim() !== "");
+    if (!line) return null;
+    const tab = line.indexOf("\t");
+    if (tab < 0) return null;
+    const commit = line.slice(0, tab).trim();
+    if (!commit) return null;
+    try {
+      const record = JSON.parse(line.slice(tab + 1));
+      return { commit, record: record && typeof record === "object" ? record : {} };
+    } catch {
+      // A hand-edited or truncated tag message must not throw into delivery.
+      return { commit, record: {} };
+    }
   }
 
   /** Push the issue branch to the `origin` remote (extension; delivery_mode push/pr). */
