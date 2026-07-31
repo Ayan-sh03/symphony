@@ -658,6 +658,10 @@ export class WorkspaceManager {
       if (!ok) this.opts.logger.warn("could not record the branch base as a ref", { stream, branch, base_sha: base.sha });
     }
     if (base.ref) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.base`, base.ref], true);
+    // Kept alongside the ref, not replaced by it: if the ref transaction failed
+    // (locked ref, read-only .git), this degrades to exactly the old behaviour
+    // instead of recording the base nowhere at all. `storedBase` prefers the ref.
+    if (base.sha) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.baseSha`, base.sha], true);
   }
 
   /**
