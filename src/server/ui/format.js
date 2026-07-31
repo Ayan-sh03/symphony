@@ -3,6 +3,30 @@ import { html, nothing } from "./vendor/lit-html/lit-html.js";
 
 export function nfmt(n) { return (n == null ? 0 : n).toLocaleString(); }
 
+/**
+ * Render an estimated_cost block. Null (pricing not configured) reads as a dash.
+ * Sub-dollar amounts keep 4 decimals — an agent turn costs fractions of a cent, and
+ * plain currency formatting would show every fresh board as 0.00. A `partial` total
+ * excludes some backend's tokens, so it is marked as the lower bound it is.
+ */
+export function money(cost) {
+  if (!cost) return "—";
+  const amount = Number(cost.amount) || 0;
+  const suffix = cost.partial ? "+" : "";
+  try {
+    // currency is free-text config: Intl throws RangeError on a non-ISO code, and an
+    // uncaught throw here takes down the whole render, not just this cell.
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: cost.currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: Math.abs(amount) < 1 ? 4 : 2,
+    }).format(amount) + suffix;
+  } catch {
+    return amount.toFixed(4) + " " + cost.currency + suffix;
+  }
+}
+
 export function ago(iso) {
   if (!iso) return "—";
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);

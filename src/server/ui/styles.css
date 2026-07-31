@@ -109,7 +109,7 @@ header.bar {
 .meta code { font-family: var(--mono); color: var(--muted); }
 
 /* Metric strip */
-.metrics { display: grid; grid-template-columns: repeat(4, 1fr);
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   overflow: hidden; margin-bottom: 28px; }
 .metric { padding: 16px 18px; border-left: 1px solid var(--border); }
@@ -120,7 +120,8 @@ header.bar {
 .metric.hot .v { color: var(--accent); }
 .metric .u { font-size: 14px; color: var(--faint); font-weight: 500; margin-left: 2px; }
 @media (max-width: 720px) { .metrics { grid-template-columns: repeat(2, 1fr); }
-  .metric:nth-child(3) { border-left: 0; } }
+  /* Two per row: every odd tile leads a row, whatever the tile count. */
+  .metric:nth-child(odd) { border-left: 0; } }
 
 /* Sections */
 section { margin-bottom: 32px; }

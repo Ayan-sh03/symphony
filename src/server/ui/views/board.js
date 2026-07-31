@@ -4,7 +4,7 @@ import { repeat } from "../vendor/lit-html/directives/repeat.js";
 import { live } from "../vendor/lit-html/directives/live.js";
 import { store } from "../store.js";
 import { hashFor } from "../router.js";
-import { ago, dur, until, humanSecs, nfmt, badge, stateBadge, eventKind } from "../format.js";
+import { ago, dur, until, humanSecs, nfmt, money, badge, stateBadge, eventKind } from "../format.js";
 
 // For links/selects inside clickable rows only: swallow the click so the row's
 // data-open navigation does not fire. Never put this on action buttons — all
@@ -13,9 +13,16 @@ import { ago, dur, until, humanSecs, nfmt, badge, stateBadge, eventKind } from "
 // already checks action attributes before data-open, so buttons need no guard).
 const stop = (e) => e.stopPropagation();
 
-function metric(k, v, u, hot) {
-  return html`<div class="metric ${hot ? "hot" : ""}"><div class="k">${k}</div>
+function metric(k, v, u, hot, title) {
+  return html`<div class="metric ${hot ? "hot" : ""}" title=${title || nothing}><div class="k">${k}</div>
     <div class="v">${v}${u ? html`<span class="u">${u}</span>` : nothing}</div></div>`;
+}
+
+/** Explain what the cost tile is showing — especially when it is showing nothing. */
+function costHint(cost) {
+  if (!cost) return "Set agent.pricing in WORKFLOW.md to price runs";
+  if (cost.partial) return "Excludes " + (cost.unpriced || []).join(", ") + " — no pricing configured for it";
+  return cost.amount + " " + cost.currency;
 }
 
 function section(title, count, body) {
@@ -102,7 +109,7 @@ function boardSection(m) {
 
 function runningTable(rows) {
   return html`<div class="panel tscroll"><table><thead><tr>
-    <th>Issue</th><th>State</th><th>Last event</th><th class="num">Turns</th><th class="num">Tokens</th><th>Elapsed</th><th>Updated</th><th></th>
+    <th>Issue</th><th>State</th><th>Last event</th><th class="num">Turns</th><th class="num">Tokens</th><th class="num">Cost</th><th>Elapsed</th><th>Updated</th><th></th>
     </tr></thead><tbody>${repeat(rows, (r) => r.issue_identifier, (r) => {
       const tok = r.tokens || {};
       return html`<tr class="clk" data-open=${r.issue_identifier}>
@@ -113,6 +120,7 @@ function runningTable(rows) {
           ${r.last_message ? html`<div class="sub">${String(r.last_message).slice(0, 60)}</div>` : nothing}</td>
         <td class="num">${r.turn_count}</td>
         <td class="num">${nfmt(tok.total_tokens)}</td>
+        <td class="num">${money(tok.estimated_cost)}</td>
         <td class="sub">${dur(r.started_at)}</td>
         <td class="sub">${ago(r.last_event_at)}</td>
         <td><button class="btn sm" data-stop-id=${r.issue_id} title="Stop the running session and hold this issue">■ Stop</button></td></tr>`;
@@ -172,6 +180,7 @@ export function boardBody(m) {
       ${metric("Running", running.length, "", running.length > 0)}
       ${metric("Retrying", retrying.length, "")}
       ${metric("Total tokens", nfmt(t.total_tokens), "")}
+      ${metric("Est. cost", money(t.estimated_cost), "", false, costHint(t.estimated_cost))}
       ${metric("Agent runtime", humanSecs(t.seconds_running), "")}
     </div>
     ${boardSection(m)}
