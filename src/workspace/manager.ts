@@ -165,6 +165,13 @@ export class WorkspaceManager {
     const wsPath = this.workspacePathFor(stream);
     let created_now = false;
 
+    // Forget registrations whose directory is gone before anything reads the
+    // worktree list: without this `worktree add` fails with "already registered"
+    // and the issue can never run again. It runs ahead of the checks below —
+    // not just on the creation path — so a half-removed worktree left by a
+    // failed cleanup self-heals on the next attempt instead of blocking it.
+    if (this.opts.repository) await this.git(this.opts.repository, ["worktree", "prune"], true);
+
     let stat: fs.Stats | null = null;
     try {
       stat = fs.statSync(wsPath);
@@ -184,7 +191,13 @@ export class WorkspaceManager {
       const top = (await this.git(wsPath, ["rev-parse", "--show-toplevel"], true))?.trim();
       if (!top || path.resolve(top) !== path.resolve(wsPath)) {
         if (fs.readdirSync(wsPath).length > 0) {
-          throw new WorkspaceError(`workspace path ${wsPath} exists but is not a git worktree; move or remove it`);
+          // Usually a worktree whose removal died half-way: git had already
+          // deleted the admin files, so nothing here can tell what the contents
+          // were for. Name the path — deleting it is the whole recovery, and
+          // without it the issue is blocked permanently.
+          throw new WorkspaceError(
+            `workspace path ${wsPath} exists but is not a git worktree; move or remove it (delete ${wsPath} to unblock this issue)`,
+          );
         }
         fs.rmSync(wsPath, { recursive: true, force: true });
         stat = null;
@@ -206,10 +219,6 @@ export class WorkspaceManager {
       const branch = this.branchNameFor(stream);
       try {
         fs.mkdirSync(path.dirname(wsPath), { recursive: true });
-        // Forget registrations whose directory was removed out of band: without
-        // this `worktree add` fails with "already registered" and the issue can
-        // never run again.
-        await this.git(repo, ["worktree", "prune"], true);
         const existing = await this.git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true);
         if (existing === null && requireExistingBranch) {
           throw new WorkspaceError(
@@ -318,7 +327,23 @@ export class WorkspaceManager {
         await this.git(this.opts.repository, ["worktree", "remove", wsPath]);
         this.opts.logger.info("git worktree cleaned; issue branch retained", { stream, path: wsPath, branch });
       } catch (err) {
-        this.opts.logger.warn("git worktree cleanup failed", { stream, path: wsPath, error: String(err) });
+        // `worktree remove` deletes the worktree's admin files before its
+        // contents, so a single held file handle (an agent subprocess that has
+        // not fully exited) leaves a directory that is no longer a worktree —
+        // and `createForIssue`'s guard then refuses that path forever. Deleting
+        // it ourselves is safe *here specifically*: the checks above already
+        // proved the worktree is clean and its branch exists, so every byte in
+        // it is reproducible from the branch. Ignored files (node_modules, a
+        // local .env) go too — exactly as `worktree remove` would have taken
+        // them.
+        this.opts.logger.warn("git worktree removal failed; deleting the directory instead", { stream, path: wsPath, error: String(err) });
+        try {
+          fs.rmSync(wsPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+          await this.git(this.opts.repository, ["worktree", "prune"], true);
+          this.opts.logger.info("git worktree cleaned; issue branch retained", { stream, path: wsPath, branch });
+        } catch (rmErr) {
+          this.opts.logger.warn("stranded worktree directory left behind; delete it to unblock this issue", { stream, path: wsPath, branch, error: String(rmErr) });
+        }
       }
       return;
     }

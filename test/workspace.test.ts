@@ -226,6 +226,44 @@ test("a non-worktree directory at the workspace path is refused, not silently us
   assert.equal(git(ws.path, ["branch", "--show-current"]).trim(), "issue/PLAIN-2");
 });
 
+test("a worktree git refuses to remove is deleted anyway, and the issue can run again", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("STRAND-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "kept by the branch\n");
+  git(ws.path, ["add", "delivered.txt"]);
+  git(ws.path, ["commit", "-qm", "deliver issue work"]);
+
+  // Break the worktree's back-reference so `worktree remove` fails (exit 128,
+  // "is not a working tree") while `status` still reports it clean — the shape a
+  // half-completed removal leaves behind when a held file handle interrupts it.
+  fs.rmSync(path.join(repo, ".git", "worktrees", workspaceKey("STRAND-1"), "gitdir"));
+  assert.throws(() => git(repo, ["worktree", "remove", ws.path]), "precondition: git itself cannot remove it");
+
+  await wm.cleanupForIssue("STRAND-1");
+  assert.ok(!fs.existsSync(ws.path), "the directory is removed even though git would not");
+  assert.ok(!git(repo, ["worktree", "list", "--porcelain"]).includes(ws.path), "and its registration is pruned");
+  assert.equal(git(repo, ["show", "issue/STRAND-1:delivered.txt"]), "kept by the branch\n", "committed work is untouched");
+
+  const again = await wm.createForIssue("STRAND-1");
+  assert.equal(git(again.path, ["branch", "--show-current"]).trim(), "issue/STRAND-1", "the issue is not wedged");
+});
+
+test("a stranded workspace directory names itself in the error that refuses it", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const wsPath = wm.workspacePathFor("STRAND-2");
+  fs.mkdirSync(wsPath, { recursive: true });
+  fs.writeFileSync(path.join(wsPath, "leftover.txt"), "from a half-removed worktree\n");
+  await assert.rejects(
+    () => wm.createForIssue("STRAND-2"),
+    (e: unknown) => e instanceof WorkspaceError && e.message.includes(wsPath),
+    "the operator needs the path to delete, not just a refusal",
+  );
+});
+
 test("cleanup preserves a dirty worktree and one whose branch is gone", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");
