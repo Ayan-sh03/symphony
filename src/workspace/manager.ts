@@ -526,7 +526,10 @@ export class WorkspaceManager {
     const sha = typeof delivery.commit_sha === "string" ? delivery.commit_sha : null;
     if (!repo || !sha) return false;
     const branch = this.branchNameFor(stream);
-    if (!(await this.branchExists(branch))) return false; // nothing to anchor
+    // Deliberately *not* "does the branch exist": a commit whose branch is already
+    // gone is unreferenced right now, which is when anchoring matters most. All
+    // that is required is that the object is still there to point at.
+    if ((await this.git(repo, ["cat-file", "-e", `${sha}^{commit}`], true)) === null) return false;
     const key = refKey(stream);
     const message = JSON.stringify(delivery); // one line: JSON escapes every \n and \t
     const tagger = `Symphony <symphony@localhost> ${Math.floor(Date.now() / 1000)} +0000`;
