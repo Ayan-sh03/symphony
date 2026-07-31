@@ -13,6 +13,8 @@ import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from
 import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
+import { aggregateCost, costForKind } from "../history/cost.ts";
+import type { AggregateCost, EstimatedCost, TokenCounts } from "../history/cost.ts";
 
 /**
  * Failure of an operator action, carrying enough classification for the HTTP
@@ -67,6 +69,9 @@ interface FinishedLog {
   ended_at: string;
   last_error: string | null;
   outcome: string;
+  /** Backend that ran it, and its final token counts — the session itself is gone. */
+  agent: string;
+  tokens: TokenTotals;
 }
 
 const MAX_EVENTS = 80;
@@ -103,11 +108,34 @@ export interface HaltedEntry {
   halted_at: string;
 }
 
+/** Token counts as reported to operators (SPEC §13.3). */
+interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+/** Token counts plus their read-time cost estimate (extension, SPEC Appendix B). */
+interface TokensView extends TokenTotals {
+  estimated_cost: EstimatedCost | null;
+}
+
+/** The live session's counters, under the neutral names the reporting layer uses. */
+function sessionTokens(s: LiveSession): TokenTotals {
+  return {
+    input_tokens: s.codex_input_tokens,
+    output_tokens: s.codex_output_tokens,
+    total_tokens: s.codex_total_tokens,
+  };
+}
+
 interface CodexTotals {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
   seconds_running: number;
+  /** Same tokens, split by the agent kind that spent them, so cost can be priced per kind. */
+  by_agent: Record<string, TokenCounts>;
 }
 
 function freshSession(): LiveSession {
@@ -160,7 +188,7 @@ export class Orchestrator {
   private finalizing = new Set<string>();
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
-  private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
+  private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0, by_agent: {} };
 
   private tickTimer: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -806,6 +834,11 @@ export class Orchestrator {
       this.codex_totals.input_tokens += dInp;
       this.codex_totals.output_tokens += dOut;
       this.codex_totals.total_tokens += dTot;
+      // Attribute to the backend that spent them: kinds are priced separately and a
+      // project can mix them (per-issue agent override).
+      const byAgent = (this.codex_totals.by_agent[entry.agent] ??= { input_tokens: 0, output_tokens: 0 });
+      byAgent.input_tokens += dInp;
+      byAgent.output_tokens += dOut;
     }
   }
 
@@ -1240,7 +1273,12 @@ export class Orchestrator {
     this.codex_totals.seconds_running += secs;
   }
 
-  /** Retain a finished run's activity log so operators can review it after the fact. */
+  /**
+   * Retain a finished run's activity log so operators can review it after the fact.
+   * Final token counts and the backend are copied out too: the LiveSession dies with
+   * the worker, and the issue detail still has to report what the run cost. Note the
+   * MAX_HISTORY bound below still evicts, so the oldest runs lose that line again.
+   */
   private archiveLog(issueId: string, entry: RunningEntry, outcome: string, lastError: string | null): void {
     this.history.set(issueId, {
       identifier: entry.identifier,
@@ -1250,6 +1288,8 @@ export class Orchestrator {
       ended_at: new Date().toISOString(),
       last_error: lastError,
       outcome,
+      agent: entry.agent,
+      tokens: sessionTokens(entry.session),
     });
     // Bound the history map to the most recent runs.
     while (this.history.size > MAX_HISTORY) {
@@ -1316,6 +1356,25 @@ export class Orchestrator {
 
   // ---- snapshot (SPEC §13.3, §13.7.2) ----
 
+  /**
+   * Token counts plus their cost under the *current* pricing config (extension).
+   * Cost is derived on every read and never stored — see src/history/cost.ts.
+   */
+  private tokensView(tokens: TokenTotals, kind: string | null): TokensView {
+    return { ...tokens, estimated_cost: costForKind(this.config.agent_pricing, kind, tokens) };
+  }
+
+  /**
+   * The `agent`/`tokens` fields of a finished run's retained log, for the detail
+   * branches that have no live session. Empty when nothing was archived, so it can
+   * be spread into a view without inventing zeroed counts.
+   */
+  private archivedTokens(issueId: string): { agent?: string; tokens?: TokensView } {
+    const h = this.history.get(issueId);
+    if (!h) return {};
+    return { agent: h.agent, tokens: this.tokensView(h.tokens, h.agent) };
+  }
+
   snapshot(): SnapshotView {
     const now = Date.now();
     let activeSeconds = 0;
@@ -1333,11 +1392,7 @@ export class Orchestrator {
         last_message: e.session.last_codex_message ?? "",
         started_at: e.started_at,
         last_event_at: e.session.last_codex_timestamp,
-        tokens: {
-          input_tokens: e.session.codex_input_tokens,
-          output_tokens: e.session.codex_output_tokens,
-          total_tokens: e.session.codex_total_tokens,
-        },
+        tokens: this.tokensView(sessionTokens(e.session), e.agent),
       };
     });
     const retrying = [...this.retry_attempts.values()].map((r) => ({
@@ -1366,6 +1421,7 @@ export class Orchestrator {
         output_tokens: this.codex_totals.output_tokens,
         total_tokens: this.codex_totals.total_tokens,
         seconds_running: round1(this.codex_totals.seconds_running + activeSeconds),
+        estimated_cost: aggregateCost(this.config.agent_pricing, this.codex_totals.by_agent),
       },
       meta: {
         tracker_kind: this.config.tracker.kind,
@@ -1452,6 +1508,7 @@ export class Orchestrator {
       retry: null,
       last_error: null,
       recent_events: this.history.get(issue.id)?.events ?? [],
+      tokens: this.archivedTokens(issue.id).tokens,
     });
   }
 
@@ -1504,12 +1561,9 @@ export class Orchestrator {
             last_event: e.session.last_codex_event,
             last_message: e.session.last_codex_message ?? "",
             last_event_at: e.session.last_codex_timestamp,
-            tokens: {
-              input_tokens: e.session.codex_input_tokens,
-              output_tokens: e.session.codex_output_tokens,
-              total_tokens: e.session.codex_total_tokens,
-            },
+            tokens: this.tokensView(sessionTokens(e.session), e.agent),
           },
+          tokens: this.tokensView(sessionTokens(e.session), e.agent),
           retry: null,
           last_error: null,
           recent_events: e.events.slice(-MAX_EVENTS),
@@ -1528,6 +1582,7 @@ export class Orchestrator {
           retry: { attempt: r.attempt, due_at: new Date(r.due_at_ms).toISOString(), error: r.error },
           last_error: r.error,
           recent_events: this.history.get(id)?.events ?? [],
+          ...this.archivedTokens(id),
         };
       }
     }
@@ -1543,6 +1598,7 @@ export class Orchestrator {
           retry: null,
           last_error: h.reason,
           recent_events: this.history.get(id)?.events ?? [],
+          ...this.archivedTokens(id),
         };
       }
     }
@@ -1560,6 +1616,7 @@ export class Orchestrator {
           last_error: h.last_error,
           recent_events: h.events,
           ended_at: h.ended_at,
+          ...this.archivedTokens(id),
         };
       }
     }
@@ -1588,7 +1645,14 @@ export interface SnapshotView {
   running: unknown[];
   retrying: unknown[];
   halted: unknown[];
-  codex_totals: { input_tokens: number; output_tokens: number; total_tokens: number; seconds_running: number };
+  codex_totals: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    seconds_running: number;
+    /** Cost of those tokens under the current pricing config, or null when unpriced (extension). */
+    estimated_cost: AggregateCost | null;
+  };
   meta: {
     tracker_kind: string;
     tracker_kinds: string[];
@@ -1706,4 +1770,10 @@ export interface IssueDetailView {
   last_error: string | null;
   recent_events: { at: string; event: string; message: string }[];
   ended_at?: string;
+  /**
+   * Token counts and their read-time cost (extension). Top-level rather than under
+   * `running` because it outlives the run: a finished issue still reports what it
+   * spent, from the retained log. Absent when nothing was ever recorded.
+   */
+  tokens?: TokensView;
 }
