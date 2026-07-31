@@ -148,8 +148,16 @@ function isScratchLine(line: string): boolean {
   return SCRATCH_FILES.includes(p);
 }
 
+/**
+ * How long a branch divergence scan is reused. The console polls the board every
+ * couple of seconds and these numbers only move when a branch does, so without a
+ * TTL every project would pay a git process per poll.
+ */
+const AHEAD_BEHIND_TTL_MS = 5000;
+
 export class WorkspaceManager {
   private opts: WorkspaceManagerOptions;
+  private aheadBehindCache: { at: number; value: Map<string, { ahead: number; behind: number }> } | null = null;
   constructor(opts: WorkspaceManagerOptions) {
     this.opts = opts;
   }
@@ -161,6 +169,7 @@ export class WorkspaceManager {
     this.opts.repository = repo.repository;
     this.opts.baseBranch = repo.base_branch;
     this.opts.branchTemplate = repo.branch_template;
+    this.aheadBehindCache = null; // a new base or template invalidates the counts
   }
 
   /** The branch name for a work stream, from the configured template (extension). */
@@ -526,6 +535,49 @@ export class WorkspaceManager {
       // A hand-edited or truncated tag message must not throw into delivery.
       return { commit, record: {} };
     }
+  }
+
+  /**
+   * How far every issue branch has diverged from the base, keyed by branch name
+   * (extension). `ahead` is commits the branch has that the base does not — zero
+   * means the base already contains all of them, i.e. the branch is merged.
+   * `behind` is how stale it is.
+   *
+   * One git process for every branch: `%(ahead-behind:)` computes the pair
+   * server-side, where looping `merge-base --is-ancestor` per branch costs a
+   * process each and roughly 25x the wall time on a repository with dozens of
+   * issue branches.
+   *
+   * The base is resolved to a commit first and on purpose: `for-each-ref` fails
+   * the *entire* command when the argument to `ahead-behind` is not a valid ref,
+   * so an unresolvable base would silently blank the board instead of just this
+   * decoration.
+   */
+  async branchAheadBehind(): Promise<Map<string, { ahead: number; behind: number }>> {
+    const empty = new Map<string, { ahead: number; behind: number }>();
+    const repo = this.opts.repository;
+    if (!repo) return empty;
+    const now = Date.now();
+    if (this.aheadBehindCache && now - this.aheadBehindCache.at < AHEAD_BEHIND_TTL_MS) return this.aheadBehindCache.value;
+
+    const baseSha = (await this.git(repo, ["rev-parse", "--verify", "--quiet", `${this.opts.baseBranch ?? "HEAD"}^{commit}`], true))?.trim();
+    if (!baseSha) return empty;
+    // Scan only what the branch template can produce, so unrelated branches in a
+    // shared repository stay out of it.
+    const prefix = (this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE).split("{identifier}")[0]!.replace(/\/+$/, "");
+    const out = await this.git(repo, ["for-each-ref", `--format=%(refname:short)%09%(ahead-behind:${baseSha})`, `refs/heads/${prefix}`], true);
+    if (out === null) return empty;
+
+    const result = new Map<string, { ahead: number; behind: number }>();
+    for (const line of out.split(/\r?\n/)) {
+      const [branch, counts] = line.split("\t");
+      if (!branch || !counts) continue;
+      const [ahead, behind] = counts.trim().split(/\s+/).map((n) => Number.parseInt(n, 10));
+      if (!Number.isInteger(ahead) || !Number.isInteger(behind)) continue;
+      result.set(branch, { ahead: ahead!, behind: behind! });
+    }
+    this.aheadBehindCache = { at: now, value: result };
+    return result;
   }
 
   /** Push the issue branch to the `origin` remote (extension; delivery_mode push/pr). */

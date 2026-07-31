@@ -175,6 +175,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .brow .prio { font-family: var(--mono); font-size: 11px; color: var(--faint); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; }
 /* Follow-up lineage: quiet, and never squeezes the title out of the row. */
 .brow .lineage { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
+/* Branch divergence from the base: a reading, not a call to action. */
+.brow .diverge { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
 .brow .actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
 .run-ind { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; font-weight: 550; white-space: nowrap; }
 .run-ind .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 2.4s var(--ease) infinite; }

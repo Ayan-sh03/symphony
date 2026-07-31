@@ -523,6 +523,8 @@ export class Orchestrator {
       throw new Error("the active tracker does not support a board view");
     }
     const all = await this.adapter.listAllIssues();
+    // One git process for the whole board, not one per issue.
+    const divergence = await this.workspaceManager.branchAheadBehind();
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
@@ -536,6 +538,15 @@ export class Orchestrator {
       const run = this.running.get(i.id);
       const halt = this.halted.get(i.id) ?? null;
       const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : halt ? "halted" : "idle";
+      // Keyed by the stream's branch rather than the delivery's, so a stream that
+      // has not delivered yet still shows how far it has come.
+      const branch = this.workspaceManager.deliveryBranchFor(this.streamOf(i));
+      const counts = branch ? divergence.get(branch) ?? null : null;
+      // "Merged" is a hint for a human to act on, never an automatic transition,
+      // and it has one verified false positive to keep out: a branch with no
+      // commits of its own is trivially an ancestor of the base and would read as
+      // merged forever. So it must have delivered something first.
+      const delivered = (i.delivery?.files_changed?.length ?? 0) > 0;
       return {
         id: i.id,
         identifier: i.identifier,
@@ -556,6 +567,9 @@ export class Orchestrator {
         // Always concrete, so the console can group a stream without re-deriving it.
         stream: this.streamOf(i),
         delivery_branch: i.delivery?.branch ?? null,
+        ahead: counts?.ahead ?? null,
+        behind: counts?.behind ?? null,
+        merged_hint: delivered && counts !== null && counts.ahead === 0,
       };
     });
     return {
@@ -1615,6 +1629,20 @@ export interface BoardIssueView {
   stream: string;
   /** Branch of the recorded delivery, or null — lets the console name a stream's branch. */
   delivery_branch: string | null;
+  /**
+   * Commits the stream's branch has that the configured base does not, and how far
+   * behind the base it has fallen. Null when the project has no repository, or the
+   * branch does not exist yet (extension).
+   */
+  ahead: number | null;
+  behind: number | null;
+  /**
+   * The base already contains everything this branch delivered — it looks merged.
+   * A prompt for the operator, never an automatic state change: git cannot tell a
+   * merge from a branch that never had commits of its own, so this additionally
+   * requires that the issue actually delivered files.
+   */
+  merged_hint: boolean;
 }
 
 export interface BoardView {

@@ -572,6 +572,50 @@ test("nothing is anchored for a scratch project or a delivery with no commit", a
   assert.equal(await wm.recordDelivery("NA-2", { commit_sha: null }), false, "no commit to anchor");
 });
 
+test("branch divergence is read for every issue branch in one pass", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master" });
+
+  // Merged: its commits are already in the base.
+  const merged = await wm.createForIssue("AB-MERGED");
+  fs.writeFileSync(path.join(merged.path, "merged.txt"), "in the base\n");
+  git(merged.path, ["add", "-A"]);
+  git(merged.path, ["commit", "-qm", "merged work"]);
+  git(repo, ["merge", "-q", "--no-edit", "issue/AB-MERGED"]);
+
+  // Ahead 2, behind 1: two of its own commits, and the base moved once after it.
+  const open = await wm.createForIssue("AB-OPEN");
+  for (const n of ["one", "two"]) {
+    fs.writeFileSync(path.join(open.path, `${n}.txt`), `${n}\n`);
+    git(open.path, ["add", "-A"]);
+    git(open.path, ["commit", "-qm", n]);
+  }
+  fs.writeFileSync(path.join(repo, "moved-on.txt"), "base moved\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "base moves on"]);
+
+  const counts = await wm.branchAheadBehind();
+  // ahead 0 is the merged verdict; behind 1 is the base commit made after it landed.
+  assert.deepEqual(counts.get("issue/AB-MERGED"), { ahead: 0, behind: 1 });
+  assert.deepEqual(counts.get("issue/AB-OPEN"), { ahead: 2, behind: 1 });
+  assert.equal(counts.has("master"), false, "only branches the template can produce are scanned");
+});
+
+test("branch divergence degrades to nothing rather than breaking the board", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  assert.equal((await plain.branchAheadBehind()).size, 0, "no repository configured");
+
+  // A base that does not resolve fails the whole for-each-ref, so it must be
+  // caught before it silently blanks every issue's counts.
+  const bad = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  await bad.createForIssue("AB-1");
+  bad.update(root, defaultHooks(), { repository: repo, base_branch: "no-such-branch", branch_template: "issue/{identifier}" });
+  assert.equal((await bad.branchAheadBehind()).size, 0, "an unresolvable base costs the decoration, not the board");
+});
+
 test("ref names do not collide between streams that differ only in case", () => {
   assert.notEqual(refKey("SYM-10"), refKey("sym-10"));
   assert.equal(refKey("sym-10"), "sym-10", "an already-safe lower-case stream is left alone");

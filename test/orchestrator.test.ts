@@ -617,6 +617,9 @@ test("repository project: completion records the delivery and lands in review, n
     const board = await orch.board();
     assert.equal(board.review_state, "review");
     assert.equal(board.issues[0]!.needs_attention, false);
+    assert.equal(board.issues[0]!.ahead, 1, "the delivered commit is not in the base yet");
+    assert.equal(board.issues[0]!.behind, 0);
+    assert.equal(board.issues[0]!.merged_hint, false, "unmerged work is never hinted as merged");
     const detail = await orch.issueDetailFor("T-1");
     assert.equal(detail?.state, "review");
     assert.equal(detail?.delivery?.branch, "issue/T-1");
