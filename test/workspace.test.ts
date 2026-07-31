@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { WorkspaceManager, workspaceKey, WorkspaceError, isSafeStreamIdentifier } from "../src/workspace/manager.ts";
+import { WorkspaceManager, workspaceKey, refKey, WorkspaceError, isSafeStreamIdentifier } from "../src/workspace/manager.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -106,6 +106,15 @@ test("git worktree cleanup retains the issue branch and its committed work", asy
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+/** The commit a stream's recorded base ref points at, or null when unrecorded. */
+function baseRef(repo: string, stream: string): string | null {
+  try {
+    return git(repo, ["rev-parse", "--verify", `refs/symphony/base/${refKey(stream)}^{commit}`]).trim();
+  } catch {
+    return null;
+  }
 }
 
 test("branch_template names the issue branch", async () => {
@@ -387,19 +396,17 @@ test("a branch with no recorded base recovers it from the reflog, once", async (
   const { repo, forkPoint } = repoWithLegacyBranch();
   const root = path.join(repo, ".symphony", "workspaces");
   const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
-  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]), "nothing recorded yet");
+  assert.equal(baseRef(repo, "LEG-1"), null, "nothing recorded yet");
 
   const ws = await wm.createForIssue("LEG-1");
-  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
-    "the branch's creation commit becomes its base");
+  assert.equal(baseRef(repo, "LEG-1"), forkPoint, "the branch's creation commit becomes its base");
 
   // Recovered once and then left alone: the branch moving on must not move its base.
   fs.writeFileSync(path.join(ws.path, "later.txt"), "more work\n");
   git(ws.path, ["add", "-A"]);
   git(ws.path, ["commit", "-qm", "later work"]);
   await wm.deliveryInfo("LEG-1");
-  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
-    "the recovered base is stable");
+  assert.equal(baseRef(repo, "LEG-1"), forkPoint, "the recovered base is stable");
 });
 
 test("a recovered base keeps another branch's commits out of the delivery", async () => {
@@ -430,8 +437,73 @@ test("a force-moved branch is not given a bogus recovered base", async () => {
   git(repo, ["branch", "-f", "issue/LEG-1", "master"]);
 
   await wm.createForIssue("LEG-1");
-  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]),
-    "no base is invented for a branch that was moved off its creation point");
+  assert.equal(baseRef(repo, "LEG-1"), null, "no base is invented for a branch that was moved off its creation point");
+});
+
+test("a base recorded as a ref survives the branch being merged away and pruned", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const cutFrom = git(repo, ["rev-parse", "HEAD"]).trim();
+  await wm.createForIssue("GCB-1");
+  assert.equal(baseRef(repo, "GCB-1"), cutFrom);
+
+  // The base commit is only reachable from the base ref once the branch is gone.
+  await wm.cleanupForIssue("GCB-1");
+  git(repo, ["branch", "-D", "issue/GCB-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+  assert.equal(baseRef(repo, "GCB-1"), cutFrom, "the ref is a reachability root; local config never was");
+});
+
+test("ref names do not collide between streams that differ only in case", () => {
+  assert.notEqual(refKey("SYM-10"), refKey("sym-10"));
+  assert.equal(refKey("sym-10"), "sym-10", "an already-safe lower-case stream is left alone");
+  assert.match(refKey("SYM-10"), /^SYM-10-[0-9a-f]{16}$/);
+});
+
+test("ref names never take a form git rejects", () => {
+  // Each of these would fail the whole delivery transaction if it reached git verbatim.
+  for (const bad of [".hidden", "trailing.", "work.lock", "a..b"]) {
+    const key = refKey(bad);
+    assert.doesNotMatch(key, /^\.|\.$|\.\.|\.lock$/, `${bad} -> ${key}`);
+  }
+});
+
+test("case-distinct streams write distinct base refs, not one aliased file", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const first = git(repo, ["rev-parse", "HEAD"]).trim();
+  fs.writeFileSync(path.join(repo, "moved.txt"), "base moves on\n");
+  git(repo, ["add", "moved.txt"]);
+  git(repo, ["commit", "-qm", "base moves"]);
+  const second = git(repo, ["rev-parse", "HEAD"]).trim();
+
+  // Driven at the ref layer on purpose: `CASE-1` and `case-1` cannot both hold a
+  // workspace on a case-insensitive filesystem (they resolve to one directory,
+  // and the second is refused as "not a git worktree"). That collision is older
+  // and wider than this milestone — refs are what M11 makes safe.
+  // @ts-expect-error -- reaching past the public surface for the aliasing case
+  await wm.writeRefs(repo, [{ ref: `refs/symphony/base/${refKey("CASE-1")}`, oid: first }]);
+  // @ts-expect-error -- ditto
+  await wm.writeRefs(repo, [{ ref: `refs/symphony/base/${refKey("case-1")}`, oid: second }]);
+
+  assert.equal(baseRef(repo, "CASE-1"), first, "the second stream's write did not overwrite the first");
+  assert.equal(baseRef(repo, "case-1"), second);
+});
+
+test("a ref transaction that cannot be completed writes nothing at all", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const good = git(repo, ["rev-parse", "HEAD"]).trim();
+  const missing = "0000000000000000000000000000000000000001";
+  // @ts-expect-error -- reaching past the public surface to prove the invariant
+  const ok = await wm.writeRefs(repo, [{ ref: "refs/symphony/base/TXN-A", oid: good }, { ref: "refs/symphony/base/TXN-B", oid: missing }]);
+  assert.equal(ok, false, "the transaction reports failure rather than throwing");
+  assert.throws(() => git(repo, ["rev-parse", "--verify", "refs/symphony/base/TXN-A"]),
+    "the ref that was fine is not left behind on its own");
 });
 
 test("a base recorded at creation is never overwritten by recovery", async () => {

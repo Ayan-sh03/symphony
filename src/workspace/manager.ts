@@ -53,6 +53,38 @@ export function workspaceKey(identifier: string): string {
 }
 
 /**
+ * Derive the name of the `refs/symphony/*` ref for a work stream (extension).
+ *
+ * Deliberately *not* `workspaceKey`, which names directories: changing that would
+ * move every existing workspace, and a stream whose branch is already checked out
+ * somewhere cannot simply be re-added at a new path. Refs are a fresh namespace,
+ * so they can be stricter for free.
+ *
+ * Two hazards it has to close, beyond what `workspaceKey` handles:
+ *  - **Case.** NTFS aliases loose refs that differ only in case, so `SYM-10` and
+ *    `sym-10` would share one ref file and the second write would silently win.
+ *    Any identifier that is not already lower-case gets a hash of the original.
+ *  - **Ref grammar.** git rejects a path component that starts or ends with `.`,
+ *    contains `..`, or ends with `.lock` — none of which `workspaceKey` filters,
+ *    and any one of which would fail the whole delivery transaction.
+ *
+ * The result is always a single path component (`workspaceKey` collapses `/`), so
+ * `refs/…/A` and `refs/…/A/B` can never both exist and shadow each other.
+ *
+ * Note this fixes the symphony namespace only: `refs/heads/issue/SYM-10` and its
+ * workspace directory still alias their lower-case twins exactly as before.
+ */
+export function refKey(stream: string): string {
+  const base = workspaceKey(stream);
+  const safe = base.replace(/\.{2,}/g, ".").replace(/^\.+/, "").replace(/\.+$/, "").replace(/\.lock$/i, "");
+  if (safe === base && stream.toLowerCase() === stream) return base;
+  // The hash is of the *original* stream, so distinct streams stay distinct even
+  // when they normalize to the same text.
+  const hash = crypto.createHash("sha256").update(stream, "utf8").digest("hex").slice(0, 16);
+  return safe === "" ? `ref-${hash}` : `${safe}-${hash}`;
+}
+
+/**
  * Whether a string is safe to use as a work stream key (SPEC Appendix B.5). A stream
  * feeds both the branch template and the workspace path, so it is checked before it is
  * ever stored: no leading dash (git would read the branch as an option), no `..`, and
@@ -238,8 +270,8 @@ export class WorkspaceManager {
         await this.git(repo, addArgs);
         // A branch we did not create has no recorded base; recover one now, while the
         // reflog that knows where it came from is still likely to be there.
-        if (existing === null) await this.recordBase(repo, branch, base);
-        else await this.baseFor(repo, branch);
+        if (existing === null) await this.recordBase(repo, stream, branch, base);
+        else await this.baseFor(repo, stream, branch);
         created_now = true;
       } catch (err) {
         if (err instanceof WorkspaceError) throw err; // already a precise diagnosis
@@ -379,7 +411,7 @@ export class WorkspaceManager {
     // branch's reflog when it never was. Resolving it live is the last resort, and a poor
     // one — the repo's HEAD may have moved to an unrelated branch since, which is exactly
     // why the base is stored in the first place.
-    const stored = await this.baseFor(repo, branch);
+    const stored = await this.baseFor(repo, stream, branch);
     const base = stored.ref ?? stored.sha ?? (await this.resolveBase(repo)).ref;
     // Diffing from the recorded start commit is exact; the ref name is a
     // best-effort stand-in when we only have that.
@@ -415,19 +447,36 @@ export class WorkspaceManager {
   }
 
   /**
-   * Remember the branch's base in the repository's local config — outside the
-   * working tree, so it is never committed, and it outlives the disposable
-   * worktree that cleanup removes.
+   * Remember the branch's base (extension). The commit goes into
+   * `refs/symphony/base/<stream>`, which — unlike the local config this used to
+   * live in — is a reachability root: git will not garbage-collect a commit a ref
+   * points at, so the base survives the branch being merged and deleted and the
+   * repository being pruned. The base *ref name* has nowhere to live in a ref, so
+   * it stays in local config as a human-readable decoration; the ref is the
+   * authority for anything that has to be exact.
+   *
+   * Best effort by design: the base is a delivery nicety, and a repository that
+   * refuses the write must not fail the run that was about to start.
    */
-  private async recordBase(repo: string, branch: string, base: { ref: string | null; sha: string | null }): Promise<void> {
+  private async recordBase(repo: string, stream: string, branch: string, base: { ref: string | null; sha: string | null }): Promise<void> {
+    if (base.sha) {
+      const ok = await this.writeRefs(repo, [{ ref: `refs/symphony/base/${refKey(stream)}`, oid: base.sha }]);
+      if (!ok) this.opts.logger.warn("could not record the branch base as a ref", { stream, branch, base_sha: base.sha });
+    }
     if (base.ref) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.base`, base.ref], true);
-    if (base.sha) await this.git(repo, ["config", "--local", "--replace-all", `symphony.${branch}.baseSha`, base.sha], true);
   }
 
-  private async storedBase(repo: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
+  /**
+   * The stored base: the ref first, then the local config that older builds wrote,
+   * so worktrees created before this milestone keep working. Stream-keyed refs and
+   * branch-keyed config can disagree after a `branch_template` change — the ref wins,
+   * because the stream is immutable and the branch name is not.
+   */
+  private async storedBase(repo: string, stream: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
     const ref = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.base`], true))?.trim() || null;
-    const sha = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.baseSha`], true))?.trim() || null;
-    return { ref, sha };
+    const fromRef = (await this.git(repo, ["rev-parse", "--verify", "--quiet", `refs/symphony/base/${refKey(stream)}^{commit}`], true))?.trim();
+    const legacy = (await this.git(repo, ["config", "--local", "--get", `symphony.${branch}.baseSha`], true))?.trim();
+    return { ref, sha: fromRef || legacy || null };
   }
 
   /**
@@ -444,14 +493,14 @@ export class WorkspaceManager {
    * (a force-moved branch's creation entry may no longer be one), and then recorded like
    * any other base so the recovery happens a single time while reflogs are still around.
    */
-  private async baseFor(repo: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
-    const stored = await this.storedBase(repo, branch);
+  private async baseFor(repo: string, stream: string, branch: string): Promise<{ ref: string | null; sha: string | null }> {
+    const stored = await this.storedBase(repo, stream, branch);
     if (stored.ref || stored.sha) return stored;
     const sha = await this.branchCreationCommit(repo, branch);
     if (!sha) return stored;
     // No ref name is recoverable — the branch it was cut from may be long gone — so the
     // commit itself becomes the base. It is exact, which the ref name never was.
-    await this.recordBase(repo, branch, { ref: null, sha });
+    await this.recordBase(repo, stream, branch, { ref: null, sha });
     this.opts.logger.info("recovered a missing branch base from the reflog", { branch, base_sha: sha });
     return { ref: null, sha };
   }
@@ -546,6 +595,43 @@ export class WorkspaceManager {
       const detail = err instanceof Error ? err.message : String(err);
       throw new WorkspaceError(`git ${args.join(" ")} failed: ${detail}`);
     }
+  }
+
+  /**
+   * `git()` for a command that reads stdin. `execFileAsync` gives no hook for
+   * writing to the child, so this drops to raw `execFile` and closes stdin with
+   * the payload. Written as an explicit Buffer: the payloads here are NUL- and
+   * LF-delimited, and anything that CRLF-normalizes them corrupts the grammar.
+   */
+  private gitIn(cwd: string, args: string[], payload: string, allowFailure = false): Promise<string | null> {
+    return new Promise((resolve, reject) => {
+      const child = execFile("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (!err) return resolve(stdout);
+        if (allowFailure) return resolve(null);
+        reject(new WorkspaceError(`git ${args.join(" ")} failed: ${err.message}`));
+      });
+      // git exits before draining stdin when it dislikes the payload; without this
+      // the resulting EPIPE is an unhandled stream error and takes the host down
+      // instead of rejecting the promise.
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(Buffer.from(payload, "utf8"));
+    });
+  }
+
+  /**
+   * Point `refs/symphony/*` refs at commits in one all-or-nothing transaction
+   * (extension). Either every ref moves or none does, so a delivery can never be
+   * recorded half-way — the tag and the base it is meaningful against always agree.
+   *
+   * `update` with an empty old-oid, not `create`: a stream re-delivers every time
+   * a follow-up lands on it (SPEC Appendix B.5), and `create` fails on a ref that
+   * already exists — which, the transaction being atomic, would silently discard
+   * the whole record from the second delivery onwards.
+   */
+  private async writeRefs(repo: string, updates: Array<{ ref: string; oid: string }>): Promise<boolean> {
+    if (updates.length === 0) return true;
+    const payload = ["start\0", ...updates.map((u) => `update ${u.ref}\0${u.oid}\0\0`), "prepare\0", "commit\0"].join("");
+    return (await this.gitIn(repo, ["update-ref", "--stdin", "-z"], payload, true)) !== null;
   }
 
   private async runHook(name: string, script: string, cwd: string) {
