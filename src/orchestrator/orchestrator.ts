@@ -1011,6 +1011,25 @@ export class Orchestrator {
         `branch history was rewritten: the previous delivery ${(info.parent_delivery_sha ?? "").slice(0, 7)} is no longer an ancestor of ${info.branch}`,
       );
     }
+    // Anchor the delivery in git before the tracker hears about it and before
+    // cleanup can remove the worktree: a record the tracker holds but git cannot
+    // corroborate is exactly the failure this prevents. It never throws — but a
+    // failure has to reach the operator, because the thing that failed is the
+    // guarantee that the commit will still be there tomorrow.
+    let anchored = false;
+    try {
+      anchored = await this.workspaceManager.recordDelivery(stream, {
+        branch: info.branch,
+        commit_sha: info.commit_sha,
+        base_branch: info.base_branch,
+        files_changed: info.files_changed,
+      });
+    } catch (err) {
+      this.logger.warn("could not anchor delivery in git", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+    }
+    if (!anchored && info.commit_sha) {
+      reasons.push(`delivered commit ${info.commit_sha.slice(0, 7)} could not be anchored in git; do not delete ${info.branch}`);
+    }
     // `tests` and `summary` are deliberately absent, not null: the adapter fills
     // them from the agent's own result envelope, and an explicit null would be a
     // value that overwrites what it knows.
@@ -1027,15 +1046,6 @@ export class Orchestrator {
       delivered_at: new Date().toISOString(),
       pushed_at: null,
     };
-    // Anchor the delivery in git before the tracker hears about it, and before
-    // cleanup can remove the worktree: a record the tracker holds but git cannot
-    // corroborate is the failure this exists to prevent. Best effort — the
-    // manager logs what it could not anchor and never throws.
-    try {
-      await this.workspaceManager.recordDelivery(stream, delivery as Record<string, unknown>);
-    } catch (err) {
-      this.logger.warn("could not anchor delivery in git", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
-    }
     try {
       if (this.adapter.setIssueDelivery) {
         await this.adapter.setIssueDelivery(issueId, delivery);
