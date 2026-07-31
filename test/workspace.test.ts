@@ -302,6 +302,41 @@ test("a removal that failed because the tree stopped being clean preserves it", 
   assert.equal(fs.readFileSync(path.join(ws.path, "late.txt"), "utf8").trim(), "late", "the late write survives");
 });
 
+test("cleanup anchors a branch that never went through the delivery path", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("ORPHAN-1");
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "done while symphony was stopped\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  // No recordDelivery: this is the startup-cleanup / deleted-issue route.
+  await wm.cleanupForIssue("ORPHAN-1");
+  assert.equal((await wm.lastDelivery("ORPHAN-1"))?.commit, sha, "the branch tip is anchored on the way out");
+
+  git(repo, ["branch", "-D", "issue/ORPHAN-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+  git(repo, ["cat-file", "-e", `${sha}^{commit}`]);
+});
+
+test("cleanup never overwrites a real delivery record with a bare branch tip", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("KEEPREC-1");
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "x\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  await wm.recordDelivery("KEEPREC-1", { commit_sha: sha, summary: "the real record" });
+
+  await wm.cleanupForIssue("KEEPREC-1");
+  assert.equal((await wm.lastDelivery("KEEPREC-1"))!.record.summary, "the real record");
+});
+
 test("a stranded workspace directory names itself in the error that refuses it", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");

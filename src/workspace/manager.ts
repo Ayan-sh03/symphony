@@ -372,6 +372,17 @@ export class WorkspaceManager {
         });
         return;
       }
+      // Last chance to anchor. Cleanup is the funnel every removal route passes
+      // through, and two of them never went near `finalizeDelivery`: an issue
+      // marked done while Symphony was stopped is cleaned at startup, and a
+      // deleted issue takes its stream's worktree with it. Both would leave the
+      // branch as the only root — the pre-M11 condition this milestone exists to
+      // remove. Only when nothing has anchored this stream yet, so a real
+      // delivery record is never clobbered by a bare branch tip.
+      if (!(await this.lastDelivery(stream))) {
+        const head = (await this.git(this.opts.repository, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`], true))?.trim();
+        if (head) await this.recordDelivery(stream, { branch, commit_sha: head, anchored_at_cleanup: true });
+      }
       try {
         // `git worktree remove` refuses worktrees with untracked files. Our own
         // scratch files are excluded from the dirty check above, so drop them here
