@@ -6,6 +6,8 @@
 import os from "node:os";
 import path from "node:path";
 import type { WorkflowDefinition } from "../domain/types.ts";
+import { EMPTY_PRICING } from "../history/cost.ts";
+import type { AgentPricing, PricingTable } from "../history/cost.ts";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -93,6 +95,11 @@ export interface ServiceConfigValues {
   /** Failure-retry cap (extension): give up after this many attempts. 0 = unlimited. */
   max_retry_attempts: number;
   max_concurrent_agents_by_state: Record<string, number>;
+  /**
+   * Token pricing (extension): rates per million tokens, either flat or per agent
+   * kind. Unset leaves every derived cost null — token counts are still reported.
+   */
+  agent_pricing: PricingTable;
   codex: CodexConfig;
   opencode: OpencodeConfig;
   server_port: number | null;
@@ -126,10 +133,66 @@ function coerceInt(value: unknown, field: string): number {
   throw new ConfigError(`${field} must be an integer, got ${JSON.stringify(value)}`);
 }
 
+/** Like coerceInt but without truncation — prices are fractional (SPEC Appendix B). */
+function coerceNumber(value: unknown, field: string): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  throw new ConfigError(`${field} must be a number, got ${JSON.stringify(value)}`);
+}
+
 function coerceStringList(value: unknown): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return [];
   return value.map((x) => String(x));
+}
+
+function parsePricingEntry(raw: Record<string, unknown>, field: string): AgentPricing {
+  // A half-written entry is a typo, not a free half of the run.
+  if (raw.input_per_mtok === undefined || raw.output_per_mtok === undefined) {
+    throw new ConfigError(`${field} must set both input_per_mtok and output_per_mtok`);
+  }
+  const input_per_mtok = coerceNumber(raw.input_per_mtok, `${field}.input_per_mtok`);
+  const output_per_mtok = coerceNumber(raw.output_per_mtok, `${field}.output_per_mtok`);
+  if (input_per_mtok < 0) throw new ConfigError(`${field}.input_per_mtok must be >= 0`);
+  if (output_per_mtok < 0) throw new ConfigError(`${field}.output_per_mtok must be >= 0`);
+  const currency = typeof raw.currency === "string" && raw.currency.trim() !== "" ? raw.currency.trim() : "USD";
+  return { input_per_mtok, output_per_mtok, currency };
+}
+
+/**
+ * Parse `agent.pricing` (extension). Two forms, which may be combined: the rate keys
+ * directly on the map apply to every agent kind, and any object-valued key names a
+ * kind whose own rates override the flat ones. Unknown kinds are not validated here
+ * — config has no view of the agent registry; a typo simply leaves that kind
+ * unpriced, which the console reports rather than hides.
+ */
+function parsePricing(raw: unknown): PricingTable {
+  const map = asObject(raw);
+  const keys = Object.keys(map);
+  if (keys.length === 0) return EMPTY_PRICING;
+
+  const flat = map.input_per_mtok !== undefined || map.output_per_mtok !== undefined;
+  const table: PricingTable = {
+    default: flat ? parsePricingEntry(map, "agent.pricing") : null,
+    by_kind: {},
+  };
+  for (const key of keys) {
+    if (key === "input_per_mtok" || key === "output_per_mtok" || key === "currency") continue;
+    const value = map[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue; // ignore stray scalars
+    const kind = key.trim().toLowerCase();
+    if (kind === "") continue;
+    table.by_kind[kind] = parsePricingEntry(value as Record<string, unknown>, `agent.pricing.${key}`);
+  }
+
+  // Summing across currencies would be meaningless, so refuse the config outright.
+  const currencies = [...new Set([table.default, ...Object.values(table.by_kind)].filter((p) => p !== null).map((p) => p!.currency))];
+  if (currencies.length > 1) {
+    throw new ConfigError(`agent.pricing entries must all use the same currency (found ${currencies.join(", ")})`);
+  }
+  return table;
 }
 
 /**
@@ -214,6 +277,8 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     if (n > 0) max_concurrent_agents_by_state[key] = n;
   }
 
+  const agent_pricing = parsePricing(agent.pricing);
+
   const codexRaw = asObject(cfg.codex);
   const codex: CodexConfig = {
     command: typeof codexRaw.command === "string" && codexRaw.command.trim() !== "" ? codexRaw.command : "codex app-server",
@@ -251,6 +316,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     max_retry_backoff_ms,
     max_retry_attempts,
     max_concurrent_agents_by_state,
+    agent_pricing,
     codex,
     opencode,
     server_port,

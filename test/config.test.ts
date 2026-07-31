@@ -68,6 +68,50 @@ test("server.port parsed when present", () => {
   assert.equal(c.server_port, 8080);
 });
 
+test("agent.pricing unset leaves the table empty", () => {
+  assert.deepEqual(cfg("---\ntracker:\n  kind: file\n---\n").agent_pricing, { default: null, by_kind: {} });
+  assert.deepEqual(cfg("---\ntracker:\n  kind: file\nagent:\n  pricing: {}\n---\n").agent_pricing, { default: null, by_kind: {} });
+});
+
+test("agent.pricing flat form applies to every kind", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: 2.5\n    output_per_mtok: 10\n    currency: EUR\n---\n");
+  assert.deepEqual(c.agent_pricing.default, { input_per_mtok: 2.5, output_per_mtok: 10, currency: "EUR" });
+  assert.deepEqual(c.agent_pricing.by_kind, {});
+});
+
+test("agent.pricing per-kind form parses each kind, keys normalized", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    Codex:\n      input_per_mtok: 1\n      output_per_mtok: 2\n    opencode:\n      input_per_mtok: 3\n      output_per_mtok: 4\n---\n");
+  assert.equal(c.agent_pricing.default, null);
+  assert.deepEqual(Object.keys(c.agent_pricing.by_kind).sort(), ["codex", "opencode"]);
+  assert.equal(c.agent_pricing.by_kind["codex"].output_per_mtok, 2);
+  assert.equal(c.agent_pricing.by_kind["opencode"].input_per_mtok, 3);
+});
+
+test("agent.pricing mixes flat fallback with a per-kind override", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: 1\n    output_per_mtok: 1\n    codex:\n      input_per_mtok: 5\n      output_per_mtok: 6\n---\n");
+  assert.equal(c.agent_pricing.default!.input_per_mtok, 1);
+  assert.equal(c.agent_pricing.by_kind["codex"].input_per_mtok, 5);
+});
+
+test("agent.pricing keeps fractional rates", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: 1.25\n    output_per_mtok: 0.075\n---\n");
+  assert.equal(c.agent_pricing.default!.input_per_mtok, 1.25, "rates must not be truncated to integers");
+  assert.equal(c.agent_pricing.default!.output_per_mtok, 0.075);
+});
+
+test("agent.pricing rejects malformed entries", () => {
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: nope\n    output_per_mtok: 1\n---\n"), ConfigError, "non-numeric rate is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: -1\n    output_per_mtok: 1\n---\n"), ConfigError, "negative rate is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    input_per_mtok: 1\n---\n"), ConfigError, "half-written entry is rejected");
+  assert.throws(() => cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    codex:\n      input_per_mtok: 1\n      output_per_mtok: 2\n      currency: USD\n    opencode:\n      input_per_mtok: 1\n      output_per_mtok: 2\n      currency: EUR\n---\n"), ConfigError, "mixed currencies are rejected");
+});
+
+test("agent.pricing defaults currency to USD and ignores stray scalars", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nagent:\n  pricing:\n    note: ignore me\n    made-up-kind:\n      input_per_mtok: 1\n      output_per_mtok: 2\n---\n");
+  assert.equal(c.agent_pricing.by_kind["made-up-kind"].currency, "USD");
+  assert.equal(c.agent_pricing.by_kind["note"], undefined);
+});
+
 test("repository delivery settings: defaults, explicit values, validation", () => {
   const d = cfg("---\ntracker:\n  kind: file\n---\n");
   assert.equal(d.workspace_repository, null);
