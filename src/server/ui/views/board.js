@@ -62,7 +62,7 @@ function boardRow(i, b, m) {
     <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>↻ Retry</button>`;
   else if (i.is_terminal) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>↺ Reopen</button>`;
   else if (b.review_state && i.state.toLowerCase() === b.review_state.toLowerCase()) actions = html`${i.needs_attention ? badge("attention", "warn") : nothing}
-    ${i.merged_hint ? badge("looks merged", "ok") : nothing}
+    ${i.merged_hint ? badge("looks merged", "ok", `${i.delivery_branch || "the branch"} has no commits the base does not (ahead 0, behind ${i.behind}) — mark done?`) : nothing}
     <button class="btn sm" data-state-id=${i.id} data-state-to=${b.start_state} title="Send the branch back for more work">↻ Rework</button>
     <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.terminal_states[0] || "done"} title="Accept the delivered branch and close the issue">✓ Mark done</button>`;
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;

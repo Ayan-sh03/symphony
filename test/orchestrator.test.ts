@@ -633,6 +633,37 @@ test("repository project: completion records the delivery and lands in review, n
   }
 });
 
+test("repository project: a merged branch is hinted on the board, never auto-closed", async () => {
+  registerAgentFactory(makeGitFactory("fake-git-merged", { dirty: false }));
+  const repo = initRepo();
+  const { issuesDir, wfPath, workflow, config } = setupDelivery("fake-git-merged", repo);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    assert.ok(await waitFor(() => readIssue(issuesDir).state === "review"));
+    // An issue that never ran has no branch and no delivery. It must not be hinted
+    // as merged: a branch with no commits of its own is trivially an ancestor of
+    // the base, which is the verified false positive the `delivered` guard exists
+    // for.
+    fs.writeFileSync(
+      path.join(issuesDir, "T-2.json"),
+      JSON.stringify({ id: "T-2", identifier: "T-2", title: "never run", description: "", state: "backlog", dispatchable: false }),
+    );
+    // The operator merges the delivered branch, as they would after reviewing it.
+    // The board is read for the first time only now, so no cached count is in play.
+    git(repo, ["merge", "-q", "--no-edit", "issue/T-1"]);
+    const rows = (await orch.board()).issues;
+    const row = rows.find((i) => i.identifier === "T-1")!;
+    assert.equal(row.ahead, 0, "the base now contains everything the branch had");
+    assert.equal(row.merged_hint, true);
+    assert.equal(readIssue(issuesDir).state, "review", "a hint is not a state change");
+    const never = rows.find((i) => i.identifier === "T-2")!;
+    assert.equal(never.merged_hint, false, "no delivery, no hint");
+  } finally {
+    orch.stop();
+  }
+});
+
 test("repository project: uncommitted work flags needs_attention and preserves the worktree", async () => {
   registerAgentFactory(makeGitFactory("fake-git-dirty", { dirty: true }));
   const repo = initRepo();
