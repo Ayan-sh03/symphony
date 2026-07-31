@@ -46,6 +46,11 @@ function boardRow(i, b, m) {
   const lineage = i.follow_up_for
     ? html`<span class="lineage" title=${"Continues " + i.follow_up_for + " on the same branch"}>↳ ${i.follow_up_for}</span>`
     : nothing;
+  // How far the stream's branch has diverged from the base. Silent until there is
+  // something to say — an untouched branch is noise, not information.
+  const div = i.ahead || i.behind
+    ? html`<span class="diverge" title=${`${i.ahead} commit(s) not in the base, ${i.behind} behind it`}>↑${i.ahead} ↓${i.behind}</span>`
+    : nothing;
   let actions;
   if (i.runtime === "running") actions = html`<span class="run-ind"><span class="dot"></span>working · turn ${i.turn_count || 1}</span>
     <button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"} title="Stop the session and park this issue in the backlog">Hold</button>
@@ -57,6 +62,7 @@ function boardRow(i, b, m) {
     <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.start_state}>↻ Retry</button>`;
   else if (i.is_terminal) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>↺ Reopen</button>`;
   else if (b.review_state && i.state.toLowerCase() === b.review_state.toLowerCase()) actions = html`${i.needs_attention ? badge("attention", "warn") : nothing}
+    ${i.merged_hint ? badge("looks merged", "ok", `${i.delivery_branch || "the branch"} has no commits the base does not (ahead 0, behind ${i.behind}) — mark done?`) : nothing}
     <button class="btn sm" data-state-id=${i.id} data-state-to=${b.start_state} title="Send the branch back for more work">↻ Rework</button>
     <button class="btn primary sm" data-state-id=${i.id} data-state-to=${b.terminal_states[0] || "done"} title="Accept the delivered branch and close the issue">✓ Mark done</button>`;
   else if (i.is_active) actions = html`<button class="btn sm" data-state-id=${i.id} data-state-to=${b.backlog_states[0] || "backlog"}>Hold</button>`;
@@ -64,6 +70,7 @@ function boardRow(i, b, m) {
   return html`<div class="brow clk" data-open=${i.identifier}>${key}<span class="btitle">${i.title}</span>
     ${lineage}
     ${i.priority != null ? html`<span class="prio">P${i.priority}</span>` : nothing}
+    ${div}
     ${agentControl(i, m)}
     <div class="actions">${actions}</div></div>`;
 }

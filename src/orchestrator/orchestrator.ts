@@ -523,6 +523,8 @@ export class Orchestrator {
       throw new Error("the active tracker does not support a board view");
     }
     const all = await this.adapter.listAllIssues();
+    // One git process for the whole board, not one per issue.
+    const divergence = await this.workspaceManager.branchAheadBehind();
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
@@ -536,6 +538,15 @@ export class Orchestrator {
       const run = this.running.get(i.id);
       const halt = this.halted.get(i.id) ?? null;
       const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : halt ? "halted" : "idle";
+      // Keyed by the stream's branch rather than the delivery's, so a stream that
+      // has not delivered yet still shows how far it has come.
+      const branch = this.workspaceManager.deliveryBranchFor(this.streamOf(i));
+      const counts = branch ? divergence.get(branch) ?? null : null;
+      // "Merged" is a hint for a human to act on, never an automatic transition,
+      // and it has one verified false positive to keep out: a branch with no
+      // commits of its own is trivially an ancestor of the base and would read as
+      // merged forever. So it must have delivered something first.
+      const delivered = (i.delivery?.files_changed?.length ?? 0) > 0;
       return {
         id: i.id,
         identifier: i.identifier,
@@ -556,6 +567,9 @@ export class Orchestrator {
         // Always concrete, so the console can group a stream without re-deriving it.
         stream: this.streamOf(i),
         delivery_branch: i.delivery?.branch ?? null,
+        ahead: counts?.ahead ?? null,
+        behind: counts?.behind ?? null,
+        merged_hint: delivered && counts !== null && counts.ahead === 0,
       };
     });
     return {
@@ -989,6 +1003,33 @@ export class Orchestrator {
     const reasons: string[] = [];
     if (info.uncommitted.length > 0) reasons.push(`uncommitted changes left in workspace: ${info.uncommitted.join(", ")}`);
     if (!info.branch_exists) reasons.push(`issue branch ${info.branch} is missing in the repository`);
+    // Only when git actually said so: `history_rewritten` is null when it could not
+    // be established, and an unproven accusation would send an operator hunting
+    // for work that was never lost.
+    if (info.history_rewritten === true) {
+      reasons.push(
+        `branch history was rewritten: the previous delivery ${(info.parent_delivery_sha ?? "").slice(0, 7)} is no longer an ancestor of ${info.branch}`,
+      );
+    }
+    // Anchor the delivery in git before the tracker hears about it and before
+    // cleanup can remove the worktree: a record the tracker holds but git cannot
+    // corroborate is exactly the failure this prevents. It never throws — but a
+    // failure has to reach the operator, because the thing that failed is the
+    // guarantee that the commit will still be there tomorrow.
+    let anchored = false;
+    try {
+      anchored = await this.workspaceManager.recordDelivery(stream, {
+        branch: info.branch,
+        commit_sha: info.commit_sha,
+        base_branch: info.base_branch,
+        files_changed: info.files_changed,
+      });
+    } catch (err) {
+      this.logger.warn("could not anchor delivery in git", { issue_id: issueId, issue_identifier: identifier, error: String(err) });
+    }
+    if (!anchored && info.commit_sha) {
+      reasons.push(`delivered commit ${info.commit_sha.slice(0, 7)} could not be anchored in git; do not delete ${info.branch}`);
+    }
     // `tests` and `summary` are deliberately absent, not null: the adapter fills
     // them from the agent's own result envelope, and an explicit null would be a
     // value that overwrites what it knows.
@@ -996,6 +1037,8 @@ export class Orchestrator {
       branch: info.branch,
       commit_sha: info.commit_sha,
       base_branch: info.base_branch,
+      parent_delivery_sha: info.parent_delivery_sha,
+      history_rewritten: info.history_rewritten === true,
       files_changed: info.files_changed,
       uncommitted: info.uncommitted,
       needs_attention: reasons.length > 0,
@@ -1596,6 +1639,20 @@ export interface BoardIssueView {
   stream: string;
   /** Branch of the recorded delivery, or null — lets the console name a stream's branch. */
   delivery_branch: string | null;
+  /**
+   * Commits the stream's branch has that the configured base does not, and how far
+   * behind the base it has fallen. Null when the project has no repository, or the
+   * branch does not exist yet (extension).
+   */
+  ahead: number | null;
+  behind: number | null;
+  /**
+   * The base already contains everything this branch delivered — it looks merged.
+   * A prompt for the operator, never an automatic state change: git cannot tell a
+   * merge from a branch that never had commits of its own, so this additionally
+   * requires that the issue actually delivered files.
+   */
+  merged_hint: boolean;
 }
 
 export interface BoardView {

@@ -1,5 +1,5 @@
 /** Formatting helpers shared across console views (SPEC §13.7.1). */
-import { html } from "./vendor/lit-html/lit-html.js";
+import { html, nothing } from "./vendor/lit-html/lit-html.js";
 
 export function nfmt(n) { return (n == null ? 0 : n).toLocaleString(); }
 
@@ -42,8 +42,8 @@ export function shortTime(iso) {
   return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2) + ":" + ("0" + d.getSeconds()).slice(-2);
 }
 
-export function badge(text, kind) {
-  return html`<span class="badge ${kind || ""}"><span class="bd"></span>${text}</span>`;
+export function badge(text, kind, title) {
+  return html`<span class="badge ${kind || ""}" title=${title || nothing}><span class="bd"></span>${text}</span>`;
 }
 
 export function stateBadge(st) {

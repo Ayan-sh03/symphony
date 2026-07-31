@@ -27,6 +27,19 @@ export interface IssueDelivery {
    * could not be established at all; never a guess.
    */
   base_branch: string | null;
+  /**
+   * The commit this stream delivered last time; null on a stream's first delivery
+   * (extension, SPEC Appendix B.5).
+   */
+  parent_delivery_sha: string | null;
+  /**
+   * True when the previous delivery is no longer an ancestor of the branch — the
+   * stream's history was rebased, squashed or amended, which follow-ups are
+   * forbidden to do because it discards work the operator already reviewed. False
+   * also covers "could not be determined": an unproven accusation is worse than
+   * silence.
+   */
+  history_rewritten: boolean;
   /** Files changed on the branch relative to the base (merge-base diff). */
   files_changed: string[];
   /** Paths with uncommitted changes left in the preserved worktree (empty when clean). */

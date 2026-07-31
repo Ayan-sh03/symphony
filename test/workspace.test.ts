@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { WorkspaceManager, workspaceKey, WorkspaceError, isSafeStreamIdentifier } from "../src/workspace/manager.ts";
+import { WorkspaceManager, workspaceKey, refKey, WorkspaceError, isSafeStreamIdentifier } from "../src/workspace/manager.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -106,6 +106,15 @@ test("git worktree cleanup retains the issue branch and its committed work", asy
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+}
+
+/** The commit a stream's recorded base ref points at, or null when unrecorded. */
+function baseRef(repo: string, stream: string): string | null {
+  try {
+    return git(repo, ["rev-parse", "--verify", `refs/symphony/base/${refKey(stream)}^{commit}`]).trim();
+  } catch {
+    return null;
+  }
 }
 
 test("branch_template names the issue branch", async () => {
@@ -226,6 +235,122 @@ test("a non-worktree directory at the workspace path is refused, not silently us
   assert.equal(git(ws.path, ["branch", "--show-current"]).trim(), "issue/PLAIN-2");
 });
 
+test("agent commits are authored as Symphony, not as whoever owns the repository", async () => {
+  const repo = initRepo(); // sets a repo-level identity the worktree config must beat
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("WHO-1", false, "codex");
+  assert.equal(git(ws.path, ["config", "--get", "user.name"]).trim(), "Symphony (codex)");
+
+  // The load-bearing assertion: a plain commit, exactly as an agent would make
+  // it, with no environment or -c overrides in play.
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "agent output\n");
+  git(ws.path, ["add", "work.txt"]);
+  git(ws.path, ["commit", "-qm", "agent work"]);
+  assert.equal(git(ws.path, ["log", "-1", "--format=%an <%ae>"]).trim(), "Symphony (codex) <symphony+codex@localhost>");
+
+  // Reuse re-applies it: worktrees created before this rule existed have none.
+  git(ws.path, ["config", "--worktree", "--unset", "user.name"]);
+  await wm.createForIssue("WHO-1", false, "opencode");
+  assert.equal(git(ws.path, ["config", "--get", "user.name"]).trim(), "Symphony (opencode)");
+
+  // An unknown backend must still produce a well-formed identity line.
+  const odd = await wm.createForIssue("WHO-2", false, "we<ird>");
+  assert.equal(git(odd.path, ["config", "--get", "user.name"]).trim(), "Symphony (weird)");
+});
+
+test("a worktree git refuses to remove is deleted anyway, and the issue can run again", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("STRAND-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "kept by the branch\n");
+  git(ws.path, ["add", "delivered.txt"]);
+  git(ws.path, ["commit", "-qm", "deliver issue work"]);
+
+  // Break the worktree's back-reference so `worktree remove` fails (exit 128,
+  // "is not a working tree") while `status` still reports it clean — the shape a
+  // half-completed removal leaves behind when a held file handle interrupts it.
+  fs.rmSync(path.join(repo, ".git", "worktrees", workspaceKey("STRAND-1"), "gitdir"));
+  assert.throws(() => git(repo, ["worktree", "remove", ws.path]), "precondition: git itself cannot remove it");
+
+  await wm.cleanupForIssue("STRAND-1");
+  assert.ok(!fs.existsSync(ws.path), "the directory is removed even though git would not");
+  assert.ok(!git(repo, ["worktree", "list", "--porcelain"]).includes(ws.path), "and its registration is pruned");
+  assert.equal(git(repo, ["show", "issue/STRAND-1:delivered.txt"]), "kept by the branch\n", "committed work is untouched");
+
+  const again = await wm.createForIssue("STRAND-1");
+  assert.equal(git(again.path, ["branch", "--show-current"]).trim(), "issue/STRAND-1", "the issue is not wedged");
+});
+
+test("a removal that failed because the tree stopped being clean preserves it", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  // `before_remove` stands in for the agent subprocess that has not finished
+  // exiting: it writes into the worktree after the cleanliness check has passed,
+  // which is what makes `worktree remove` refuse.
+  const wsPath = path.join(root, "RACE-1");
+  const hooks = { ...defaultHooks(), before_remove: `echo late > "${path.join(wsPath, "late.txt").replace(/\\/g, "/")}"` };
+  const wm = new WorkspaceManager({ root, hooks, logger: silent, repository: repo });
+  const ws = await wm.createForIssue("RACE-1");
+  fs.writeFileSync(path.join(ws.path, "committed.txt"), "safe on the branch\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+
+  await wm.cleanupForIssue("RACE-1");
+  assert.ok(fs.existsSync(ws.path), "the fallback must not delete work git refused to delete");
+  assert.equal(fs.readFileSync(path.join(ws.path, "late.txt"), "utf8").trim(), "late", "the late write survives");
+});
+
+test("cleanup anchors a branch that never went through the delivery path", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("ORPHAN-1");
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "done while symphony was stopped\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  // No recordDelivery: this is the startup-cleanup / deleted-issue route.
+  await wm.cleanupForIssue("ORPHAN-1");
+  assert.equal((await wm.lastDelivery("ORPHAN-1"))?.commit, sha, "the branch tip is anchored on the way out");
+
+  git(repo, ["branch", "-D", "issue/ORPHAN-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+  git(repo, ["cat-file", "-e", `${sha}^{commit}`]);
+});
+
+test("cleanup never overwrites a real delivery record with a bare branch tip", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("KEEPREC-1");
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "x\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  await wm.recordDelivery("KEEPREC-1", { commit_sha: sha, summary: "the real record" });
+
+  await wm.cleanupForIssue("KEEPREC-1");
+  assert.equal((await wm.lastDelivery("KEEPREC-1"))!.record.summary, "the real record");
+});
+
+test("a stranded workspace directory names itself in the error that refuses it", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const wsPath = wm.workspacePathFor("STRAND-2");
+  fs.mkdirSync(wsPath, { recursive: true });
+  fs.writeFileSync(path.join(wsPath, "leftover.txt"), "from a half-removed worktree\n");
+  await assert.rejects(
+    () => wm.createForIssue("STRAND-2"),
+    (e: unknown) => e instanceof WorkspaceError && e.message.includes(wsPath),
+    "the operator needs the path to delete, not just a refusal",
+  );
+});
+
 test("cleanup preserves a dirty worktree and one whose branch is gone", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");
@@ -325,19 +450,17 @@ test("a branch with no recorded base recovers it from the reflog, once", async (
   const { repo, forkPoint } = repoWithLegacyBranch();
   const root = path.join(repo, ".symphony", "workspaces");
   const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
-  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]), "nothing recorded yet");
+  assert.equal(baseRef(repo, "LEG-1"), null, "nothing recorded yet");
 
   const ws = await wm.createForIssue("LEG-1");
-  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
-    "the branch's creation commit becomes its base");
+  assert.equal(baseRef(repo, "LEG-1"), forkPoint, "the branch's creation commit becomes its base");
 
   // Recovered once and then left alone: the branch moving on must not move its base.
   fs.writeFileSync(path.join(ws.path, "later.txt"), "more work\n");
   git(ws.path, ["add", "-A"]);
   git(ws.path, ["commit", "-qm", "later work"]);
   await wm.deliveryInfo("LEG-1");
-  assert.equal(git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]).trim(), forkPoint,
-    "the recovered base is stable");
+  assert.equal(baseRef(repo, "LEG-1"), forkPoint, "the recovered base is stable");
 });
 
 test("a recovered base keeps another branch's commits out of the delivery", async () => {
@@ -368,8 +491,271 @@ test("a force-moved branch is not given a bogus recovered base", async () => {
   git(repo, ["branch", "-f", "issue/LEG-1", "master"]);
 
   await wm.createForIssue("LEG-1");
-  assert.throws(() => git(repo, ["config", "--local", "--get", "symphony.issue/LEG-1.baseSha"]),
-    "no base is invented for a branch that was moved off its creation point");
+  assert.equal(baseRef(repo, "LEG-1"), null, "no base is invented for a branch that was moved off its creation point");
+});
+
+test("a base recorded as a ref survives the branch being merged away and pruned", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const cutFrom = git(repo, ["rev-parse", "HEAD"]).trim();
+  await wm.createForIssue("GCB-1");
+  assert.equal(baseRef(repo, "GCB-1"), cutFrom);
+
+  // The base commit is only reachable from the base ref once the branch is gone.
+  await wm.cleanupForIssue("GCB-1");
+  git(repo, ["branch", "-D", "issue/GCB-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+  assert.equal(baseRef(repo, "GCB-1"), cutFrom, "the ref is a reachability root; local config never was");
+});
+
+test("a delivered commit survives cleanup, branch deletion and gc, and is recoverable", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("GC-1");
+  fs.writeFileSync(path.join(ws.path, "delivered.txt"), "the whole point\n");
+  git(ws.path, ["add", "delivered.txt"]);
+  git(ws.path, ["commit", "-qm", "deliver issue work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  const info = (await wm.deliveryInfo("GC-1"))!;
+  assert.equal(await wm.recordDelivery("GC-1", { branch: info.branch, commit_sha: sha, files_changed: info.files_changed }), true);
+
+  // Negative control: an equivalent commit that nobody anchored. Without this the
+  // test would still pass if gc quietly stopped pruning anything at all.
+  git(repo, ["branch", "control", "master"]);
+  git(repo, ["checkout", "-q", "control"]);
+  fs.writeFileSync(path.join(repo, "unanchored.txt"), "nothing points at this\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "unanchored work"]);
+  const controlSha = git(repo, ["rev-parse", "HEAD"]).trim();
+  git(repo, ["checkout", "-q", "master"]);
+  git(repo, ["branch", "-D", "control"]);
+
+  // Everything routine that used to destroy the commit, in the order it happens.
+  await wm.cleanupForIssue("GC-1");
+  git(repo, ["branch", "-D", "issue/GC-1"]);
+  git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
+  git(repo, ["gc", "--prune=now", "-q"]);
+
+  assert.throws(() => git(repo, ["cat-file", "-e", `${controlSha}^{commit}`]),
+    "control: an unanchored commit really is collected by this gc, so the assertion below means something");
+  git(repo, ["cat-file", "-e", `${sha}^{commit}`]); // throws if it was collected
+  git(repo, ["branch", "--force", "issue/GC-1", `refs/symphony/tagmeta/${refKey("GC-1")}^{}`]);
+  assert.equal(git(repo, ["show", "issue/GC-1:delivered.txt"]), "the whole point\n", "the work is recovered by the documented one-liner");
+});
+
+test("the delivery record reads back out of the tag intact", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  assert.equal(await wm.lastDelivery("TAG-1"), null, "nothing delivered yet");
+
+  const ws = await wm.createForIssue("TAG-1");
+  fs.writeFileSync(path.join(ws.path, "a file with spaces.txt"), "x\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "work"]);
+  const sha = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  // Multi-line and tabbed text is the interesting case: the read format is
+  // tab-delimited and takes the tag's subject, i.e. everything up to a blank line.
+  const record = { commit_sha: sha, summary: "line one\nline two\ttabbed", files_changed: ["a file with spaces.txt"] };
+  await wm.recordDelivery("TAG-1", record);
+
+  const read = (await wm.lastDelivery("TAG-1"))!;
+  assert.equal(read.commit, sha, "the ref derefs to the delivered commit, not the tag object");
+  assert.deepEqual(read.record, record);
+
+  // A second delivery on the same stream (a follow-up) must replace, not fail.
+  fs.writeFileSync(path.join(ws.path, "more.txt"), "y\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "follow-up work"]);
+  const next = git(ws.path, ["rev-parse", "HEAD"]).trim();
+  assert.equal(await wm.recordDelivery("TAG-1", { commit_sha: next }), true, "re-delivery is an update, not a create");
+  assert.equal((await wm.lastDelivery("TAG-1"))!.commit, next);
+});
+
+test("a stream that rebases what it already delivered is caught; adding to it is not", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("REW-1");
+  fs.writeFileSync(path.join(ws.path, "reviewed.txt"), "work the operator already read\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "first delivery"]);
+  const first = git(ws.path, ["rev-parse", "HEAD"]).trim();
+
+  const clean = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(clean.parent_delivery_sha, null, "a first delivery has nothing to compare against");
+  assert.equal(clean.history_rewritten, null);
+  await wm.recordDelivery("REW-1", { commit_sha: first });
+
+  // A follow-up that only adds commits — the sanctioned shape.
+  fs.writeFileSync(path.join(ws.path, "follow-up.txt"), "more work\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "follow-up work"]);
+  const added = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(added.parent_delivery_sha, first);
+  assert.equal(added.history_rewritten, false, "building on the branch is not a rewrite");
+
+  // A follow-up that squashes it away — the shape SPEC B.5 forbids. (Amending the
+  // tip would not qualify: the delivered commit stays an ancestor underneath it.)
+  git(ws.path, ["reset", "-q", "--soft", `${first}~1`]);
+  git(ws.path, ["commit", "-qm", "squashed history"]);
+  const rewritten = (await wm.deliveryInfo("REW-1"))!;
+  assert.equal(rewritten.parent_delivery_sha, first);
+  assert.equal(rewritten.history_rewritten, true);
+});
+
+test("an ancestry question git cannot answer is unknown, not an accusation", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  // Well-formed but absent: `merge-base --is-ancestor` exits 128, which must not
+  // be read as the exit-1 "no".
+  // @ts-expect-error -- reaching past the public surface for the error path
+  assert.equal(await wm.isAncestor(repo, "0000000000000000000000000000000000000001", "HEAD"), null);
+  const head = git(repo, ["rev-parse", "HEAD"]).trim();
+  git(repo, ["checkout", "-qb", "sidetrack"]);
+  fs.writeFileSync(path.join(repo, "side.txt"), "elsewhere\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "side"]);
+  const side = git(repo, ["rev-parse", "HEAD"]).trim();
+  // @ts-expect-error -- private
+  assert.equal(await wm.isAncestor(repo, side, head), false);
+  // @ts-expect-error -- private
+  assert.equal(await wm.isAncestor(repo, head, side), true);
+});
+
+test("nothing is anchored for a scratch project or a delivery with no commit", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  assert.equal(await plain.recordDelivery("NA-1", { commit_sha: "abc" }), false);
+  assert.equal(await plain.lastDelivery("NA-1"), null);
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  await wm.createForIssue("NA-2");
+  assert.equal(await wm.recordDelivery("NA-2", { commit_sha: null }), false, "no commit to anchor");
+});
+
+test("branch divergence is read for every issue branch in one pass", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master" });
+
+  // Merged: its commits are already in the base.
+  const merged = await wm.createForIssue("AB-MERGED");
+  fs.writeFileSync(path.join(merged.path, "merged.txt"), "in the base\n");
+  git(merged.path, ["add", "-A"]);
+  git(merged.path, ["commit", "-qm", "merged work"]);
+  git(repo, ["merge", "-q", "--no-edit", "issue/AB-MERGED"]);
+
+  // Ahead 2, behind 1: two of its own commits, and the base moved once after it.
+  const open = await wm.createForIssue("AB-OPEN");
+  for (const n of ["one", "two"]) {
+    fs.writeFileSync(path.join(open.path, `${n}.txt`), `${n}\n`);
+    git(open.path, ["add", "-A"]);
+    git(open.path, ["commit", "-qm", n]);
+  }
+  fs.writeFileSync(path.join(repo, "moved-on.txt"), "base moved\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "base moves on"]);
+
+  const counts = await wm.branchAheadBehind();
+  // ahead 0 is the merged verdict; behind 1 is the base commit made after it landed.
+  assert.deepEqual(counts.get("issue/AB-MERGED"), { ahead: 0, behind: 1 });
+  assert.deepEqual(counts.get("issue/AB-OPEN"), { ahead: 2, behind: 1 });
+  assert.equal(counts.has("master"), false, "only branches the template can produce are scanned");
+});
+
+test("branch divergence follows the branch template, including shapes a glob cannot express", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  // No slash in the template: a ref pattern built from the prefix would be
+  // `refs/heads/sym-`, which matches nothing at all.
+  const flat = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master", branchTemplate: "sym-{identifier}" });
+  const ws = await flat.createForIssue("FLAT-1");
+  fs.writeFileSync(path.join(ws.path, "f.txt"), "f\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "flat work"]);
+  assert.deepEqual((await flat.branchAheadBehind()).get("sym-FLAT-1"), { ahead: 1, behind: 0 });
+
+  // An identifier containing a slash: `issue/*` would not match it, since a glob
+  // does not cross a path separator.
+  const nested = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master" });
+  const nws = await nested.createForIssue("team/NEST-1");
+  fs.writeFileSync(path.join(nws.path, "n.txt"), "n\n");
+  git(nws.path, ["add", "-A"]);
+  git(nws.path, ["commit", "-qm", "nested work"]);
+  const counts = await nested.branchAheadBehind();
+  assert.deepEqual(counts.get("issue/team/NEST-1"), { ahead: 1, behind: 0 });
+  assert.equal(counts.has("master"), false);
+  assert.equal(counts.has("sym-FLAT-1"), false, "another template's branches are not this project's");
+});
+
+test("branch divergence degrades to nothing rather than breaking the board", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const plain = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent });
+  assert.equal((await plain.branchAheadBehind()).size, 0, "no repository configured");
+
+  // A base that does not resolve fails the whole for-each-ref, so it must be
+  // caught before it silently blanks every issue's counts.
+  const bad = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  await bad.createForIssue("AB-1");
+  bad.update(root, defaultHooks(), { repository: repo, base_branch: "no-such-branch", branch_template: "issue/{identifier}" });
+  assert.equal((await bad.branchAheadBehind()).size, 0, "an unresolvable base costs the decoration, not the board");
+});
+
+test("ref names do not collide between streams that differ only in case", () => {
+  assert.notEqual(refKey("SYM-10"), refKey("sym-10"));
+  assert.equal(refKey("sym-10"), "sym-10", "an already-safe lower-case stream is left alone");
+  assert.match(refKey("SYM-10"), /^SYM-10-[0-9a-f]{16}$/);
+});
+
+test("ref names never take a form git rejects", () => {
+  // Each of these would fail the whole delivery transaction if it reached git verbatim.
+  for (const bad of [".hidden", "trailing.", "work.lock", "a..b"]) {
+    const key = refKey(bad);
+    assert.doesNotMatch(key, /^\.|\.$|\.\.|\.lock$/, `${bad} -> ${key}`);
+  }
+});
+
+test("case-distinct streams write distinct base refs, not one aliased file", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const first = git(repo, ["rev-parse", "HEAD"]).trim();
+  fs.writeFileSync(path.join(repo, "moved.txt"), "base moves on\n");
+  git(repo, ["add", "moved.txt"]);
+  git(repo, ["commit", "-qm", "base moves"]);
+  const second = git(repo, ["rev-parse", "HEAD"]).trim();
+
+  // Driven at the ref layer on purpose: `CASE-1` and `case-1` cannot both hold a
+  // workspace on a case-insensitive filesystem (they resolve to one directory,
+  // and the second is refused as "not a git worktree"). That collision is older
+  // and wider than this milestone — refs are what M11 makes safe.
+  // @ts-expect-error -- reaching past the public surface for the aliasing case
+  await wm.writeRefs(repo, [{ ref: `refs/symphony/base/${refKey("CASE-1")}`, oid: first }]);
+  // @ts-expect-error -- ditto
+  await wm.writeRefs(repo, [{ ref: `refs/symphony/base/${refKey("case-1")}`, oid: second }]);
+
+  assert.equal(baseRef(repo, "CASE-1"), first, "the second stream's write did not overwrite the first");
+  assert.equal(baseRef(repo, "case-1"), second);
+});
+
+test("a ref transaction that cannot be completed writes nothing at all", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const good = git(repo, ["rev-parse", "HEAD"]).trim();
+  const missing = "0000000000000000000000000000000000000001";
+  // @ts-expect-error -- reaching past the public surface to prove the invariant
+  const ok = await wm.writeRefs(repo, [{ ref: "refs/symphony/base/TXN-A", oid: good }, { ref: "refs/symphony/base/TXN-B", oid: missing }]);
+  assert.equal(ok, false, "the transaction reports failure rather than throwing");
+  assert.throws(() => git(repo, ["rev-parse", "--verify", "refs/symphony/base/TXN-A"]),
+    "the ref that was fine is not left behind on its own");
 });
 
 test("a base recorded at creation is never overwritten by recovery", async () => {

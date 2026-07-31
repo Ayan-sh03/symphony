@@ -10,6 +10,7 @@ import type { AgentFactory, AgentSession, AgentSessionOptions } from "../src/age
 import { buildConfig } from "../src/config/config.ts";
 import { parseWorkflow } from "../src/workflow/loader.ts";
 import { Logger } from "../src/logger.ts";
+import { refKey } from "../src/workspace/manager.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
 
@@ -594,6 +595,18 @@ test("repository project: completion records the delivery and lands in review, n
     assert.equal(d.summary, "feature implemented and committed", "summary enriched from the result comment");
     assert.deepEqual(d.files_changed, ["feature.txt"]);
     assert.match(git(repo, ["rev-parse", "issue/T-1"]), new RegExp(`^${d.commit_sha}`), "recorded SHA is the branch head");
+    assert.equal(d.parent_delivery_sha, null, "first delivery on this stream");
+    assert.equal(d.history_rewritten, false);
+
+    // …and git corroborates it: the delivered commit is anchored by a ref, so the
+    // record is no longer a claim git cannot back up.
+    const tagRef = `refs/symphony/tagmeta/${refKey("T-1")}`;
+    assert.equal(git(repo, ["rev-parse", `${tagRef}^{commit}`]).trim(), d.commit_sha,
+      "the delivery is anchored in git, not only in the tracker");
+    assert.equal(JSON.parse(git(repo, ["cat-file", "tag", tagRef]).split("\n\n")[1]!).branch, "issue/T-1",
+      "the tag message carries the delivery record itself");
+    assert.equal(git(repo, ["log", "-1", "--format=%an", "issue/T-1"]).trim(), "Symphony (fake-git-clean)",
+      "the agent's commit is attributed to Symphony");
 
     // …the disposable worktree is gone, but the branch keeps the work in the repo.
     const cleaned = await waitFor(() => !fs.existsSync(wsPath));
@@ -604,6 +617,9 @@ test("repository project: completion records the delivery and lands in review, n
     const board = await orch.board();
     assert.equal(board.review_state, "review");
     assert.equal(board.issues[0]!.needs_attention, false);
+    assert.equal(board.issues[0]!.ahead, 1, "the delivered commit is not in the base yet");
+    assert.equal(board.issues[0]!.behind, 0);
+    assert.equal(board.issues[0]!.merged_hint, false, "unmerged work is never hinted as merged");
     const detail = await orch.issueDetailFor("T-1");
     assert.equal(detail?.state, "review");
     assert.equal(detail?.delivery?.branch, "issue/T-1");
@@ -612,6 +628,37 @@ test("repository project: completion records the delivery and lands in review, n
     // Mark done is the operator's explicit accept.
     await orch.setIssueState("T-1", "done");
     assert.equal(readIssue(issuesDir).state, "done");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("repository project: a merged branch is hinted on the board, never auto-closed", async () => {
+  registerAgentFactory(makeGitFactory("fake-git-merged", { dirty: false }));
+  const repo = initRepo();
+  const { issuesDir, wfPath, workflow, config } = setupDelivery("fake-git-merged", repo);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    assert.ok(await waitFor(() => readIssue(issuesDir).state === "review"));
+    // An issue that never ran has no branch and no delivery. It must not be hinted
+    // as merged: a branch with no commits of its own is trivially an ancestor of
+    // the base, which is the verified false positive the `delivered` guard exists
+    // for.
+    fs.writeFileSync(
+      path.join(issuesDir, "T-2.json"),
+      JSON.stringify({ id: "T-2", identifier: "T-2", title: "never run", description: "", state: "backlog", dispatchable: false }),
+    );
+    // The operator merges the delivered branch, as they would after reviewing it.
+    // The board is read for the first time only now, so no cached count is in play.
+    git(repo, ["merge", "-q", "--no-edit", "issue/T-1"]);
+    const rows = (await orch.board()).issues;
+    const row = rows.find((i) => i.identifier === "T-1")!;
+    assert.equal(row.ahead, 0, "the base now contains everything the branch had");
+    assert.equal(row.merged_hint, true);
+    assert.equal(readIssue(issuesDir).state, "review", "a hint is not a state change");
+    const never = rows.find((i) => i.identifier === "T-2")!;
+    assert.equal(never.merged_hint, false, "no delivery, no hint");
   } finally {
     orch.stop();
   }
