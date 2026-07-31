@@ -734,9 +734,15 @@ export class WorkspaceManager {
     // The kind comes from config and lands inside a git identity line, where a
     // stray `<` or `>` would produce a malformed author that git then rejects.
     const kind = (agentKind ?? "agent").replace(/[^A-Za-z0-9._-]/g, "") || "agent";
-    // Worktree-scoped config is inert until the repository opts in. Setting it
-    // once at repository level keeps the blast radius visible; it is a no-op for
-    // the non-bare repositories `workspace.repository` can usefully point at.
+    // Worktree-scoped config is inert until the repository opts in. Enabling it by
+    // hand also makes `core.bare` worktree-scoped, which breaks git inside the
+    // linked worktrees of a *bare* repository — a perfectly ordinary host for
+    // worktrees. Not worth an attribution nicety, so leave those alone.
+    const bare = (await this.git(repo, ["rev-parse", "--is-bare-repository"], true))?.trim();
+    if (bare === "true") {
+      this.opts.logger.debug("skipping commit identity: worktree config is unsafe on a bare repository", { repo });
+      return;
+    }
     await this.git(repo, ["config", "--local", "extensions.worktreeConfig", "true"], true);
     await this.git(wsPath, ["config", "--worktree", "user.name", `Symphony (${kind})`], true);
     await this.git(wsPath, ["config", "--worktree", "user.email", `symphony+${kind}@localhost`], true);
