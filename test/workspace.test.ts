@@ -523,12 +523,25 @@ test("a delivered commit survives cleanup, branch deletion and gc, and is recove
   const info = (await wm.deliveryInfo("GC-1"))!;
   assert.equal(await wm.recordDelivery("GC-1", { branch: info.branch, commit_sha: sha, files_changed: info.files_changed }), true);
 
+  // Negative control: an equivalent commit that nobody anchored. Without this the
+  // test would still pass if gc quietly stopped pruning anything at all.
+  git(repo, ["branch", "control", "master"]);
+  git(repo, ["checkout", "-q", "control"]);
+  fs.writeFileSync(path.join(repo, "unanchored.txt"), "nothing points at this\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "unanchored work"]);
+  const controlSha = git(repo, ["rev-parse", "HEAD"]).trim();
+  git(repo, ["checkout", "-q", "master"]);
+  git(repo, ["branch", "-D", "control"]);
+
   // Everything routine that used to destroy the commit, in the order it happens.
   await wm.cleanupForIssue("GC-1");
   git(repo, ["branch", "-D", "issue/GC-1"]);
   git(repo, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"]);
   git(repo, ["gc", "--prune=now", "-q"]);
 
+  assert.throws(() => git(repo, ["cat-file", "-e", `${controlSha}^{commit}`]),
+    "control: an unanchored commit really is collected by this gc, so the assertion below means something");
   git(repo, ["cat-file", "-e", `${sha}^{commit}`]); // throws if it was collected
   git(repo, ["branch", "--force", "issue/GC-1", `refs/symphony/tagmeta/${refKey("GC-1")}^{}`]);
   assert.equal(git(repo, ["show", "issue/GC-1:delivered.txt"]), "the whole point\n", "the work is recovered by the documented one-liner");
