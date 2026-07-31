@@ -592,16 +592,25 @@ export class WorkspaceManager {
 
     const baseSha = (await this.git(repo, ["rev-parse", "--verify", "--quiet", `${this.opts.baseBranch ?? "HEAD"}^{commit}`], true))?.trim();
     if (!baseSha) return empty;
-    // Scan only what the branch template can produce, so unrelated branches in a
-    // shared repository stay out of it.
-    const prefix = (this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE).split("{identifier}")[0]!.replace(/\/+$/, "");
-    const out = await this.git(repo, ["for-each-ref", `--format=%(refname:short)%09%(ahead-behind:${baseSha})`, `refs/heads/${prefix}`], true);
+    const out = await this.git(repo, ["for-each-ref", `--format=%(refname:short)%09%(ahead-behind:${baseSha})`, "refs/heads"], true);
     if (out === null) return empty;
+
+    // Keep only branches the template could have produced, so unrelated branches
+    // in a shared repository stay out. Filtered here rather than by a ref pattern:
+    // a glob cannot express this. `sym-{identifier}` yields the pattern
+    // `refs/heads/sym-`, which matches nothing at all, an empty prefix matches
+    // every branch, and `*` does not cross `/` — so a stream identifier containing
+    // a slash (which is legal) would be missed by `issue/*`.
+    const template = this.opts.branchTemplate ?? DEFAULT_BRANCH_TEMPLATE;
+    const cut = template.indexOf("{identifier}");
+    const prefix = cut < 0 ? template : template.slice(0, cut);
+    const suffix = cut < 0 ? "" : template.slice(cut + "{identifier}".length);
 
     const result = new Map<string, { ahead: number; behind: number }>();
     for (const line of out.split(/\r?\n/)) {
       const [branch, counts] = line.split("\t");
       if (!branch || !counts) continue;
+      if (!branch.startsWith(prefix) || !branch.endsWith(suffix) || branch.length <= prefix.length + suffix.length) continue;
       const [ahead, behind] = counts.trim().split(/\s+/).map((n) => Number.parseInt(n, 10));
       if (!Number.isInteger(ahead) || !Number.isInteger(behind)) continue;
       result.set(branch, { ahead: ahead!, behind: behind! });

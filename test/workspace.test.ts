@@ -656,6 +656,31 @@ test("branch divergence is read for every issue branch in one pass", async () =>
   assert.equal(counts.has("master"), false, "only branches the template can produce are scanned");
 });
 
+test("branch divergence follows the branch template, including shapes a glob cannot express", async () => {
+  const repo = initRepo();
+  const root = path.join(repo, ".symphony", "workspaces");
+  // No slash in the template: a ref pattern built from the prefix would be
+  // `refs/heads/sym-`, which matches nothing at all.
+  const flat = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master", branchTemplate: "sym-{identifier}" });
+  const ws = await flat.createForIssue("FLAT-1");
+  fs.writeFileSync(path.join(ws.path, "f.txt"), "f\n");
+  git(ws.path, ["add", "-A"]);
+  git(ws.path, ["commit", "-qm", "flat work"]);
+  assert.deepEqual((await flat.branchAheadBehind()).get("sym-FLAT-1"), { ahead: 1, behind: 0 });
+
+  // An identifier containing a slash: `issue/*` would not match it, since a glob
+  // does not cross a path separator.
+  const nested = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo, baseBranch: "master" });
+  const nws = await nested.createForIssue("team/NEST-1");
+  fs.writeFileSync(path.join(nws.path, "n.txt"), "n\n");
+  git(nws.path, ["add", "-A"]);
+  git(nws.path, ["commit", "-qm", "nested work"]);
+  const counts = await nested.branchAheadBehind();
+  assert.deepEqual(counts.get("issue/team/NEST-1"), { ahead: 1, behind: 0 });
+  assert.equal(counts.has("master"), false);
+  assert.equal(counts.has("sym-FLAT-1"), false, "another template's branches are not this project's");
+});
+
 test("branch divergence degrades to nothing rather than breaking the board", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");
