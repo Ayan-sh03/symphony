@@ -118,6 +118,10 @@ id (`#/<pid>`, `#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`,
 
 - **Commits:** atomic, lowercase, one-line messages. **Do not** add a
   `Co-Authored-By` / "Generated with" trailer.
+- **PR descriptions:** one paragraph, maximum. No headings, no bulleted feature
+  tours, no test-plan checklists, no summary of a summary. Say what changed and
+  why — nothing else. Same trailer rule as commits: no "Generated with", `🤖`,
+  or `Co-Authored-By` lines in the body.
 - Match the surrounding code's style. Files carry a header comment citing the
   relevant `SPEC.md` section — keep that pattern.
 - Every change should keep `npm test` and `npm run typecheck` green.
