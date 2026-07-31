@@ -226,6 +226,30 @@ test("a non-worktree directory at the workspace path is refused, not silently us
   assert.equal(git(ws.path, ["branch", "--show-current"]).trim(), "issue/PLAIN-2");
 });
 
+test("agent commits are authored as Symphony, not as whoever owns the repository", async () => {
+  const repo = initRepo(); // sets a repo-level identity the worktree config must beat
+  const root = path.join(repo, ".symphony", "workspaces");
+  const wm = new WorkspaceManager({ root, hooks: defaultHooks(), logger: silent, repository: repo });
+  const ws = await wm.createForIssue("WHO-1", false, "codex");
+  assert.equal(git(ws.path, ["config", "--get", "user.name"]).trim(), "Symphony (codex)");
+
+  // The load-bearing assertion: a plain commit, exactly as an agent would make
+  // it, with no environment or -c overrides in play.
+  fs.writeFileSync(path.join(ws.path, "work.txt"), "agent output\n");
+  git(ws.path, ["add", "work.txt"]);
+  git(ws.path, ["commit", "-qm", "agent work"]);
+  assert.equal(git(ws.path, ["log", "-1", "--format=%an <%ae>"]).trim(), "Symphony (codex) <symphony+codex@localhost>");
+
+  // Reuse re-applies it: worktrees created before this rule existed have none.
+  git(ws.path, ["config", "--worktree", "--unset", "user.name"]);
+  await wm.createForIssue("WHO-1", false, "opencode");
+  assert.equal(git(ws.path, ["config", "--get", "user.name"]).trim(), "Symphony (opencode)");
+
+  // An unknown backend must still produce a well-formed identity line.
+  const odd = await wm.createForIssue("WHO-2", false, "we<ird>");
+  assert.equal(git(odd.path, ["config", "--get", "user.name"]).trim(), "Symphony (weird)");
+});
+
 test("a worktree git refuses to remove is deleted anyway, and the issue can run again", async () => {
   const repo = initRepo();
   const root = path.join(repo, ".symphony", "workspaces");

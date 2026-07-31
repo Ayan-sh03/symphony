@@ -71,7 +71,7 @@ export async function runAgentAttempt(
   // 1. Workspace (the stream's, which for a follow-up is the parent's worktree)
   let workspace;
   try {
-    workspace = await deps.workspaceManager.createForIssue(deps.stream, deps.isFollowUp);
+    workspace = await deps.workspaceManager.createForIssue(deps.stream, deps.isFollowUp, deps.agentKind);
   } catch (err) {
     return { kind: "abnormal", reason: `workspace error: ${(err as Error).message}` };
   }

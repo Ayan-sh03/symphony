@@ -159,8 +159,11 @@ export class WorkspaceManager {
    * the stream was merged away or renamed. Cutting a fresh one from the base would
    * silently fork the work — the exact divergence follow-ups exist to prevent — so
    * this fails loudly instead and lets an operator decide.
+   *
+   * `agentKind` names the backend doing the work, so its commits can be authored
+   * as Symphony rather than as whoever owns the repository (extension).
    */
-  async createForIssue(stream: string, requireExistingBranch = false): Promise<Workspace> {
+  async createForIssue(stream: string, requireExistingBranch = false, agentKind?: string): Promise<Workspace> {
     const key = workspaceKey(stream);
     const wsPath = this.workspacePathFor(stream);
     let created_now = false;
@@ -253,7 +256,10 @@ export class WorkspaceManager {
 
     // Idempotent, and applied to reused worktrees too so workspaces created
     // before this rule still get it.
-    if (this.opts.repository) await this.excludeScratchFiles(wsPath);
+    if (this.opts.repository) {
+      await this.excludeScratchFiles(wsPath);
+      await this.setCommitIdentity(this.opts.repository, wsPath, agentKind);
+    }
 
     if (created_now && this.opts.hooks.after_create) {
       const res = await this.runHook("after_create", this.opts.hooks.after_create, wsPath);
@@ -461,6 +467,32 @@ export class WorkspaceManager {
     // and its creation point says nothing useful about what it contains now.
     const ok = await this.git(repo, ["merge-base", "--is-ancestor", created, branch], true);
     return ok === null ? null : created;
+  }
+
+  /**
+   * Author this worktree's commits as Symphony (extension). Unattended machine
+   * commits are otherwise indistinguishable from hand-written ones in
+   * `git blame` and `git log --author`, which are the tools an operator reaches
+   * for when reviewing what an agent did.
+   *
+   * Per-worktree config is the only durable place for this: it applies to every
+   * git invocation in the directory, including ones the agent makes itself,
+   * where `GIT_AUTHOR_*` environment variables would not survive (an `--amend`
+   * in a later shell drops them). It dies with the worktree, which is correct —
+   * hence re-setting it on every creation, reuse included.
+   *
+   * Best effort throughout: a repository that refuses this must not fail a run.
+   */
+  private async setCommitIdentity(repo: string, wsPath: string, agentKind?: string): Promise<void> {
+    // The kind comes from config and lands inside a git identity line, where a
+    // stray `<` or `>` would produce a malformed author that git then rejects.
+    const kind = (agentKind ?? "agent").replace(/[^A-Za-z0-9._-]/g, "") || "agent";
+    // Worktree-scoped config is inert until the repository opts in. Setting it
+    // once at repository level keeps the blast radius visible; it is a no-op for
+    // the non-bare repositories `workspace.repository` can usefully point at.
+    await this.git(repo, ["config", "--local", "extensions.worktreeConfig", "true"], true);
+    await this.git(wsPath, ["config", "--worktree", "user.name", `Symphony (${kind})`], true);
+    await this.git(wsPath, ["config", "--worktree", "user.email", `symphony+${kind}@localhost`], true);
   }
 
   /**
