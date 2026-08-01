@@ -88,6 +88,20 @@ test("project-scoped state hits the right orchestrator; unknown project 404s", a
   });
 });
 
+test("GET /agents reports registered agent availability", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/agents`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as any;
+    assert.equal(body.configured_default, "codex");
+    assert.equal(body.effective_default, "codex");
+    assert.ok(Array.isArray(body.agents));
+    assert.ok(body.agents.some((a: { kind: string; registered: boolean; command: string }) =>
+      a.kind === "codex" && a.registered === true && a.command === "codex app-server"));
+    assert.ok(body.agents.some((a: { kind: string; registered: boolean; command: string }) =>
+      a.kind === "opencode" && a.registered === true && a.command === "opencode"));
+  });
+});
 test("GET /events streams an initial snapshot, pushes on change, and unsubscribes on abort", { timeout: 15000 }, async () => {
   await withServer(async (base, mgr) => {
     const orch = mgr.get("a")!.orchestrator;

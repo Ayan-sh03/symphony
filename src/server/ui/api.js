@@ -142,6 +142,20 @@ export function setDefaultAgent(kind, el) {
     .then(() => { if (el) el.disabled = false; });
 }
 
+/** Re-probe the host for installed agent CLIs (extension). */
+export function refreshAgents(btn) {
+  if (btn) btn.classList.add("busy");
+  return fetch(apiBase() + "/agents/refresh", { method: "POST" })
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((j) => {
+      const installed = (j.agents || []).filter((a) => a.usable).map((a) => a.kind);
+      toast(installed.length ? "Found " + installed.join(", ") : "No runnable agent found", installed.length ? "ok" : "err");
+      return fetchState();
+    })
+    .catch(() => { toast("Could not check for agents", "err"); })
+    .then(() => { if (btn) btn.classList.remove("busy"); });
+}
+
 export function setIssueAgent(id, agent, el) {
   if (el) el.disabled = true;
   fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/agent", {

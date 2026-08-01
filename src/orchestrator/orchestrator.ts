@@ -10,7 +10,8 @@ import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
 import { WorkspaceManager, isSafeStreamIdentifier } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
-import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
+import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript, detectAgentKinds } from "../agent/registry.ts";
+import { resolveAgentAvailability, type AgentAvailability, type AgentDetection } from "../agent/detection.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 import { aggregateCost, costForKind } from "../history/cost.ts";
@@ -84,6 +85,13 @@ const MAX_HISTORY = 40;
  * there turned every successful run into a cancelled one.
  */
 const TERMINAL_GRACE_MS = 120000;
+
+/**
+ * How long an installed-agent discovery result is trusted (extension). Short,
+ * because a CLI can be installed while Symphony is running and the operator should
+ * not have to restart to be told about it.
+ */
+const AGENT_DETECTION_TTL_MS = 60000;
 
 interface RetryEntry {
   issue_id: string;
@@ -187,6 +195,10 @@ export class Orchestrator {
   /** Streams whose delivery/cleanup is still in flight — busy, though nothing is running. */
   private finalizing = new Set<string>();
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
+  /** Last completed agent discovery (extension). Advisory, refreshed off the hot path. */
+  private agentDetection: AgentDetection[] = [];
+  private agentDetectionAt = 0;
+  private agentDetectionInFlight: Promise<AgentDetection[]> | null = null;
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0, by_agent: {} };
 
@@ -328,6 +340,10 @@ export class Orchestrator {
   async start(): Promise<void> {
     const v = this.validateDispatchConfig();
     if (!v.ok) throw new Error(`startup validation failed: ${v.error}`);
+    // Probe once before the first tick so a missing CLI is reported rather than
+    // discovered by spawning it. An unsupported kind is still the hard error above;
+    // a registered-but-missing executable only ever warns (extension).
+    await this.ensureAgentDetection().catch(() => {});
     await this.startupTerminalCleanup();
     this.scheduleTick(0);
   }
@@ -506,9 +522,125 @@ export class Orchestrator {
     return this.config.server_port;
   }
 
-  /** The effective default agent backend (runtime override wins over WORKFLOW.md). */
+  // ---- installed-agent discovery (extension) ----
+
+  /**
+   * Availability as currently known, without probing (extension). Synchronous by
+   * design: the snapshot and the dispatch gate both read it, and neither may wait
+   * on a process spawn. Before the first probe completes this reports `stale`, and
+   * every caller treats stale as "allow the run and let the backend fail properly".
+   */
+  agentAvailabilityView(): AgentAvailability {
+    const override = this.defaultAgentOverride && isSupportedAgentKind(this.defaultAgentOverride) ? this.defaultAgentOverride : null;
+    return resolveAgentAvailability(this.agentDetection, this.config.agent_kind, override);
+  }
+
+  /** Probe if the cache is cold or older than the TTL, then report. Never on the hot path. */
+  async agentAvailability(force = false): Promise<AgentAvailability> {
+    await this.ensureAgentDetection(force);
+    return this.agentAvailabilityView();
+  }
+
+  /** Bust the discovery cache and re-probe (console/API). */
+  async refreshAgentDetection(): Promise<AgentAvailability> {
+    const view = await this.agentAvailability(true);
+    this.notify();
+    return view;
+  }
+
+  /**
+   * Refresh the detection cache when stale. Concurrent callers share one probe;
+   * a failure leaves the previous answer in place rather than blanking it.
+   */
+  private async ensureAgentDetection(force = false): Promise<void> {
+    const fresh = this.agentDetection.length > 0 && Date.now() - this.agentDetectionAt < AGENT_DETECTION_TTL_MS;
+    if (fresh && !force) return;
+    if (!this.agentDetectionInFlight) {
+      this.agentDetectionInFlight = detectAgentKinds(this.config, this.logger)
+        .then((statuses) => {
+          const before = this.availabilitySignature(this.agentDetection);
+          this.agentDetection = statuses;
+          this.agentDetectionAt = Date.now();
+          // Only speak up when the picture actually changed — this runs every minute.
+          if (this.availabilitySignature(statuses) !== before) this.logAgentAvailability();
+          return statuses;
+        })
+        .catch((err) => {
+          this.logger.warn("agent discovery failed", { error: String(err) });
+          return this.agentDetection;
+        })
+        .finally(() => {
+          this.agentDetectionInFlight = null;
+        });
+    }
+    await this.agentDetectionInFlight;
+  }
+
+  private availabilitySignature(statuses: AgentDetection[]): string {
+    return statuses.map((a) => `${a.kind}:${a.usable ? 1 : 0}`).join(",");
+  }
+
+  /**
+   * The first-run message: what is installed, what is missing, what will run.
+   * A missing backend is only a warning when it is the one this project would
+   * actually use — otherwise "opencode isn't installed" is just noise on a
+   * perfectly healthy codex machine.
+   */
+  private logAgentAvailability(): void {
+    const view = this.agentAvailabilityView();
+    const installed = view.agents.filter((a) => a.usable).map((a) => a.kind);
+    this.logger.info("agent discovery", {
+      installed: installed.join(",") || "(none)",
+      missing: view.agents.filter((a) => !a.usable).map((a) => a.kind).join(",") || "(none)",
+      default_agent: view.effective_default,
+      reason: view.reason ?? "",
+    });
+    for (const a of view.agents) {
+      if (a.usable) continue;
+      const selected = a.kind === this.config.agent_kind || a.kind === view.effective_default;
+      const fields = { agent: a.kind, reason: a.reason ?? "" };
+      if (selected || installed.length === 0) this.logger.warn("selected agent backend is not runnable", fields);
+      else this.logger.info("agent backend not installed", fields);
+    }
+  }
+
+  /** Kick discovery off in the background — used by the poll loop, never awaited. */
+  private scheduleAgentDetection(): void {
+    void this.ensureAgentDetection().catch(() => {});
+  }
+
+  /**
+   * Why this issue's resolved backend cannot run, or null to proceed.
+   *
+   * `park` means the project as a whole has no sane default: the issue stays a
+   * plain candidate and the console shows the reason, because halting every
+   * backlog issue over one missing CLI buries the actual problem. `halt` is
+   * reserved for an issue that explicitly asked for a backend this host lacks —
+   * that is a per-issue mistake and leaves unrelated issues dispatching.
+   */
+  private agentGate(issue: Issue): { action: "go" } | { action: "park" | "halt"; reason: string } {
+    const availability = this.agentAvailabilityView();
+    if (availability.stale) return { action: "go" }; // no evidence yet — let the backend be the authority
+    if (issue.agent && isSupportedAgentKind(issue.agent)) {
+      const detected = availability.agents.find((a) => a.kind === issue.agent);
+      if (detected && !detected.usable) {
+        return { action: "halt", reason: `agent_unavailable: ${detected.reason ?? `${issue.agent} is not installed`}` };
+      }
+      return { action: "go" };
+    }
+    if (availability.blocked) return { action: "park", reason: availability.reason ?? "no runnable agent" };
+    return { action: "go" };
+  }
+
+  /**
+   * The effective default agent backend. An operator's runtime override wins over
+   * WORKFLOW.md; discovery's fallback wins over a configured default that is not
+   * installed (extension).
+   */
   effectiveDefaultAgent(): string {
     if (this.defaultAgentOverride && isSupportedAgentKind(this.defaultAgentOverride)) return this.defaultAgentOverride;
+    const auto = this.agentAvailabilityView().auto_default;
+    if (auto && isSupportedAgentKind(auto)) return auto;
     return this.config.agent_kind;
   }
 
@@ -640,6 +772,9 @@ export class Orchestrator {
   async tick(): Promise<void> {
     if (this.stopped) return;
     this.refreshQueued = false;
+    // Fire-and-forget: this tick uses whatever discovery already knows, and the
+    // result lands for the next one. Dispatch never waits on a process spawn.
+    this.scheduleAgentDetection();
     try {
       await this.reconcile();
 
@@ -668,12 +803,26 @@ export class Orchestrator {
         }
       }
 
+      // One warning per tick, not one per candidate — a missing CLI parks the whole
+      // backlog and the reason is the same for all of them.
+      const availability = this.agentAvailabilityView();
+      if (availability.blocked) {
+        this.logger.warn("dispatch parked; no usable default agent", { reason: availability.reason ?? "" });
+      }
+
       // Recomputed as we go: dispatching one member of a stream must block its
       // siblings for the rest of this tick, not just the ones already running.
       const busy = this.busyStreams();
       for (const issue of this.sortForDispatch(issues)) {
         if (this.availableSlots() <= 0) break;
         if (!this.shouldDispatch(issue, busy)) continue;
+        // Discovery gate (extension): don't spawn a backend this host cannot run.
+        const gate = this.agentGate(issue);
+        if (gate.action === "halt") {
+          this.halt(issue.id, issue.identifier, this.streamOf(issue), gate.reason, 0);
+          continue;
+        }
+        if (gate.action === "park") continue;
         busy.add(this.streamOf(issue));
         this.dispatch(issue, null);
       }
@@ -1431,6 +1580,7 @@ export class Orchestrator {
         agent_kind: this.config.agent_kind,
         agent_kinds: supportedAgentKinds(),
         default_agent: this.effectiveDefaultAgent(),
+        agents: this.agentAvailabilityView(),
         poll_interval_ms: this.config.poll_interval_ms,
         max_concurrent_agents: this.config.max_concurrent_agents,
         active_states: this.config.tracker.active_states,
@@ -1661,6 +1811,8 @@ export interface SnapshotView {
     agent_kind: string;
     agent_kinds: string[];
     default_agent: string;
+    /** Installed-agent discovery (extension) — see `agentAvailabilityView`. */
+    agents: AgentAvailability;
     poll_interval_ms: number;
     max_concurrent_agents: number;
     active_states: string[];

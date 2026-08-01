@@ -269,6 +269,61 @@ Work on {{ issue.identifier }}`;
   }
 });
 
+test("an issue pinned to an uninstalled backend halts alone; the rest keep dispatching", async () => {
+  const ran: Record<string, string> = {};
+  registerAgentFactory(makeRecordingFactory("gate-ok", ran));
+  // Registered and selectable, but discovery says this host cannot run it.
+  registerAgentFactory({
+    ...makeRecordingFactory("gate-missing", ran),
+    detect: async () => ({
+      kind: "gate-missing", registered: true, installed: false, command: "gate-missing",
+      command_field: "gate.command", usable: false, reason: "gate-missing not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-gate-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  fs.writeFileSync(path.join(issuesDir, "G-1.json"),
+    JSON.stringify({ id: "G-1", identifier: "G-1", title: "runnable", description: "x", state: "todo", dispatchable: true }));
+  fs.writeFileSync(path.join(issuesDir, "G-2.json"),
+    JSON.stringify({ id: "G-2", identifier: "G-2", title: "stranded", description: "x", state: "todo", dispatchable: true, agent: "gate-missing" }));
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 200
+workspace:
+  root: ./ws
+agent:
+  kind: gate-ok
+  max_turns: 1
+---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const halted = await waitFor(() => orch.snapshot().halted.some((h) => (h as { issue_id: string }).issue_id === "G-2"));
+    assert.ok(halted, "the pinned issue should halt rather than spawn a missing CLI");
+    const entry = orch.snapshot().halted.find((h) => (h as { issue_id: string }).issue_id === "G-2") as { reason: string };
+    assert.match(entry.reason, /agent_unavailable/);
+    assert.match(entry.reason, /not found on PATH/);
+    assert.ok(await waitFor(() => ran["G-1"] === "gate-ok"), "an unrelated issue still dispatches");
+    assert.equal(ran["G-2"], undefined, "the missing backend is never constructed");
+  } finally {
+    orch.stop();
+  }
+});
+
 test("runtime default-agent override changes the effective default", async () => {
   registerAgentFactory(makeRecordingFactory("rec-a", {}));
   registerAgentFactory(makeRecordingFactory("rec-b", {}));

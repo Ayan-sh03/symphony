@@ -6,7 +6,7 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue, refreshAgents } from "./api.js";
 import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
@@ -96,6 +96,8 @@ document.addEventListener("click", (e) => {
     });
     return;
   }
+  const ra = e.target.closest("[data-refresh-agents]");
+  if (ra) { refreshAgents(ra); return; }
   const cpy = e.target.closest("[data-copy]");
   if (cpy) { copyText(cpy.getAttribute("data-copy"), cpy.getAttribute("data-copy-what") || "Value"); return; }
   const sb = e.target.closest("[data-state-id]");
