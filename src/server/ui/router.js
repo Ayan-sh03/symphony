@@ -1,6 +1,6 @@
 /** Hash routing; every route carries the project id: #/<pid>[/...] (host multi-project extension). */
 import { store, validPid, savePid, rerender } from "./store.js";
-import { fetchState, fetchBoard, loadDetail } from "./api.js";
+import { fetchState, fetchBoard, loadDetail, restartLiveUpdates } from "./api.js";
 
 export function hashFor(name, id) {
   const base = "#/" + encodeURIComponent(store.pid);
@@ -44,6 +44,7 @@ export function switchProject(np) {
   store.pid = np; savePid(np);
   store.state = null; store.board = null; store.detailData = null; store.detailErr = null;
   navigate(hashFor("board"));
+  restartLiveUpdates();
   fetchState(); fetchBoard();
 }
 
@@ -53,6 +54,7 @@ export function applyRoute() {
   let changed = next.name !== store.route.name || next.id !== store.route.id;
   if (store.pid !== pidBefore) {
     store.state = null; store.board = null; store.detailData = null; store.detailErr = null;
+    restartLiveUpdates();
     fetchState(); fetchBoard();
     changed = true;
   }

@@ -6,7 +6,7 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, pollNow, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue } from "./api.js";
 import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
@@ -75,7 +75,7 @@ document.addEventListener("click", (e) => {
   if (act) {
     const a = act.getAttribute("data-act");
     if (a === "poll") pollNow(act);
-    else if (a === "auto") { store.auto = !store.auto; rerender(); toast(store.auto ? "Auto-refresh on" : "Auto-refresh paused", "ok"); }
+    else if (a === "auto") { setAutoRefresh(!store.auto); toast(store.auto ? "Auto-refresh on" : "Auto-refresh paused", "ok"); }
     else if (a === "theme") toggleTheme();
     return;
   }
@@ -127,6 +127,7 @@ applyRoute();
 // state so a restored (different) project paints immediately instead of on next poll.
 fetchState();
 fetchBoard();
+startLiveUpdates();
 setInterval(() => { if (store.auto) { fetchState(); fetchBoard(); refreshOpenDetail(); } }, 2500);
 // Keep relative times and the connection line honest between fetches; lit only
 // touches text whose value actually changed, so this is cheap and non-destructive.

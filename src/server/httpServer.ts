@@ -39,10 +39,28 @@ export interface HttpServerOptions {
   host?: string;
 }
 
+interface SseClient {
+  res: http.ServerResponse;
+  heartbeat: NodeJS.Timeout | null;
+  closed: boolean;
+}
+
+interface SseHub {
+  clients: Set<SseClient>;
+  unsubscribe: (() => void) | null;
+  notifyTimer: NodeJS.Timeout | null;
+}
+
+const SSE_MAX_CLIENTS_PER_PROJECT = 16;
+const SSE_COALESCE_MS = 200;
+const SSE_HEARTBEAT_MS = 25000;
+
 export class SymphonyHttpServer {
   private server: http.Server;
   private port: number;
   private host: string;
+  /** One observer per project fans out coalesced snapshots to its browser clients. */
+  private sseHubs = new Map<Orchestrator, SseHub>();
 
   private opts: HttpServerOptions;
   constructor(opts: HttpServerOptions) {
@@ -68,6 +86,12 @@ export class SymphonyHttpServer {
   }
 
   close(): void {
+    for (const [orch, hub] of [...this.sseHubs]) {
+      for (const client of [...hub.clients]) {
+        this.closeSseClient(orch, hub, client);
+        client.res.end();
+      }
+    }
     this.server.close();
   }
 
@@ -154,6 +178,10 @@ export class SymphonyHttpServer {
   ): void {
     if (rest === "/state" && method === "GET") {
       return this.json(res, 200, orch.snapshot());
+    }
+    if (rest === "/events") {
+      if (method !== "GET") return this.methodNotAllowed(res);
+      return this.openEventStream(orch, req, res);
     }
     if (rest === "/refresh") {
       if (method !== "POST") return this.methodNotAllowed(res);
@@ -274,6 +302,71 @@ export class SymphonyHttpServer {
       return;
     }
     this.json(res, 404, { error: { code: "not_found", message: "no such route" } });
+  }
+
+  /** Open a bounded project-scoped SSE stream. One orchestrator observer serves all clients. */
+  private openEventStream(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const hub = this.sseHub(orch);
+    if (hub.clients.size >= SSE_MAX_CLIENTS_PER_PROJECT) {
+      this.json(res, 503, { error: { code: "events_at_capacity", message: "too many event-stream clients" } });
+      return;
+    }
+
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    res.flushHeaders();
+
+    const client: SseClient = { res, heartbeat: null, closed: false };
+    hub.clients.add(client);
+    const close = () => this.closeSseClient(orch, hub, client);
+    req.once("aborted", close);
+    res.once("close", close);
+    client.heartbeat = setInterval(() => this.writeSse(client, ": heartbeat\n\n"), SSE_HEARTBEAT_MS);
+    this.writeSseSnapshot(client, orch);
+  }
+
+  private sseHub(orch: Orchestrator): SseHub {
+    const existing = this.sseHubs.get(orch);
+    if (existing) return existing;
+    const hub: SseHub = { clients: new Set(), unsubscribe: null, notifyTimer: null };
+    hub.unsubscribe = orch.onChange(() => this.queueSseSnapshot(orch, hub));
+    this.sseHubs.set(orch, hub);
+    return hub;
+  }
+
+  private queueSseSnapshot(orch: Orchestrator, hub: SseHub): void {
+    if (hub.notifyTimer) return;
+    hub.notifyTimer = setTimeout(() => {
+      hub.notifyTimer = null;
+      for (const client of [...hub.clients]) this.writeSseSnapshot(client, orch);
+    }, SSE_COALESCE_MS);
+  }
+
+  private writeSseSnapshot(client: SseClient, orch: Orchestrator): void {
+    this.writeSse(client, `event: snapshot\ndata: ${JSON.stringify({ snapshot: orch.snapshot(), board_dirty: true })}\n\n`);
+  }
+
+  private writeSse(client: SseClient, payload: string): void {
+    if (client.closed || client.res.destroyed || client.res.writableEnded) return;
+    client.res.write(payload);
+  }
+
+  private closeSseClient(orch: Orchestrator, hub: SseHub, client: SseClient): void {
+    if (client.closed) return;
+    client.closed = true;
+    if (client.heartbeat) clearInterval(client.heartbeat);
+    client.heartbeat = null;
+    hub.clients.delete(client);
+    if (hub.clients.size !== 0) return;
+    if (hub.notifyTimer) clearTimeout(hub.notifyTimer);
+    hub.notifyTimer = null;
+    hub.unsubscribe?.();
+    hub.unsubscribe = null;
+    this.sseHubs.delete(orch);
   }
 
   /** Serve a console asset from disk (no caching: dev edits show on refresh; files are tiny). */

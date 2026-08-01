@@ -2,11 +2,81 @@
 import { store, apiBase, rerender } from "./store.js";
 import { toast } from "./toast.js";
 
+let eventSource = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+
 export function fetchState() {
   return fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
     .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = "live"; rerender(); })
+    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource ? "sse" : "poll"; rerender(); })
     .catch(() => { store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender(); });
+}
+
+/** One EventSource follows the active project; polling remains the fallback path. */
+export function startLiveUpdates() {
+  if (!store.auto || eventSource || reconnectTimer) return;
+  const source = new EventSource(apiBase() + "/events");
+  eventSource = source;
+  source.addEventListener("snapshot", (event) => {
+    if (eventSource !== source) return;
+    try {
+      const payload = JSON.parse(event.data);
+      if (!payload || !payload.snapshot) return;
+      store.state = payload.snapshot;
+      store.lastOk = Date.now();
+      store.conn = "sse";
+      rerender();
+      if (payload.board_dirty) fetchBoard();
+      refreshOpenDetail();
+    } catch {
+      // A malformed stream event is ignored; the next snapshot repairs the view.
+    }
+  });
+  source.onopen = () => {
+    if (eventSource !== source) return;
+    reconnectDelay = 1000;
+    store.conn = "sse";
+    rerender();
+  };
+  source.onerror = () => {
+    if (eventSource !== source) return;
+    source.close();
+    eventSource = null;
+    store.conn = "stale";
+    rerender();
+    void fetchState();
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      startLiveUpdates();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  };
+}
+
+export function stopLiveUpdates() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (eventSource) eventSource.close();
+  eventSource = null;
+  reconnectDelay = 1000;
+}
+
+export function restartLiveUpdates() {
+  stopLiveUpdates();
+  startLiveUpdates();
+}
+
+export function setAutoRefresh(enabled) {
+  store.auto = enabled;
+  if (enabled) {
+    startLiveUpdates();
+    void fetchState();
+    void fetchBoard();
+  } else {
+    stopLiveUpdates();
+  }
+  rerender();
 }
 
 export function fetchBoard() {

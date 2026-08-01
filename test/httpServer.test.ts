@@ -88,6 +88,43 @@ test("project-scoped state hits the right orchestrator; unknown project 404s", a
   });
 });
 
+test("GET /events streams an initial snapshot, pushes on change, and unsubscribes on abort", { timeout: 15000 }, async () => {
+  await withServer(async (base, mgr) => {
+    const orch = mgr.get("a")!.orchestrator;
+    const observers = () => (orch as any).observers.size as number;
+    const baseline = observers();
+
+    const ac = new AbortController();
+    const res = await fetch(`${base}/api/v1/projects/a/events`, { signal: ac.signal });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+
+    const reader = (res.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    const dec = new TextDecoder();
+    let buf = "";
+    /** Read until the stream has yielded n snapshot events (they may arrive coalesced). */
+    const readUntil = async (n: number): Promise<void> => {
+      const deadline = Date.now() + 5000;
+      while ((buf.match(/event: snapshot/g) ?? []).length < n) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${n} snapshot events; got: ${buf.slice(0, 120)}`);
+        const { value, done } = await reader.read();
+        if (done) throw new Error("event stream ended early");
+        buf += dec.decode(value, { stream: true });
+      }
+    };
+
+    await readUntil(1); // initial snapshot on connect
+    assert.equal(observers(), baseline + 1, "one hub observer registered for the project's clients");
+
+    (orch as any).notify(); // the call every state change ends in
+    await readUntil(2); // coalesced follow-up snapshot (~200 ms debounce)
+
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(observers(), baseline, "last client leaving disposes the orchestrator observer");
+  });
+});
+
 test("console shell references the static app; /ui/ serves modules, css, and vendored lit-html", async () => {
   await withServer(async (base) => {
     const shell = await fetch(`${base}/`);

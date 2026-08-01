@@ -158,6 +158,19 @@ async function waitFor(fn: () => boolean, timeoutMs = 8000): Promise<boolean> {
   return false;
 }
 
+test("onChange subscriptions are disposable; disposed observers stop firing", () => {
+  const { wfPath, workflow, config } = setup("done");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  let hits = 0;
+  const dispose = orch.onChange(() => { hits++; });
+  (orch as any).notify();
+  assert.equal(hits, 1);
+  dispose();
+  (orch as any).notify();
+  assert.equal(hits, 1, "disposed observer no longer fires");
+  orch.stop();
+});
+
 test("dispatches todo issue, applies self-tracking result, transitions to done", async () => {
   registerAgentFactory(makeFakeFactory("done"));
   const { issuesDir, wfPath, workflow, config } = setup("done");

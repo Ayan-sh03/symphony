@@ -77,7 +77,7 @@ header.bar {
   color: var(--muted); font-variant-numeric: tabular-nums; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
   box-shadow: 0 0 0 0 var(--ok); }
-.status.live .dot { animation: pulse 2.4s var(--ease) infinite; }
+.status.sse .dot, .status.poll .dot { animation: pulse 2.4s var(--ease) infinite; }
 .status.stale .dot { background: var(--warn); }
 .status.down .dot { background: var(--danger); }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--ok-soft); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
