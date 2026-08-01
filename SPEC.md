@@ -1398,6 +1398,9 @@ SHOULD return:
   - `output_tokens`
   - `total_tokens`
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
+  - `estimated_cost` (OPTIONAL, extension; see Appendix B.6) — `{amount, currency, partial,
+    unpriced}`, or `null` when no pricing is configured. Running rows carry the same field
+    (without `partial`/`unpriced`) inside their `tokens` object.
 
 RECOMMENDED snapshot error modes:
 
@@ -1517,7 +1520,8 @@ Minimum endpoints:
           "tokens": {
             "input_tokens": 1200,
             "output_tokens": 800,
-            "total_tokens": 2000
+            "total_tokens": 2000,
+            "estimated_cost": { "amount": 0.0104, "currency": "USD" }
           }
         }
       ],
@@ -1535,7 +1539,8 @@ Minimum endpoints:
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
-        "seconds_running": 1834.2
+        "seconds_running": 1834.2,
+        "estimated_cost": { "amount": 0.034, "currency": "USD", "partial": false, "unpriced": [] }
       }
     }
     ```
@@ -1568,8 +1573,15 @@ Minimum endpoints:
         "tokens": {
           "input_tokens": 1200,
           "output_tokens": 800,
-          "total_tokens": 2000
+          "total_tokens": 2000,
+          "estimated_cost": { "amount": 0.0104, "currency": "USD" }
         }
+      },
+      "tokens": {
+        "input_tokens": 1200,
+        "output_tokens": 800,
+        "total_tokens": 2000,
+        "estimated_cost": { "amount": 0.0104, "currency": "USD" }
       },
       "retry": null,
       "logs": {
@@ -2432,3 +2444,44 @@ cumulative for the whole stream. Cleanup (B.3) is narrowed once more: an impleme
 MUST NOT remove a stream's workspace while another issue still belongs to that stream —
 including when one member is deleted — and when stream membership cannot be determined it
 MUST preserve the workspace, on the same reasoning as the dirty-worktree rule.
+
+### B.6 Cost Estimation (OPTIONAL)
+
+Token counts (§4.1.6, §13.3) become money once rates are known. An implementation MAY
+accept an `agent.pricing` config block and report an estimated cost alongside them.
+
+**Config.** `agent.pricing` is a map of rates per million tokens:
+
+```yaml
+agent:
+  pricing:
+    input_per_mtok: 1.25        # applies to every agent kind
+    output_per_mtok: 10
+    currency: USD               # OPTIONAL, default USD
+    opencode:                   # per-kind override, keyed by agent kind
+      input_per_mtok: 3
+      output_per_mtok: 15
+```
+
+Both forms MAY be combined: an agent kind uses its own entry when it has one, and the flat
+rates otherwise. Absent `agent.pricing`, every reported cost is `null` and token counts are
+unaffected — this extension MUST NOT change what is counted.
+
+**Rules.**
+
+- Cost MUST be derived at read time from the current config and MUST NOT be stored. Rates
+  change; a stored figure would silently disagree with the config that explains it. A
+  consequence to accept, not work around: editing rates reprices runs that already finished.
+- Tokens MUST be attributed to the agent kind that spent them and priced at that kind's
+  rates. An aggregate MUST NOT be computed as (project total × one kind's rate), which is
+  wrong for any project whose issues select different backends (§10, per-issue `agent`).
+- An entry that sets one rate but not the other MUST be rejected, as MUST a negative rate.
+  Rates are not integers.
+- All entries MUST agree on a currency; summing across currencies is meaningless and an
+  implementation MUST reject a config that mixes them.
+- When some kind spent tokens with no rates configured, the aggregate is a lower bound and
+  MUST say so (`partial`, with `unpriced` naming those kinds) rather than silently omitting
+  them.
+- The figure is an **estimate**. Backends report one input-token count with cached-input
+  tokens folded in, and providers bill those at a discount, so the estimate runs high on
+  cache-heavy runs. Cache tiers are deliberately not modelled.

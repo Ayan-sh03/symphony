@@ -120,6 +120,25 @@ onUpdate({
 });
 ```
 
+These counts are also what cost estimation runs on (SPEC Appendix B.6). Operators price
+tokens per agent kind, so a backend that reports usage gets a cost figure on the board for
+free — under **its own** `agent.pricing` entry, keyed by the `kind` you registered:
+
+```yaml
+agent:
+  pricing:
+    my-backend:
+      input_per_mtok: 3
+      output_per_mtok: 15
+```
+
+Two things follow for a backend author. Report `input_tokens` and `output_tokens`
+separately — they are priced at different rates, and a backend that only fills
+`total_tokens` will show tokens but a cost of zero. And report them even for turns that
+fail; the counts are archived when the run ends, so an abandoned run still shows what it
+burned. Nothing else is required: no pricing knowledge belongs in a backend, and a backend
+that reports no usage simply stays unpriced (the board flags it rather than hiding it).
+
 ---
 
 ## 3. Files to change

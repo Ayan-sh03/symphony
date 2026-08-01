@@ -65,7 +65,52 @@ function makeRecordingFactory(kind: string, ran: Record<string, string>): AgentF
   };
 }
 
-function setup(behavior: "done" | "fail") {
+/**
+ * Fake backend that reports token usage the way real ones do — absolute cumulative
+ * totals — before finishing the work. Used to exercise cost estimation.
+ */
+function makeUsageFactory(behavior: string, input: number, output: number, holdMs = 0): AgentFactory {
+  return {
+    kind: `fake-${behavior}`,
+    create(opts: AgentSessionOptions): AgentSession {
+      const thread = "t1";
+      return {
+        get threadId() { return thread; },
+        get pid() { return "0"; },
+        async start() { return { threadId: thread }; },
+        async runTurn() {
+          opts.onUpdate({ event: "turn_started", timestamp: new Date().toISOString(), thread_id: thread, turn_id: "turn1" });
+          opts.onUpdate({
+            event: "notification",
+            timestamp: new Date().toISOString(),
+            thread_id: thread,
+            turn_id: "turn1",
+            kind: "token_usage",
+            absolute: true,
+            usage: { input_tokens: input, output_tokens: output, total_tokens: input + output },
+          });
+          // Optionally stay alive after reporting, so a test can observe the live row.
+          if (holdMs) await new Promise((r) => setTimeout(r, holdMs));
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: `spent ${input + output}` }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+}
+
+interface SetupOptions {
+  /** Extra YAML appended under the `agent:` block (indented two spaces). */
+  agentExtra?: string;
+  /** Additional issue records beyond T-1. */
+  extraIssues?: Record<string, unknown>[];
+}
+
+function setup(behavior: string, opts: SetupOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-orch-"));
   const issuesDir = path.join(dir, "issues");
   fs.mkdirSync(issuesDir);
@@ -73,6 +118,9 @@ function setup(behavior: "done" | "fail") {
     path.join(issuesDir, "T-1.json"),
     JSON.stringify({ id: "T-1", identifier: "T-1", title: "task", description: "do it", state: "todo", dispatchable: true }),
   );
+  for (const issue of opts.extraIssues ?? []) {
+    fs.writeFileSync(path.join(issuesDir, `${issue.id}.json`), JSON.stringify(issue));
+  }
   const wfPath = path.join(dir, "WORKFLOW.md");
   const src = `---
 tracker:
@@ -88,7 +136,7 @@ workspace:
 agent:
   kind: fake-${behavior}
   max_turns: 2
-  max_retry_backoff_ms: 2000
+  max_retry_backoff_ms: 2000${opts.agentExtra ?? ""}
 ---
 Work on {{ issue.identifier }}: {{ issue.title }}{% if attempt %} (attempt {{ attempt }}){% endif %}`;
   fs.writeFileSync(wfPath, src);
@@ -1048,6 +1096,142 @@ Work on {{ issue.identifier }}`;
     assert.equal(read("R-1-a").delivery.branch, "issue/R-1");
     assert.deepEqual(read("R-1-a").delivery.files_changed.sort(), ["R-1-a.txt", "R-1.txt"]);
     assert.equal(read("R-1-a").delivery.needs_attention, false, "the sibling's run must not contaminate the delivery");
+  } finally {
+    orch.stop();
+  }
+});
+
+// ---- cost estimation (extension, PLAN M5) ----
+
+const PRICING = `
+  pricing:
+    input_per_mtok: 2
+    output_per_mtok: 10`;
+
+test("board totals carry the cost of the tokens spent", async () => {
+  // 1M input @ $2 + 0.5M output @ $10 = $7.00
+  registerAgentFactory(makeUsageFactory("usage-a", 1_000_000, 500_000));
+  const { wfPath, workflow, config } = setup("usage-a", { agentExtra: PRICING });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const spent = await waitFor(() => orch.snapshot().codex_totals.total_tokens === 1_500_000);
+    assert.ok(spent, "totals should accumulate the reported usage");
+    const cost = orch.snapshot().codex_totals.estimated_cost!;
+    assert.equal(cost.amount, 7);
+    assert.equal(cost.currency, "USD");
+    assert.equal(cost.partial, false);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("a live run row carries its own cost", async () => {
+  registerAgentFactory(makeUsageFactory("usage-slow", 1_000_000, 500_000, 1500));
+  const { wfPath, workflow, config } = setup("usage-slow", { agentExtra: PRICING });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const live = await waitFor(() => {
+      const rows = orch.snapshot().running as { tokens: { total_tokens: number } }[];
+      return rows.length === 1 && rows[0].tokens.total_tokens === 1_500_000;
+    });
+    assert.ok(live, "should observe the running row after it reports usage");
+    const row = (orch.snapshot().running as { tokens: { estimated_cost: { amount: number } | null } }[])[0];
+    assert.equal(row.tokens.estimated_cost!.amount, 7);
+    const detail = orch.issueDetail("T-1")!;
+    assert.equal(detail.tokens!.estimated_cost!.amount, 7, "the detail view agrees while running");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("a finished issue still reports what it spent", async () => {
+  registerAgentFactory(makeUsageFactory("usage-a", 1_000_000, 500_000));
+  const { wfPath, workflow, config } = setup("usage-a", { agentExtra: PRICING });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const settled = await waitFor(() => orch.issueDetail("T-1")?.status === "completed");
+    assert.ok(settled, "issue should settle to completed");
+    const detail = orch.issueDetail("T-1")!;
+    assert.equal(detail.running, null, "the live session is gone");
+    assert.equal(detail.agent, "fake-usage-a", "the retained log names the backend that ran it");
+    assert.equal(detail.tokens!.total_tokens, 1_500_000);
+    assert.equal(detail.tokens!.estimated_cost!.amount, 7);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("without pricing the counts survive and every cost is null", async () => {
+  registerAgentFactory(makeUsageFactory("usage-a", 1_000_000, 500_000));
+  const { wfPath, workflow, config } = setup("usage-a");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const spent = await waitFor(() => orch.snapshot().codex_totals.total_tokens === 1_500_000);
+    assert.ok(spent, "tokens are still counted when unpriced");
+    assert.equal(orch.snapshot().codex_totals.estimated_cost, null);
+    const settled = await waitFor(() => orch.issueDetail("T-1")?.status === "completed");
+    assert.ok(settled);
+    assert.equal(orch.issueDetail("T-1")!.tokens!.estimated_cost, null);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("each backend's tokens are priced at that backend's own rate", async () => {
+  // fake-usage-a spends 1M input, fake-usage-b spends 2M input. Priced at $2 and $20
+  // per Mtok: $2 + $40 = $42. Pricing the 3M flat at either rate would not give that.
+  registerAgentFactory(makeUsageFactory("usage-a", 1_000_000, 0));
+  registerAgentFactory(makeUsageFactory("usage-b", 2_000_000, 0));
+  const { wfPath, workflow, config } = setup("usage-a", {
+    agentExtra: `
+  pricing:
+    fake-usage-a:
+      input_per_mtok: 2
+      output_per_mtok: 0
+    fake-usage-b:
+      input_per_mtok: 20
+      output_per_mtok: 0`,
+    extraIssues: [
+      { id: "T-2", identifier: "T-2", title: "other", description: "do it", state: "todo", dispatchable: true, agent: "fake-usage-b" },
+    ],
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const spent = await waitFor(() => orch.snapshot().codex_totals.total_tokens === 3_000_000);
+    assert.ok(spent, "both backends should report usage");
+    assert.equal(orch.snapshot().codex_totals.estimated_cost!.amount, 42);
+  } finally {
+    orch.stop();
+  }
+});
+
+test("an unpriced backend makes the total a flagged lower bound", async () => {
+  registerAgentFactory(makeUsageFactory("usage-a", 1_000_000, 0));
+  registerAgentFactory(makeUsageFactory("usage-b", 2_000_000, 0));
+  const { wfPath, workflow, config } = setup("usage-a", {
+    agentExtra: `
+  pricing:
+    fake-usage-a:
+      input_per_mtok: 2
+      output_per_mtok: 0`,
+    extraIssues: [
+      { id: "T-2", identifier: "T-2", title: "other", description: "do it", state: "todo", dispatchable: true, agent: "fake-usage-b" },
+    ],
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const spent = await waitFor(() => orch.snapshot().codex_totals.total_tokens === 3_000_000);
+    assert.ok(spent, "both backends should report usage");
+    const cost = orch.snapshot().codex_totals.estimated_cost!;
+    assert.equal(cost.amount, 2, "only the priced backend contributes");
+    assert.equal(cost.partial, true);
+    assert.deepEqual(cost.unpriced, ["fake-usage-b"]);
   } finally {
     orch.stop();
   }

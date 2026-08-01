@@ -5,7 +5,7 @@ import { html, nothing } from "../vendor/lit-html/lit-html.js";
 import { store } from "../store.js";
 import { hashFor } from "../router.js";
 import { pageHead } from "./page.js";
-import { ago, dur, until, nfmt, badge, eventKind, logKind, logLabel, shortTime } from "../format.js";
+import { ago, dur, until, nfmt, money, badge, eventKind, logKind, logLabel, shortTime } from "../format.js";
 
 function fact(label, val) {
   return html`<span class="fact"><b>${label}</b>${val}</span>`;
@@ -119,6 +119,10 @@ export function detailPage(d) {
   const statusKind = d.status === "running" || d.status === "queued" ? "active"
     : d.status === "completed" || d.status === "delivered" ? "ok" : "warn";
 
+  // Tokens outlive the run: prefer the top-level block, which a finished issue still
+  // carries, and fall back to the live session's for older payloads.
+  const tok = d.tokens || (run && run.tokens) || null;
+
   const rows = [["Issue id", mono(d.issue_id)]];
   const trackerState = run ? run.state : d.state;
   rows.push(["Tracker state", trackerState ? badge(trackerState, run ? "active" : "") : "—"]);
@@ -127,8 +131,11 @@ export function detailPage(d) {
     rows.push(["Session", mono(run.session_id || "—")]);
     rows.push(["Last event", run.last_event ? badge(run.last_event, eventKind(run.last_event)) : "—"]);
     rows.push(["Last update", ago(run.last_event_at)]);
-    rows.push(["Tokens", mono(nfmt(run.tokens && run.tokens.input_tokens) + " in / " + nfmt(run.tokens && run.tokens.output_tokens) + " out")]);
     if (run.last_message) rows.push(["Message", run.last_message]);
+  }
+  if (tok) {
+    rows.push(["Tokens", mono(nfmt(tok.input_tokens) + " in / " + nfmt(tok.output_tokens) + " out")]);
+    rows.push(["Est. cost", mono(money(tok.estimated_cost))]);
   }
   if (ret) {
     rows.push(["Retry attempt", mono(ret.attempt)]);
@@ -142,7 +149,9 @@ export function detailPage(d) {
     <div class="page"><div class="facts">
       ${badge(d.status, statusKind)}
       ${d.agent ? fact("agent", mono(d.agent)) : nothing}
-      ${run ? html`${fact("turns", mono(run.turn_count))}${fact("tokens", mono(nfmt(run.tokens && run.tokens.total_tokens)))}${fact("elapsed", mono(dur(run.started_at)))}` : d.ended_at ? fact("ended", ago(d.ended_at)) : nothing}
+      ${run ? html`${fact("turns", mono(run.turn_count))}${fact("elapsed", mono(dur(run.started_at)))}` : nothing}
+      ${tok ? html`${fact("tokens", mono(nfmt(tok.total_tokens)))}${fact("cost", mono(money(tok.estimated_cost)))}` : nothing}
+      ${!run && d.ended_at ? fact("ended", ago(d.ended_at)) : nothing}
     </div>
     ${issueActions(d)}
     <div class="detail-grid"><div>${logView(d.recent_events || [])}</div>
