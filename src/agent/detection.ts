@@ -8,7 +8,8 @@
  * - Only the executable token of a command string is ever touched. The rest
  *   (` app-server`, ` run --flag`) is never executed and never handed to a shell,
  *   so an operator's config fragment cannot become a command injection here.
- * - PATH resolution alone decides `installed`/`usable`. The version probe is
+ * - Resolution alone decides `installed`/`usable` — the host PATH, and on POSIX the
+ *   login shell's own lookup, because that is the shell that runs it. The version probe is
  *   advisory enrichment: a `.cmd` shim that `execFile` refuses to run, or a slow
  *   binary that blows the timeout, must not make a working backend look broken.
  */
@@ -30,17 +31,62 @@ export function commandExecutableToken(command: string): string | null {
   const quote = s[0];
   if (quote === '"' || quote === "'") {
     const end = s.indexOf(quote, 1);
-    const inner = end > 1 ? s.slice(1, end) : s.slice(1);
-    return inner.trim() === "" ? null : inner;
+    // An unterminated quote is a malformed command, not an executable named after
+    // the whole line. Report nothing rather than go looking for a path that has a
+    // space and a flag in it.
+    if (end < 0) return null;
+    const inner = s.slice(1, end).trim();
+    return inner === "" ? null : inner;
   }
   const m = s.match(/^\S+/);
   return m ? m[0] : null;
 }
 
 /**
+ * Ask the shell that will actually run the command whether it can find it. On POSIX
+ * `spawnShell` launches `bash -lc`, and a *login* shell sources profile files that
+ * add to PATH (nvm, asdf, `~/.local/bin`) — so a backend can be perfectly runnable
+ * while absent from this process's own PATH, which is all `resolveExecutable` sees.
+ * Consulted only when the plain lookup misses, so the common case stays spawn-free.
+ *
+ * The executable travels as an argv element (`$1`), never as script text, so this
+ * keeps the file header's promise: an operator's command cannot become shell syntax.
+ * Windows needs none of this — `spawnShell` there inherits our PATH via `shell: true`.
+ */
+export function resolveViaLoginShell(exe: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  if (process.platform === "win32") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      execFile("/bin/bash", ["-lc", 'command -v -- "$1"', "_", exe], { timeout: PROBE_TIMEOUT_MS, env }, (err, stdout) => {
+        if (err) return resolve(null);
+        const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l !== "");
+        // `command -v` answers with a bare name for builtins/aliases; only a real path counts.
+        resolve(line && path.isAbsolute(line) ? line : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Whether this host would actually execute the file at `p` (POSIX needs the x bit). */
+async function isExecutableFile(p: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(p);
+    if (!stat.isFile()) return false;
+    if (process.platform === "win32") return true; // no x bit; PATHEXT already decided
+    await fs.access(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve an executable against the host PATH (PATHEXT on Windows), or against the
- * filesystem directly when the token already carries a path separator. Returns the
- * absolute path of the first match, or null.
+ * filesystem directly when the token already carries a path separator. Falls back to
+ * the login shell's own lookup on POSIX. Returns the absolute path of the first
+ * match, or null.
  */
 export async function resolveExecutable(exe: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   const hasSeparator = exe.includes("/") || exe.includes("\\");
@@ -57,15 +103,11 @@ export async function resolveExecutable(exe: string, env: NodeJS.ProcessEnv = pr
     // .cmd that Windows will never execute. Reporting that one is misleading.
     const candidates = path.extname(base) === "" ? [...exts.map((ext) => base + ext.toLowerCase()), base] : [base];
     for (const candidate of candidates) {
-      try {
-        const stat = await fs.stat(candidate);
-        if (stat.isFile()) return candidate;
-      } catch {
-        // Not there — try the next candidate.
-      }
+      if (await isExecutableFile(candidate)) return candidate;
     }
   }
-  return null;
+  // A path we were handed is a path — the login shell would not resolve it differently.
+  return hasSeparator ? null : resolveViaLoginShell(exe, env);
 }
 
 /**
@@ -136,6 +178,11 @@ export interface AgentAvailability {
  * when more than one backend could serve as the replacement we refuse to guess —
  * silently running an issue on a different agent than the workflow asked for is
  * worse than parking and saying so.
+ *
+ * `effective_default` is the single answer to "what would a task without its own
+ * agent run on" — `Orchestrator.effectiveDefaultAgent()` returns exactly this, so
+ * the console banner, the dispatch gate and the process we actually spawn can never
+ * disagree about which backend is in play.
  */
 export function resolveAgentAvailability(
   agents: AgentDetection[],
@@ -150,7 +197,7 @@ export function resolveAgentAvailability(
     auto_default: null,
     blocked: false,
     reason: null,
-    checked_at: agents[0]?.checked_at ?? null,
+    checked_at: agents.reduce<string | null>((max, a) => (max === null || a.checked_at > max ? a.checked_at : max), null),
     stale: agents.length === 0,
   };
   // Nothing probed yet: report the configured intent and let the run decide.
@@ -160,6 +207,14 @@ export function resolveAgentAvailability(
   const usable = agents.filter((a) => a.usable);
 
   if (runtimeOverride && byKind.get(runtimeOverride)?.usable) return base;
+  // An override that cannot run stays the effective default rather than quietly
+  // reverting to WORKFLOW.md: the operator chose it, dispatch honors it, and the
+  // only honest thing left is to block and say the choice is unrunnable. Falling
+  // back here would report one backend while spawning another.
+  if (runtimeOverride) {
+    const why = byKind.get(runtimeOverride)?.reason ?? `${runtimeOverride} is not installed`;
+    return { ...base, blocked: true, reason: `the runtime default ${runtimeOverride} cannot run: ${why}` };
+  }
   if (byKind.get(configuredDefault)?.usable) return { ...base, effective_default: configuredDefault, runtime_override: runtimeOverride };
 
   const missing = byKind.get(configuredDefault);

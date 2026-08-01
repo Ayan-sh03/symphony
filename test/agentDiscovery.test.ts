@@ -35,6 +35,9 @@ test("agent command parsing extracts only the executable token", () => {
   assert.equal(commandExecutableToken('"C:/Program Files/Codex/codex.exe" app-server'), "C:/Program Files/Codex/codex.exe");
   assert.equal(commandExecutableToken("  'C:/Tools/opencode.exe' run --flag"), "C:/Tools/opencode.exe");
   assert.equal(commandExecutableToken(""), null);
+  // Malformed: an unterminated quote is not an executable called "codex app-server".
+  assert.equal(commandExecutableToken('"codex app-server'), null);
+  assert.equal(commandExecutableToken('""'), null);
 });
 
 function det(kind: string, usable: boolean): AgentDetection {
@@ -67,6 +70,25 @@ test("an operator's runtime override outranks discovery; an unprobed set decides
   assert.equal(stale.stale, true);
   assert.equal(stale.blocked, false);
   assert.equal(stale.effective_default, "codex");
+});
+
+test("an override the host cannot run blocks instead of quietly reverting to WORKFLOW.md", () => {
+  // The console lets an operator pick an uninstalled backend on purpose. Reporting
+  // the configured default here while dispatch honors the override is how a missing
+  // CLI reaches a spawn — the effective default must be the one we would run.
+  const av = resolveAgentAvailability([det("codex", true), det("opencode", false)], "codex", "opencode");
+  assert.equal(av.effective_default, "opencode");
+  assert.equal(av.blocked, true);
+  assert.equal(av.auto_default, null);
+  assert.match(av.reason ?? "", /runtime default opencode cannot run/);
+  assert.match(av.reason ?? "", /not found on PATH/);
+});
+
+test("checked_at reports the newest probe, not whichever backend happens to be first", () => {
+  const older = { ...det("codex", true), checked_at: "2026-08-01T00:00:00.000Z" };
+  const newer = { ...det("opencode", true), checked_at: "2026-08-02T00:00:00.000Z" };
+  assert.equal(resolveAgentAvailability([older, newer], "codex", null).checked_at, newer.checked_at);
+  assert.equal(resolveAgentAvailability([newer, older], "codex", null).checked_at, newer.checked_at);
 });
 
 test("detectAgentKinds reports registered backends using an injectable executable resolver", async () => {

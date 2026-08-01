@@ -324,6 +324,78 @@ Work on {{ issue.identifier }}`;
   }
 });
 
+test("a runtime default the host cannot run parks dispatch instead of spawning it", async () => {
+  const ran: Record<string, string> = {};
+  registerAgentFactory(makeRecordingFactory("park-ok", ran));
+  registerAgentFactory({
+    ...makeRecordingFactory("park-missing", ran),
+    detect: async () => ({
+      kind: "park-missing", registered: true, installed: false, command: "park-missing",
+      command_field: "park.command", usable: false, reason: "park-missing not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const { wfPath, workflow, config } = setupWith("park-ok", [todo("P-1")]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  // The console lets an operator select an uninstalled backend; nothing may reach a spawn.
+  orch.setDefaultAgent("park-missing");
+  await orch.start();
+  try {
+    const meta = orch.snapshot().meta as { default_agent: string; agents: { blocked: boolean; effective_default: string } };
+    assert.equal(meta.default_agent, "park-missing", "the reported default is the one dispatch would use");
+    assert.equal(meta.agents.effective_default, "park-missing", "availability and dispatch agree on the kind");
+    assert.equal(meta.agents.blocked, true);
+
+    await waitFor(() => false, 700); // a few poll intervals
+    assert.equal(ran["P-1"], undefined, "the missing backend is never constructed");
+    assert.equal(orch.snapshot().halted.length, 0, "a bad default parks the backlog rather than halting it");
+
+    // Point the default back at something real and the parked issue simply runs.
+    orch.setDefaultAgent("park-ok");
+    assert.ok(await waitFor(() => ran["P-1"] === "park-ok"), "dispatch resumes once the default is runnable");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("installing a backend clears the halts discovery caused", async () => {
+  const ran: Record<string, string> = {};
+  let installed = false;
+  registerAgentFactory(makeRecordingFactory("heal-ok", ran));
+  registerAgentFactory({
+    ...makeRecordingFactory("heal-late", ran),
+    detect: async () => ({
+      kind: "heal-late", registered: true, installed, command: "heal-late",
+      command_field: "heal.command", usable: installed,
+      reason: installed ? undefined : "heal-late not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const { wfPath, workflow, config } = setupWith("heal-ok", [todo("H-1", { agent: "heal-late" })]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  const isHalted = () => orch.snapshot().halted.some((h) => (h as { issue_id: string }).issue_id === "H-1");
+  try {
+    assert.ok(await waitFor(isHalted), "the pinned issue halts while its backend is missing");
+
+    // The halt described this machine, not the issue — installing the CLI must undo it
+    // without an operator touching every halted issue.
+    installed = true;
+    let cleared = false;
+    for (let i = 0; i < 50 && !cleared; i += 1) {
+      await orch.refreshAgentDetection();
+      cleared = !isHalted();
+      if (!cleared) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(cleared, "the agent_unavailable halt is released once the backend appears");
+    assert.ok(await waitFor(() => ran["H-1"] === "heal-late"), "and the issue dispatches on it");
+  } finally {
+    orch.stop();
+  }
+});
+
 test("runtime default-agent override changes the effective default", async () => {
   registerAgentFactory(makeRecordingFactory("rec-a", {}));
   registerAgentFactory(makeRecordingFactory("rec-b", {}));

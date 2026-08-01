@@ -291,8 +291,8 @@ export class SymphonyHttpServer {
     if (rest === "/agents" || rest === "/agents/refresh") {
       const refresh = rest.endsWith("/refresh");
       if (method !== (refresh ? "POST" : "GET")) return this.methodNotAllowed(res);
-      void orch
-        .agentAvailability(refresh)
+      // A re-check notifies, so every open console learns what this one found.
+      void (refresh ? orch.refreshAgentDetection() : orch.agentAvailability())
         .then((view) => this.json(res, 200, view))
         .catch((err) => this.json(res, 500, { error: { code: "detect_failed", message: String(err) } }));
       return;

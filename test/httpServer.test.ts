@@ -102,6 +102,27 @@ test("GET /agents reports registered agent availability", async () => {
       a.kind === "opencode" && a.registered === true && a.command === "opencode"));
   });
 });
+
+test("POST /agents/refresh re-probes and notifies; the wrong method is rejected", async () => {
+  await withServer(async (base, mgr) => {
+    let notified = 0;
+    const dispose = mgr.get("a")!.orchestrator.onChange(() => { notified += 1; });
+    try {
+      const res = await fetch(`${base}/api/v1/projects/a/agents/refresh`, { method: "POST" });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { agents: unknown[]; checked_at: string | null };
+      assert.ok(Array.isArray(body.agents) && body.agents.length > 0);
+      assert.ok(notified > 0, "a re-check pushes the new picture to every open console");
+
+      // GET is the read; refresh is a POST and nothing else.
+      assert.equal((await fetch(`${base}/api/v1/projects/a/agents/refresh`)).status, 405);
+      assert.equal((await fetch(`${base}/api/v1/projects/a/agents`, { method: "POST" })).status, 405);
+    } finally {
+      dispose();
+    }
+  });
+});
+
 test("GET /events streams an initial snapshot, pushes on change, and unsubscribes on abort", { timeout: 15000 }, async () => {
   await withServer(async (base, mgr) => {
     const orch = mgr.get("a")!.orchestrator;
