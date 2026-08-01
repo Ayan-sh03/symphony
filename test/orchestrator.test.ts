@@ -269,6 +269,133 @@ Work on {{ issue.identifier }}`;
   }
 });
 
+test("an issue pinned to an uninstalled backend halts alone; the rest keep dispatching", async () => {
+  const ran: Record<string, string> = {};
+  registerAgentFactory(makeRecordingFactory("gate-ok", ran));
+  // Registered and selectable, but discovery says this host cannot run it.
+  registerAgentFactory({
+    ...makeRecordingFactory("gate-missing", ran),
+    detect: async () => ({
+      kind: "gate-missing", registered: true, installed: false, command: "gate-missing",
+      command_field: "gate.command", usable: false, reason: "gate-missing not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sym-gate-"));
+  const issuesDir = path.join(dir, "issues");
+  fs.mkdirSync(issuesDir);
+  fs.writeFileSync(path.join(issuesDir, "G-1.json"),
+    JSON.stringify({ id: "G-1", identifier: "G-1", title: "runnable", description: "x", state: "todo", dispatchable: true }));
+  fs.writeFileSync(path.join(issuesDir, "G-2.json"),
+    JSON.stringify({ id: "G-2", identifier: "G-2", title: "stranded", description: "x", state: "todo", dispatchable: true, agent: "gate-missing" }));
+  const wfPath = path.join(dir, "WORKFLOW.md");
+  const src = `---
+tracker:
+  kind: file
+  provider:
+    dir: ./issues
+  active_states: ["todo"]
+  terminal_states: ["done"]
+polling:
+  interval_ms: 200
+workspace:
+  root: ./ws
+agent:
+  kind: gate-ok
+  max_turns: 1
+---
+Work on {{ issue.identifier }}`;
+  fs.writeFileSync(wfPath, src);
+  const workflow = parseWorkflow(src);
+  const config = buildConfig(workflow, wfPath);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const halted = await waitFor(() => orch.snapshot().halted.some((h) => (h as { issue_id: string }).issue_id === "G-2"));
+    assert.ok(halted, "the pinned issue should halt rather than spawn a missing CLI");
+    const entry = orch.snapshot().halted.find((h) => (h as { issue_id: string }).issue_id === "G-2") as { reason: string };
+    assert.match(entry.reason, /agent_unavailable/);
+    assert.match(entry.reason, /not found on PATH/);
+    assert.ok(await waitFor(() => ran["G-1"] === "gate-ok"), "an unrelated issue still dispatches");
+    assert.equal(ran["G-2"], undefined, "the missing backend is never constructed");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("a runtime default the host cannot run parks dispatch instead of spawning it", async () => {
+  const ran: Record<string, string> = {};
+  registerAgentFactory(makeRecordingFactory("park-ok", ran));
+  registerAgentFactory({
+    ...makeRecordingFactory("park-missing", ran),
+    detect: async () => ({
+      kind: "park-missing", registered: true, installed: false, command: "park-missing",
+      command_field: "park.command", usable: false, reason: "park-missing not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const { wfPath, workflow, config } = setupWith("park-ok", [todo("P-1")]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  // The console lets an operator select an uninstalled backend; nothing may reach a spawn.
+  orch.setDefaultAgent("park-missing");
+  await orch.start();
+  try {
+    const meta = orch.snapshot().meta as { default_agent: string; agents: { blocked: boolean; effective_default: string } };
+    assert.equal(meta.default_agent, "park-missing", "the reported default is the one dispatch would use");
+    assert.equal(meta.agents.effective_default, "park-missing", "availability and dispatch agree on the kind");
+    assert.equal(meta.agents.blocked, true);
+
+    await waitFor(() => false, 700); // a few poll intervals
+    assert.equal(ran["P-1"], undefined, "the missing backend is never constructed");
+    assert.equal(orch.snapshot().halted.length, 0, "a bad default parks the backlog rather than halting it");
+
+    // Point the default back at something real and the parked issue simply runs.
+    orch.setDefaultAgent("park-ok");
+    assert.ok(await waitFor(() => ran["P-1"] === "park-ok"), "dispatch resumes once the default is runnable");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("installing a backend clears the halts discovery caused", async () => {
+  const ran: Record<string, string> = {};
+  let installed = false;
+  registerAgentFactory(makeRecordingFactory("heal-ok", ran));
+  registerAgentFactory({
+    ...makeRecordingFactory("heal-late", ran),
+    detect: async () => ({
+      kind: "heal-late", registered: true, installed, command: "heal-late",
+      command_field: "heal.command", usable: installed,
+      reason: installed ? undefined : "heal-late not found on PATH",
+      checked_at: new Date().toISOString(),
+    }),
+  });
+
+  const { wfPath, workflow, config } = setupWith("heal-ok", [todo("H-1", { agent: "heal-late" })]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  const isHalted = () => orch.snapshot().halted.some((h) => (h as { issue_id: string }).issue_id === "H-1");
+  try {
+    assert.ok(await waitFor(isHalted), "the pinned issue halts while its backend is missing");
+
+    // The halt described this machine, not the issue — installing the CLI must undo it
+    // without an operator touching every halted issue.
+    installed = true;
+    let cleared = false;
+    for (let i = 0; i < 50 && !cleared; i += 1) {
+      await orch.refreshAgentDetection();
+      cleared = !isHalted();
+      if (!cleared) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(cleared, "the agent_unavailable halt is released once the backend appears");
+    assert.ok(await waitFor(() => ran["H-1"] === "heal-late"), "and the issue dispatches on it");
+  } finally {
+    orch.stop();
+  }
+});
+
 test("runtime default-agent override changes the effective default", async () => {
   registerAgentFactory(makeRecordingFactory("rec-a", {}));
   registerAgentFactory(makeRecordingFactory("rec-b", {}));

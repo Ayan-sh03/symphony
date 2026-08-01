@@ -286,6 +286,17 @@ export class SymphonyHttpServer {
       void this.setDefaultAgent(orch, req, res);
       return;
     }
+    // Installed-agent discovery (extension). Must sit above the catch-all issue
+    // lookup below, which would otherwise read "agents" as an issue identifier.
+    if (rest === "/agents" || rest === "/agents/refresh") {
+      const refresh = rest.endsWith("/refresh");
+      if (method !== (refresh ? "POST" : "GET")) return this.methodNotAllowed(res);
+      // A re-check notifies, so every open console learns what this one found.
+      void (refresh ? orch.refreshAgentDetection() : orch.agentAvailability())
+        .then((view) => this.json(res, 200, view))
+        .catch((err) => this.json(res, 500, { error: { code: "detect_failed", message: String(err) } }));
+      return;
+    }
     const m = rest.match(/^\/([^/]+)$/);
     if (m) {
       if (method !== "GET") return this.methodNotAllowed(res);

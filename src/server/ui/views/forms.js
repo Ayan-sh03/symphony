@@ -1,12 +1,13 @@
 /** New-issue, edit-issue and add-project forms. Inputs are uncontrolled — lit binds
  * only `defaultValue`/`defaultSelected`, so a repaint can never clobber what the user
  * is typing (a dirtied field ignores its default). */
-import { html } from "../vendor/lit-html/lit-html.js";
+import { html, nothing } from "../vendor/lit-html/lit-html.js";
 import { store, apiBase, rerender } from "../store.js";
 import { hashFor, goBoard, navigate, switchProject } from "../router.js";
 import { fetchState, fetchBoard } from "../api.js";
 import { toast } from "../toast.js";
 import { pageHead } from "./page.js";
+import { availabilityOf } from "./agents.js";
 
 export function createPage() {
   const m = (store.state && store.state.meta) || {};
@@ -233,6 +234,20 @@ function submitFollowUp(e) {
       btn.classList.remove("busy"); btn.innerHTML = btn.dataset.label; });
 }
 
+/**
+ * What this machine can run, shown before the project exists (extension). The new
+ * project will name its own commands, so this is the host's answer for the current
+ * project — enough to tell a fresh checkout "Codex found" vs "no runnable agent".
+ */
+function hostAgentsHint() {
+  const av = availabilityOf((store.state && store.state.meta) || {});
+  if (!av) return nothing;
+  const installed = av.agents.filter((a) => a.usable).map((a) => a.kind);
+  return installed.length
+    ? html`<div class="notice"><b>${installed.join(", ")}</b> ${installed.length > 1 ? "are" : "is"} installed on this machine. A project that names a different command will be re-checked once it loads.</div>`
+    : html`<div class="notice err"><b>No runnable agent found on this machine.</b> Install a supported CLI (or fix its command) before starting work here.</div>`;
+}
+
 export function addProjectPage() {
   return html`${pageHead("Add project", "")}<div class="page"><form class="form page-form" id="addprojform" autocomplete="off" @submit=${submitAddProject}>
     <div class="field"><label for="f-wf">Workflow path <span class="req">*</span></label>
@@ -240,6 +255,7 @@ export function addProjectPage() {
       <span class="hint">Path to a WORKFLOW.md — or a project directory containing one — resolved where Symphony runs. Its issues + workspace stay isolated under that directory.</span></div>
     <div class="field"><label for="f-name">Name</label>
       <input class="input" id="f-name" name="name" placeholder="My App"><span class="hint">Optional display name; defaults to the folder name.</span></div>
+    ${hostAgentsHint()}
     <div class="field-err" id="ap-err" hidden></div>
     <div class="form-actions"><button type="button" class="btn" data-nav=${hashFor("board")}>Cancel</button>
       <button type="submit" class="btn primary">Add project</button></div>

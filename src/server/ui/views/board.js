@@ -5,6 +5,7 @@ import { live } from "../vendor/lit-html/directives/live.js";
 import { store } from "../store.js";
 import { hashFor } from "../router.js";
 import { ago, dur, until, humanSecs, nfmt, money, badge, stateBadge, eventKind } from "../format.js";
+import { agentNotice } from "./agents.js";
 
 // For links/selects inside clickable rows only: swallow the click so the row's
 // data-open navigation does not fire. Never put this on action buttons — all
@@ -176,6 +177,7 @@ export function boardBody(m) {
       <span>concurrency <b>${m.max_concurrent_agents}</b></span>
       <span>active states <code>${(m.active_states || []).join(", ") || "—"}</code></span>
     </div>
+    ${agentNotice(m)}
     <div class="metrics">
       ${metric("Running", running.length, "", running.length > 0)}
       ${metric("Retrying", retrying.length, "")}

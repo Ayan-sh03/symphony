@@ -9,6 +9,9 @@ import type { AgentUpdate, Issue } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { ToolSpec, TrackerAdapter } from "../tracker/types.ts";
+import type { AgentDetection, AgentDetectDeps } from "./detection.ts";
+
+export type { AgentDetection, AgentDetectDeps };
 
 /** Terminal outcome of one agent turn (SPEC §10.3 completion conditions). */
 export interface AgentTurnResult {
@@ -89,4 +92,11 @@ export interface AgentFactory {
    * return `[]` (never throw) when nothing is found. Newest-last ordering.
    */
   readTranscript?(query: TranscriptQuery): Promise<TranscriptEvent[]>;
+  /**
+   * Optional capability (extension): report whether this backend is actually
+   * runnable on this host. Advisory — a backend without it is assumed available,
+   * and its own startup failure remains the final authority. Must be cheap and
+   * side-effect free: no sessions, no tokens, no real app-server.
+   */
+  detect?(config: ServiceConfigValues, logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection>;
 }
