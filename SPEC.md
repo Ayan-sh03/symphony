@@ -2485,3 +2485,46 @@ unaffected — this extension MUST NOT change what is counted.
 - The figure is an **estimate**. Backends report one input-token count with cached-input
   tokens folded in, and providers bill those at a discount, so the estimate runs high on
   cache-heavy runs. Cache tiers are deliberately not modelled.
+
+### B.7 Per-Task Model Selection (OPTIONAL)
+
+An issue MAY name the model its run uses, overriding the agent backend's own default for
+that run only. An implementation MUST NOT become the source of truth for model inventory:
+the agent CLIs already know which models they can run and which credentials are configured,
+so an implementation asks them and renders the answer. A curated list of model ids in
+config is expressly not the mechanism — it goes stale the week a provider ships.
+
+**Issue field.** `model` (OPTIONAL, string). Absent or empty means the backend's own
+default, which MUST remain exactly today's behavior. The value is free text passed to the
+backend verbatim; an implementation MUST NOT reject one for being unrecognized. The CLI is
+the authority and reports a bad id better than the orchestrator can.
+
+**Discovery.** Enumeration is an agent-backend capability (§10), alongside transcript
+reading: a backend MAY report the models it can run, and one that cannot simply reports
+nothing. A backend that ignores a requested `model` is conformant — its run uses its own
+default.
+
+**Rules.**
+
+- Discovery MUST NOT sit on the dispatch path. A model listing is operator-facing
+  information; it MUST NOT delay, block, or fail a run, and a discovery failure MUST be a
+  warning and an empty list, never an orchestration error.
+- Discovery MUST be bounded by a timeout that also terminates any process it spawned. A
+  backend that never answers is the realistic failure, not one that returns an error.
+- Discovery MUST run with the same child environment dispatch uses (§15.3). A backend MAY
+  scope its listing to configured credentials, several of which arrive as environment
+  variables; probing with a different environment would advertise models the runs cannot
+  reach.
+- Results SHOULD be cached per backend with a TTL, with an explicit operator refresh. A
+  failed refresh MUST leave the previous listing standing rather than emptying it.
+- A reported default MUST be the model the backend would **actually** use for a run with no
+  override, resolved against the host's own configuration. It MUST NOT be a vendor's
+  flagship or newest model: a backend MAY flag one model as its product default while its
+  configuration names another, and reporting the former names a model dispatch does not
+  use. Where the effective default cannot be established, the implementation MUST omit the
+  flag rather than guess.
+- An empty listing MUST be distinguishable from "not yet probed". Neither MUST be presented
+  as evidence about the backend's models, and a populated listing MUST NOT be presented as
+  evidence that credentials work — a backend MAY list models while unauthenticated.
+- A `model` an implementation cannot find in the current listing MUST still be shown and
+  MUST still dispatch. Absence from a listing is not invalidity.
