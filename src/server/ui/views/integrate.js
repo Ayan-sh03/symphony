@@ -4,6 +4,7 @@ import { live } from "../vendor/lit-html/directives/live.js";
 import { store } from "../store.js";
 import { pageHead } from "./page.js";
 import { agentStatusList, agentNotice } from "./agents.js";
+import { modelStatusList } from "./models.js";
 
 function chips(list, active) {
   return list.map((k, i) => html`${i ? " " : ""}<span class="badge ${k === active ? "active" : ""}">${k === active ? html`<span class="bd"></span>` : nothing}${k}</span>`);
@@ -42,5 +43,6 @@ export function integratePage() {
       <div class="aside-card"><div class="field" style="margin:0"><label>Default agent</label>${defSelect}</div></div>
       <div class="aside-card"><div class="log-head" style="margin-top:0">Agents on this machine</div>${agentStatusList(m)}
       <div class="log-head">Registered trackers</div><div>${chips(trackers, m.tracker_kind)}</div></div>
+      <div class="aside-card"><div class="log-head" style="margin-top:0">Models ${defAgent || "the backend"} names</div>${modelStatusList(m)}</div>
     </div></div></div>`;
 }

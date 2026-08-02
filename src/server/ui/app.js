@@ -6,7 +6,7 @@
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue, refreshAgents } from "./api.js";
+import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue, refreshAgents, refreshModels, ensureModels } from "./api.js";
 import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
@@ -15,6 +15,7 @@ import { boardBody } from "./views/board.js";
 import { detailPage } from "./views/detail.js";
 import { createPage, editPage, followUpPage, addProjectPage } from "./views/forms.js";
 import { integratePage } from "./views/integrate.js";
+import { CUSTOM_MODEL } from "./views/models.js";
 import { pageHead, notFoundPage } from "./views/page.js";
 
 // ---- theme ----
@@ -98,6 +99,10 @@ document.addEventListener("click", (e) => {
   }
   const ra = e.target.closest("[data-refresh-agents]");
   if (ra) { refreshAgents(ra); return; }
+  const rm = e.target.closest("[data-refresh-models]");
+  if (rm) { refreshModels(rm.getAttribute("data-refresh-models"), rm); return; }
+  // Leaving the model field's free-text mode restores the discovered list.
+  if (e.target.closest("[data-model-list]")) { store.modelCustom = false; rerender(); return; }
   const cpy = e.target.closest("[data-copy]");
   if (cpy) { copyText(cpy.getAttribute("data-copy"), cpy.getAttribute("data-copy-what") || "Value"); return; }
   const sb = e.target.closest("[data-state-id]");
@@ -110,6 +115,28 @@ document.addEventListener("change", (e) => {
   if (da) { setDefaultAgent(da.value, da); return; }
   const ia = e.target.closest("[data-issue-agent]");
   if (ia) { setIssueAgent(ia.getAttribute("data-issue-agent"), ia.value, ia); return; }
+  // A form's agent choice decides whose models the model field lists — the two
+  // backends do not share a model namespace.
+  const fa = e.target.closest("[data-form-agent]");
+  if (fa) {
+    store.formAgent = fa.value || null;
+    store.modelCustom = false; store.modelDraft = null;
+    ensureModels(store.formAgent || ((store.state && store.state.meta && store.state.meta.default_agent) || ""));
+    rerender();
+    return;
+  }
+  const ms = e.target.closest("[data-model-select]");
+  if (ms) {
+    // "Other model…" swaps the select for a text box; anything else is remembered so
+    // that switching to free text starts from what was picked.
+    if (ms.value === CUSTOM_MODEL) { store.modelCustom = true; rerender(); }
+    else store.modelDraft = ms.value;
+    return;
+  }
+  // A hand-typed id is remembered too, so returning to the list keeps it selected
+  // (as an out-of-list entry) instead of quietly reverting to the default.
+  const mt = e.target.closest("[data-model-text]");
+  if (mt) { store.modelDraft = mt.value.trim(); return; }
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;

@@ -6,6 +6,7 @@ import { store } from "../store.js";
 import { hashFor } from "../router.js";
 import { ago, dur, until, humanSecs, nfmt, money, badge, stateBadge, eventKind } from "../format.js";
 import { agentNotice } from "./agents.js";
+import { modelBadge, modelMixTile } from "./models.js";
 
 // For links/selects inside clickable rows only: swallow the click so the row's
 // data-open navigation does not fire. Never put this on action buttons — all
@@ -80,6 +81,7 @@ function boardRow(i, b, m) {
     ${i.priority != null ? html`<span class="prio">P${i.priority}</span>` : nothing}
     ${div}
     ${agentControl(i, m)}
+    ${modelBadge(i.model)}
     <div class="actions">${actions}</div></div>`;
 }
 
@@ -184,6 +186,7 @@ export function boardBody(m) {
       ${metric("Total tokens", nfmt(t.total_tokens), "")}
       ${metric("Est. cost", money(t.estimated_cost), "", false, costHint(t.estimated_cost))}
       ${metric("Agent runtime", humanSecs(t.seconds_running), "")}
+      ${modelMixTile()}
     </div>
     ${boardSection(m)}
     ${section("Running sessions", running.length, running.length ? runningTable(running) : emptyRunning(m))}

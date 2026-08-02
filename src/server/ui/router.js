@@ -42,7 +42,8 @@ export function goBoard() { navigate(hashFor("board")); }
 export function switchProject(np) {
   if (!validPid(np) || np === store.pid) return;
   store.pid = np; savePid(np);
-  store.state = null; store.board = null; store.detailData = null; store.detailErr = null;
+  // Model listings are per project (each resolves its own backend and config).
+  store.state = null; store.board = null; store.detailData = null; store.detailErr = null; store.models = {};
   navigate(hashFor("board"));
   restartLiveUpdates();
   fetchState(); fetchBoard();
@@ -53,7 +54,8 @@ export function applyRoute() {
   const next = parseHash();
   let changed = next.name !== store.route.name || next.id !== store.route.id;
   if (store.pid !== pidBefore) {
-    store.state = null; store.board = null; store.detailData = null; store.detailErr = null;
+    // Model listings are per project (each resolves its own backend and config).
+  store.state = null; store.board = null; store.detailData = null; store.detailErr = null; store.models = {};
     restartLiveUpdates();
     fetchState(); fetchBoard();
     changed = true;
@@ -64,7 +66,11 @@ export function applyRoute() {
   if (store.route.name === "detail" || store.route.name === "edit" || store.route.name === "followup") {
     if (changed) { store.detailData = null; store.detailErr = null; loadDetail(store.route.id); }
   } else { store.detailData = null; store.detailErr = null; }
-  if (changed) store.armDelete = null; // leaving the page disarms the confirm
+  if (changed) {
+    store.armDelete = null; // leaving the page disarms the confirm
+    // Form-local model/agent picker state belongs to the form that is leaving.
+    store.modelCustom = false; store.modelDraft = null; store.formAgent = null;
+  }
   rerender();
   if (changed) {
     window.scrollTo(0, 0);

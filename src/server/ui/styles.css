@@ -189,6 +189,22 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   cursor: pointer; max-width: 150px; transition: border-color .15s var(--ease); }
 .agent-select:hover { border-color: var(--faint); }
 .agent-select:focus { outline: none; border-color: var(--accent); }
+/* Pinned model (Appendix B.7): quieter than the agent tag — most rows have none, and
+   the ones that do are the exception worth spotting, not the headline. */
+.model-tag { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; white-space: nowrap;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Models-in-use tile: the split matters more than the headline number, so the rows
+   sit inside the tile rather than in a tooltip. */
+.metric.model-mix .mix { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.metric.model-mix .mix-row { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; }
+.metric.model-mix .mix-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metric.model-mix .mix-n { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+/* Model listing on the Integrate page */
+.model-list { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow: auto; }
+.model-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* Empty state (teaches the interface) */
 .empty { padding: 40px 24px; text-align: center; }

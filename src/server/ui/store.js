@@ -19,6 +19,13 @@ export const store = {
   detailErr: null,   // error string if the detail fetch failed
   projMenuOpen: false,
   armDelete: null,   // issue id whose Delete button is armed (two-click confirm)
+  // Model discovery (extension, SPEC Appendix B.7), keyed by agent kind:
+  // { kind, models, fetched_at, stale, loading, error }. Advisory only — the list
+  // never gates what an operator may type, so a missing entry is not an error state.
+  models: {},
+  modelCustom: false, // the open form's model field is in free-text mode
+  modelDraft: null,   // last model picked from the list, prefills the free-text box
+  formAgent: null,    // agent kind chosen on the open form (null = project default)
   auto: true,
   conn: "poll",      // sse | poll | stale | down
   lastOk: Date.now(),

@@ -6,6 +6,7 @@ import { store } from "../store.js";
 import { hashFor } from "../router.js";
 import { pageHead } from "./page.js";
 import { ago, dur, until, nfmt, money, badge, eventKind, logKind, logLabel, shortTime } from "../format.js";
+import { issueModelOf, modelBadge } from "./models.js";
 
 function fact(label, val) {
   return html`<span class="fact"><b>${label}</b>${val}</span>`;
@@ -123,7 +124,12 @@ export function detailPage(d) {
   // carries, and fall back to the live session's for older payloads.
   const tok = d.tokens || (run && run.tokens) || null;
 
+  // Pinned model, or none — there is no "effective" model to show: the fallback lives
+  // inside the CLI, so naming one here would be a guess (SPEC Appendix B.7).
+  const model = issueModelOf(d);
+
   const rows = [["Issue id", mono(d.issue_id)]];
+  rows.push(["Model", model ? mono(model) : html`<span class="sub">${d.agent || "the backend"}'s own default</span>`]);
   const trackerState = run ? run.state : d.state;
   rows.push(["Tracker state", trackerState ? badge(trackerState, run ? "active" : "") : "—"]);
   rows.push(["Workspace", mono(d.workspace && d.workspace.path)]);
@@ -149,6 +155,7 @@ export function detailPage(d) {
     <div class="page"><div class="facts">
       ${badge(d.status, statusKind)}
       ${d.agent ? fact("agent", mono(d.agent)) : nothing}
+      ${model ? modelBadge(model) : nothing}
       ${run ? html`${fact("turns", mono(run.turn_count))}${fact("elapsed", mono(dur(run.started_at)))}` : nothing}
       ${tok ? html`${fact("tokens", mono(nfmt(tok.total_tokens)))}${fact("cost", mono(money(tok.estimated_cost)))}` : nothing}
       ${!run && d.ended_at ? fact("ended", ago(d.ended_at)) : nothing}
