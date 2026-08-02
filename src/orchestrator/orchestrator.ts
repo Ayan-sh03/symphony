@@ -10,7 +10,8 @@ import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
 import { WorkspaceManager, isSafeStreamIdentifier } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
-import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript, detectAgentKinds } from "../agent/registry.ts";
+import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript, detectAgentKinds, listAgentModels } from "../agent/registry.ts";
+import type { AgentModel, AgentModelsView } from "../agent/types.ts";
 import { resolveAgentAvailability, type AgentAvailability, type AgentDetection } from "../agent/detection.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
@@ -99,6 +100,17 @@ const AGENT_DETECTION_TTL_MS = 60000;
  * answered from the cache — still fresh enough to be the truth the operator asked for.
  */
 const AGENT_DETECTION_FORCE_MIN_MS = 1000;
+
+/**
+ * How long a model listing is trusted (extension, Appendix B.7). Far longer than agent
+ * detection: a model list changes when a provider ships or credentials change, not
+ * minute to minute, and each probe costs a spawned CLI (~1.4 s for codex, ~3.7 s for
+ * opencode). The console has an explicit refresh for the impatient case.
+ */
+const AGENT_MODELS_TTL_MS = 600000;
+
+/** Floor between *forced* model re-probes — same rationale as the detection floor. */
+const AGENT_MODELS_FORCE_MIN_MS = 2000;
 
 /** Halt-reason prefix for "this host cannot run the backend this issue needs". */
 const AGENT_UNAVAILABLE = "agent_unavailable";
@@ -209,6 +221,9 @@ export class Orchestrator {
   private agentDetection: AgentDetection[] = [];
   private agentDetectionAt = 0;
   private agentDetectionInFlight: Promise<AgentDetection[]> | null = null;
+  /** Per-kind model listings (extension, Appendix B.7). Never read on the dispatch path. */
+  private agentModelCache = new Map<string, { models: AgentModel[]; at: number; fetched_at: string }>();
+  private agentModelsInFlight = new Map<string, Promise<AgentModel[]>>();
   /** Last "dispatch parked" reason logged, so a standing condition warns once. */
   private lastParkReason: string | null = null;
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
@@ -601,6 +616,74 @@ export class Orchestrator {
     await this.agentDetectionInFlight;
   }
 
+  /**
+   * Models a backend reports it can run (extension, Appendix B.7). `kind` defaults to
+   * the effective default backend; the console passes an explicit one when an issue
+   * pins its own agent, so the dropdown lists that backend's models rather than another's.
+   *
+   * Deliberately never awaited by dispatch. A model list is console garnish: discovery
+   * failure yields an empty list and a warn, and `shouldDispatch` never consults this.
+   */
+  async agentModels(kind?: string, force = false): Promise<AgentModelsView> {
+    const target = kind && isSupportedAgentKind(kind) ? kind : this.effectiveDefaultAgent();
+    await this.ensureAgentModels(target, force);
+    const hit = this.agentModelCache.get(target);
+    return {
+      kind: target,
+      models: hit ? hit.models : [],
+      fetched_at: hit ? hit.fetched_at : null,
+      // Same meaning as AgentAvailability.stale: no probe has ever completed, so an
+      // empty list here means "unknown", not "this backend has no models".
+      stale: !hit,
+    };
+  }
+
+  /**
+   * Refresh one backend's model listing on operator request, bypassing the TTL.
+   * Mirrors `refreshAgentDetection`.
+   */
+  refreshAgentModels(kind?: string): Promise<AgentModelsView> {
+    return this.agentModels(kind, true);
+  }
+
+  /**
+   * Populate the model cache when stale. Shares one in-flight probe per kind, and a
+   * failure leaves the previous listing standing rather than blanking a dropdown the
+   * operator is mid-way through using — the same contract as `ensureAgentDetection`.
+   */
+  private async ensureAgentModels(kind: string, force = false): Promise<void> {
+    const hit = this.agentModelCache.get(kind);
+    const age = hit ? Date.now() - hit.at : Infinity;
+    if (hit && !force && age < AGENT_MODELS_TTL_MS) return;
+    if (hit && force && age < AGENT_MODELS_FORCE_MIN_MS) return; // answer is a moment old
+
+    let probe = this.agentModelsInFlight.get(kind);
+    if (!probe || force) {
+      // Discovery must see the same environment dispatch does: opencode scopes its
+      // listing to configured credentials, several of which arrive as env vars, so a
+      // different env here would advertise models the runs cannot reach.
+      probe = listAgentModels(kind, { config: this.config, logger: this.logger, env: this.buildChildEnv() })
+        .then((models) => {
+          // An empty list is a failed or capability-less probe, not evidence that a
+          // backend has no models. Overwriting a good listing with it would empty the
+          // dropdown on one bad spawn.
+          if (models.length > 0 || !this.agentModelCache.has(kind)) {
+            this.agentModelCache.set(kind, { models, at: Date.now(), fetched_at: new Date().toISOString() });
+          }
+          return models;
+        })
+        .catch((err) => {
+          this.logger.warn("model discovery failed", { agent: kind, error: String(err) });
+          return this.agentModelCache.get(kind)?.models ?? [];
+        })
+        .finally(() => {
+          if (this.agentModelsInFlight.get(kind) === probe) this.agentModelsInFlight.delete(kind);
+        });
+      this.agentModelsInFlight.set(kind, probe);
+    }
+    await probe;
+  }
+
   private usableKinds(statuses: AgentDetection[]): Set<string> {
     return new Set(statuses.filter((a) => a.usable).map((a) => a.kind).sort());
   }
@@ -770,6 +853,10 @@ export class Orchestrator {
         is_terminal: this.isTerminalState(i.state),
         agent: this.resolveAgentKind(i), // effective backend
         agent_override: i.agent,          // explicit per-task choice, or null
+        // Per-task model, or null for the backend default. There is no "effective"
+        // counterpart to agent above: the default lives inside the CLI, so claiming
+        // one here would be a guess (Appendix B.7).
+        model: i.model,
         needs_attention: i.delivery?.needs_attention === true,
         follow_up_for: i.follow_up_for,
         // Always concrete, so the console can group a stream without re-deriving it.
@@ -1715,6 +1802,7 @@ export class Orchestrator {
       priority: issue.priority,
       labels: issue.labels,
       agent: this.resolveAgentKind(issue),
+      model: issue.model,
       delivery: issue.delivery ?? null,
       follow_up_for: issue.follow_up_for,
       stream: this.streamOf(issue),
@@ -1849,6 +1937,7 @@ function applyEditableFields(view: IssueDetailView, issue: Issue): void {
   view.description = issue.description;
   view.priority = issue.priority;
   view.labels = issue.labels;
+  view.model = issue.model;
   // Not editable, but only the tracker record carries it: the runtime views are
   // built from entries that predate the lookup.
   view.follow_up_for = issue.follow_up_for;
@@ -1975,6 +2064,12 @@ export interface IssueDetailView {
   labels?: string[];
   /** Effective agent backend that would run this issue. */
   agent?: string;
+  /**
+   * Per-task model, or null for the backend's own default (extension, Appendix B.7).
+   * Unlike `agent` there is no effective counterpart — the default lives inside the
+   * CLI, so naming one here would be a guess.
+   */
+  model?: string | null;
   /** Issue this one follows up on (SPEC Appendix B.5), when the tracker record is available. */
   follow_up_for?: string | null;
   /** Work stream owning the workspace/branch shown here. Absent on views built before it is known. */
