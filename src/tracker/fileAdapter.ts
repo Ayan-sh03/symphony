@@ -22,8 +22,8 @@
  * - `set_issue_result({state?, comment?, pr_url?, tests?})` -> convenience terminal handoff
  *
  * Edit capability (extension): `updateIssue` amends title/description/priority/labels
- * in place and `deleteIssue` removes the issue's file; the identifier keys the record
- * and is immutable (a rename is a delete + create).
+ * and the per-task `model` in place, and `deleteIssue` removes the issue's file; the
+ * identifier keys the record and is immutable (a rename is a delete + create).
  *
  * Follow-ups (extension, SPEC Appendix B.5): `follow_up_for` and `stream_identifier`
  * are carried verbatim on the record and written at creation only — `stream_identifier`
@@ -150,6 +150,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       blocked_by: normalizeBlockers(raw.blocked_by),
       dispatchable,
       agent: typeof raw.agent === "string" && raw.agent.trim() !== "" ? raw.agent.trim() : null,
+      model: typeof raw.model === "string" && raw.model.trim() !== "" ? raw.model.trim() : null,
       follow_up_for: str(raw.follow_up_for) || null,
       stream_identifier: str(raw.stream_identifier) || null,
       delivery: normalizeDelivery(raw.delivery),
@@ -355,6 +356,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
       created_at: new Date().toISOString(),
     };
     if (typeof input.agent === "string" && input.agent.trim() !== "") record.agent = input.agent.trim();
+    if (typeof input.model === "string" && input.model.trim() !== "") record.model = input.model.trim();
     // Written only when set, so ordinary issues keep the record shape they had.
     if (str(input.follow_up_for)) record.follow_up_for = str(input.follow_up_for);
     if (str(input.stream_identifier)) record.stream_identifier = str(input.stream_identifier);
@@ -389,6 +391,13 @@ export class FileTrackerAdapter implements TrackerAdapter {
       }
       if (patch.priority !== undefined) rec.priority = normalizePriority(patch.priority);
       if (patch.labels !== undefined) rec.labels = normalizeLabels(patch.labels);
+      // Clearing drops the key entirely, matching how `agent` is stored — an issue on
+      // the backend default carries no model field at all.
+      if (patch.model !== undefined) {
+        const m = str(patch.model);
+        if (m) rec.model = m;
+        else delete rec.model;
+      }
     }, { updated: true });
   }
 

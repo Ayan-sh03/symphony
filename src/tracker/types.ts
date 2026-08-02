@@ -53,6 +53,8 @@ export interface NewIssueInput {
   labels?: string[];
   /** OPTIONAL per-task agent backend override. */
   agent?: string | null;
+  /** OPTIONAL per-task model override, passed to the backend verbatim. */
+  model?: string | null;
   /** OPTIONAL follow-up lineage: the identifier this issue follows up on. */
   follow_up_for?: string | null;
   /** OPTIONAL work stream to join (resolved by the caller, never by the adapter). */
@@ -74,6 +76,12 @@ export interface IssuePatch {
   description?: string | null;
   priority?: number | null;
   labels?: string[];
+  /**
+   * Per-task model override (extension, Appendix B.7). Unlike `agent`, this has no
+   * dedicated endpoint: it is free text with nothing to validate against, so the edit
+   * form is the whole interface. `null` clears it back to the backend default.
+   */
+  model?: string | null;
 }
 
 export interface TrackerAdapter {
