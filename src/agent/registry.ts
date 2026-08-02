@@ -3,13 +3,15 @@
  * (default "codex"). To add a new agent backend: implement AgentSession +
  * AgentFactory and register it here — no other layer changes.
  */
-import type { AgentFactory, AgentSession, AgentSessionOptions, TranscriptEvent, TranscriptQuery } from "./types.ts";
+import type { AgentFactory, AgentModel, AgentSession, AgentSessionOptions, ModelQuery, TranscriptEvent, TranscriptQuery } from "./types.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { Logger } from "../logger.ts";
 import { CodexAppServerClient } from "./appServerClient.ts";
 import { OpencodeSession } from "./opencodeSession.ts";
 import { readCodexTranscript } from "./codexTranscript.ts";
 import { readOpencodeTranscript } from "./opencodeTranscript.ts";
+import { listCodexModels } from "./codexModels.ts";
+import { listOpencodeModels } from "./opencodeModels.ts";
 import { detectCommand, type AgentDetectDeps, type AgentDetection } from "./detection.ts";
 
 const codexFactory: AgentFactory = {
@@ -25,6 +27,9 @@ const codexFactory: AgentFactory = {
   detect(config: ServiceConfigValues, _logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection> {
     return detectCommand("codex", config.codex.command, "codex.command", deps);
   },
+  listModels(query: ModelQuery): Promise<AgentModel[]> {
+    return listCodexModels(query);
+  },
 };
 
 const opencodeFactory: AgentFactory = {
@@ -38,6 +43,9 @@ const opencodeFactory: AgentFactory = {
   // `opencode run` would create a session and spend tokens; `--version` does not.
   detect(config: ServiceConfigValues, _logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection> {
     return detectCommand("opencode", config.opencode.command, "opencode.command", deps);
+  },
+  listModels(query: ModelQuery): Promise<AgentModel[]> {
+    return listOpencodeModels(query);
   },
 };
 
@@ -74,6 +82,23 @@ export function readAgentTranscript(kind: string, query: TranscriptQuery): Promi
   const factory = FACTORIES.get(kind);
   if (!factory || !factory.readTranscript) return Promise.resolve([]);
   return factory.readTranscript(query);
+}
+
+/**
+ * Enumerate the models a backend can run (extension). Returns [] for unknown kinds or
+ * backends without the capability — mirrors {@link readAgentTranscript}. A backend that
+ * throws is downgraded to [] rather than propagated: a model list is console garnish and
+ * must never become an orchestration error.
+ */
+export async function listAgentModels(kind: string, query: ModelQuery): Promise<AgentModel[]> {
+  const factory = FACTORIES.get(kind);
+  if (!factory || !factory.listModels) return [];
+  try {
+    return await factory.listModels(query);
+  } catch (err) {
+    query.logger.warn("model discovery failed", { agent: kind, error: String(err) });
+    return [];
+  }
 }
 
 /**
