@@ -49,6 +49,9 @@ backend by implementing the interface and registering it; no other layer changes
   history is capped). Codex: `~/.codex/sessions/**/rollout-*.jsonl`. opencode:
   the migrated SQLite db at `<dataDir>/opencode.db` (read-only) — the old
   `storage/*.json` tree is abandoned. Both keyed by the run's workspace path.
+  Optional `AgentFactory.listModels(query)` enumerates the models a backend can run
+  (`codexModels.ts` speaks `model/list` over app-server; `opencodeModels.ts` parses
+  `opencode models`) — see **Model selection** below.
 - **Trackers** — `src/tracker/registry.ts`. Implement the adapter, add its kind.
   Kinds: `file` (`fileAdapter.ts`), `github` (`githubAdapter.ts`, REST over stdlib
   `fetch`; Symphony state is a `sym:<state>` label, PAT read from `provider.token_env`).
@@ -97,6 +100,22 @@ because a project can mix backends (per-issue `agent` override) and each kind is
 its own rate; an aggregate computed as `total × one rate` is silently wrong. `archiveLog`
 copies a finished run's final counts + kind onto the retained log so a completed issue's
 detail still shows what it cost.
+
+**Model selection (extension, SPEC Appendix B.7).** An issue may carry `model`, a free-text
+string passed to the backend verbatim on dispatch (`AgentSessionOptions.model` → codex's
+`thread/start.model`, opencode's `-m`). **Symphony is not the source of truth for model
+inventory** — every model name in the console comes from a CLI, and there is deliberately
+no model map in `WORKFLOW.md`. We never reject an unknown id: the CLI validates and errors
+better than we can. Discovery is cached per kind on the orchestrator
+(`agentModels`/`refreshAgentModels`, modelled on `ensureAgentDetection`) and is **never on
+the dispatch path** — a failed probe is a warn and an empty list, never a blocked run.
+Three verified traps are baked into the code and must not be "fixed" back: codex's
+`isDefault` marks its *newest* model, not the configured one, so `default` is resolved
+against `config/read` (same bug as M12's agent default); a bad `CODEX_HOME` makes
+`initialize` hang forever rather than fail, so every probe has a deadline and kills its
+child; and opencode's listing is credential-scoped, so discovery must spawn with the same
+env dispatch uses or it advertises models the runs cannot reach. A present-but-logged-out
+codex still lists models, so a populated dropdown proves nothing about credentials.
 
 The console is a small client-side app in `src/server/ui/` — plain browser ES
 modules rendered with **lit-html** (no bundler, no build step): the server serves

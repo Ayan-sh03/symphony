@@ -104,6 +104,9 @@ export async function runAgentAttempt(
       adapter: deps.adapter,
       toolSpecs,
       env: deps.childEnv,
+      // Per-task model (extension, Appendix B.7). Straight through from the issue —
+      // no resolution step, no map lookup: the backend owns what the string means.
+      ...(issue.model ? { model: issue.model } : {}),
     });
   } catch (err) {
     await deps.workspaceManager.runAfterRun(wsPath);

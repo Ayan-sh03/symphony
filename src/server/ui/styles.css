@@ -189,6 +189,32 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   cursor: pointer; max-width: 150px; transition: border-color .15s var(--ease); }
 .agent-select:hover { border-color: var(--faint); }
 .agent-select:focus { outline: none; border-color: var(--accent); }
+/* Pinned model (Appendix B.7): quieter than the agent tag — most rows have none, and
+   the ones that do are the exception worth spotting, not the headline. */
+.model-tag { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; white-space: nowrap;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Models-in-use tile: the split matters more than the headline number, so the rows
+   sit inside the tile rather than in a tooltip. */
+.metric.model-mix .mix { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.metric.model-mix .mix-row { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; }
+.metric.model-mix .mix-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metric.model-mix .mix-n { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+/* Model listing on the Integrate page */
+.model-list { display: flex; flex-direction: column; max-height: 252px; overflow: auto; margin: 0 -4px; }
+.model-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; min-width: 0;
+  border-bottom: 1px solid var(--border); }
+.model-row:last-child { border-bottom: 0; }
+
+/* Shared model typography: the id is the identity, the backend's own label is context. */
+.mid { font-family: var(--mono); font-size: 12px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlabel { color: var(--faint); font-size: 12px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-badge { flex: none; font-size: 9.5px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 2px 6px; line-height: 1.3; }
 
 /* Empty state (teaches the interface) */
 .empty { padding: 40px 24px; text-align: center; }
@@ -324,6 +350,58 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .proj-item.add { color: var(--muted); border-top: 1px solid var(--border); border-radius: 0;
   margin-top: 5px; padding-top: 11px; }
 .proj-item.add:hover { color: var(--ink); background: none; }
+
+/* Model picker (Appendix B.7) — built like the project switcher above, and for the
+   same reasons: the open menu is store state (a background poll repaints through it),
+   and one backend names several hundred models, which no native select can filter. */
+.model-pick { position: relative; }
+.model-btn { width: 100%; font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+  display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--ink);
+  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: 8px 11px; transition: border-color .12s var(--ease), background .12s var(--ease); }
+.model-btn:hover { border-color: var(--faint); }
+.model-btn[aria-expanded="true"] { border-color: var(--accent); background: var(--panel); }
+.model-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.model-btn .mid { font-size: 12.5px; }
+.model-btn .caret { margin-left: auto; color: var(--faint); flex: none; transition: transform .16s var(--ease); }
+.model-btn[aria-expanded="true"] .caret { transform: rotate(180deg); }
+/* No pin: name the backend's own default in prose, never as if Symphony chose it. */
+.mdef { color: var(--faint); }
+.mdef .mid { color: var(--muted); }
+
+.model-menu { position: absolute; top: calc(100% + 7px); left: 0; right: 0; z-index: 40;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 11px;
+  box-shadow: var(--shadow); padding: 6px; animation: popin .15s var(--ease); }
+.model-cap { display: flex; align-items: center; gap: 8px; padding: 5px 8px 7px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.model-cap .btn.tiny { margin-left: auto; letter-spacing: 0; text-transform: none; }
+.model-search { width: 100%; font: inherit; font-size: 12.5px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+  padding: 7px 10px; margin-bottom: 5px; }
+.model-search::placeholder { color: var(--faint); }
+.model-search:focus { outline: none; border-color: var(--accent); }
+.model-opts { display: flex; flex-direction: column; max-height: 268px; overflow: auto; }
+.model-opt { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; text-align: left;
+  font: inherit; font-size: 13px; cursor: pointer; color: var(--ink);
+  background: none; border: 0; padding: 7px 9px; border-radius: 7px; }
+.model-opt:hover, .model-opt:focus-visible { background: var(--panel-2); outline: none; }
+.model-opt[aria-current="true"] .mid, .model-opt[aria-current="true"] .mdef { color: var(--accent); }
+.model-opt .tick { margin-left: auto; color: var(--accent); opacity: 0; flex: none; }
+.model-opt[aria-current="true"] .tick { opacity: 1; }
+.model-opt.other { color: var(--muted); border-top: 1px solid var(--border); border-radius: 0;
+  margin-top: 5px; padding-top: 11px; font-size: 12.5px; }
+.model-opt.other:hover { color: var(--ink); background: none; }
+.model-none { padding: 12px 9px; color: var(--faint); font-size: 12.5px; }
+.model-note { padding: 9px 9px 3px; margin-top: 5px; border-top: 1px solid var(--border);
+  color: var(--faint); font-size: 11.5px; line-height: 1.45; }
+
+/* Footer line under the field: state of the listing, and the re-probe, on one row. */
+.model-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--faint); }
+.model-foot b { color: var(--muted); font-weight: 550; }
+.model-foot .w-full { flex-basis: 100%; }
+.input.mono-in { font-family: var(--mono); font-size: 12.5px; }
+
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
 .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 12px; }
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }

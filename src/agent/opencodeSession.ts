@@ -228,7 +228,9 @@ export class OpencodeSession implements AgentSession {
   private buildCommand(title?: string): string {
     const parts = [this.oc.command, "run", "--format", "json", "--auto"];
     parts.push("--dir", quote(this.opts.workspacePath));
-    if (this.oc.model) parts.push("-m", quote(this.oc.model));
+    // Per-issue override first, then the workflow default (extension, Appendix B.7).
+    const model = this.opts.model ?? this.oc.model;
+    if (model) parts.push("-m", quote(model));
     if (this._threadId) parts.push("-s", quote(this._threadId));
     else if (title) {
       const t = sanitizeTitle(title);

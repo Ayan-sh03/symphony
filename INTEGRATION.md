@@ -53,6 +53,7 @@ export interface AgentFactory {
 | `adapter` | Tracker adapter bound to this session — for executing provider-native tools host-side. |
 | `toolSpecs` | Provider-native tool specs advertised for this session. |
 | `env` | Child environment with tracker secrets already stripped. Pass this to your subprocess. |
+| `model` | OPTIONAL per-task model id (extension, SPEC Appendix B.7), from `issue.model`. Free text — pass it through and let your CLI validate it. Ignoring it is conformant: the run then uses your backend's default. |
 
 ### What each method must do
 
@@ -164,6 +165,22 @@ registerAgentFactory({
   create: (opts) => new MyAgentSession(opts),
 });
 ```
+
+`create` is the only required member. The factory also takes three optional capabilities,
+each of which degrades cleanly when you leave it out:
+
+| Capability | What it buys you | Omitting it means |
+|---|---|---|
+| `readTranscript(query)` | The console can show a finished run's activity after a restart, read back from your backend's own on-disk store. | Logs vanish from the console once Symphony's in-memory history rolls over. |
+| `detect(config, logger)` | Symphony reports whether your CLI is actually installed, and halts issues that pinned a backend this host lacks. | Your backend is assumed installed; its own startup failure stays the authority. |
+| `listModels(query)` | The console's model dropdown is populated from your CLI (SPEC Appendix B.7). | No models are offered for your kind; operators can still type one, and your default still applies. |
+
+`listModels` has three rules worth stating plainly, because getting them wrong is not
+obvious from the type: return `[]` rather than throwing, own a timeout that **kills** any
+process you spawn (a hung CLI is the realistic failure, not an error), and set `default`
+only on the model you would genuinely run with no override — resolved against the host's
+config, never a vendor's newest release. Spawn with `query.env`, which is the same
+environment dispatch uses; a listing scoped to credentials will otherwise be wrong.
 
 ### Select it
 

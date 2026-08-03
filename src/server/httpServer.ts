@@ -297,6 +297,20 @@ export class SymphonyHttpServer {
         .catch((err) => this.json(res, 500, { error: { code: "detect_failed", message: String(err) } }));
       return;
     }
+    // Model discovery (extension, Appendix B.7). Above the issue lookup for the same
+    // reason as /agents: otherwise "models" is read as an issue identifier.
+    if (rest === "/models" || rest === "/models/refresh") {
+      const refresh = rest.endsWith("/refresh");
+      if (method !== (refresh ? "POST" : "GET")) return this.methodNotAllowed(res);
+      // Optional ?kind= so the form can list the backend an issue actually pinned,
+      // rather than always the effective default.
+      const query = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).searchParams;
+      const kind = query.get("kind") ?? undefined;
+      void (refresh ? orch.refreshAgentModels(kind) : orch.agentModels(kind))
+        .then((view) => this.json(res, 200, view))
+        .catch((err) => this.json(res, 500, { error: { code: "models_failed", message: String(err) } }));
+      return;
+    }
     const m = rest.match(/^\/([^/]+)$/);
     if (m) {
       if (method !== "GET") return this.methodNotAllowed(res);
@@ -447,6 +461,7 @@ export class SymphonyHttpServer {
         priority: typeof body.priority === "number" ? body.priority : body.priority != null ? Number(body.priority) : null,
         labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
         agent: typeof body.agent === "string" && body.agent.trim() !== "" ? body.agent.trim() : null,
+        model: typeof body.model === "string" && body.model.trim() !== "" ? body.model.trim() : null,
       });
       this.json(res, 201, {
         created: true,
@@ -492,8 +507,13 @@ export class SymphonyHttpServer {
       }
       patch.labels = body.labels.map(String);
     }
+    // Free text on purpose — the backend validates model ids, we do not (Appendix B.7).
+    // Blank means "clear it", which is how the form's default option comes back.
+    if ("model" in body) {
+      patch.model = typeof body.model === "string" && body.model.trim() !== "" ? body.model.trim() : null;
+    }
     if (Object.keys(patch).length === 0) {
-      return this.json(res, 400, { error: { code: "bad_request", message: "patch must set at least one of title, description, priority, labels" } });
+      return this.json(res, 400, { error: { code: "bad_request", message: "patch must set at least one of title, description, priority, labels, model" } });
     }
     if (patch.title !== undefined && patch.title === "") {
       return this.json(res, 400, { error: { code: "bad_request", message: "title cannot be blank" } });
@@ -505,7 +525,7 @@ export class SymphonyHttpServer {
       const issue = await orch.updateIssue(id, patch);
       this.json(res, 200, {
         updated: true,
-        issue: { id: issue.id, identifier: issue.identifier, title: issue.title, priority: issue.priority, labels: issue.labels },
+        issue: { id: issue.id, identifier: issue.identifier, title: issue.title, priority: issue.priority, labels: issue.labels, model: issue.model },
       });
     } catch (err) {
       this.json(res, this.actionStatus(err, 400), { error: { code: this.actionCode(err, "update_failed"), message: String((err as Error).message ?? err) } });

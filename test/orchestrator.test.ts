@@ -1376,3 +1376,87 @@ test("an unpriced backend makes the total a flagged lower bound", async () => {
     orch.stop();
   }
 });
+
+/** Fake backend that records the AgentSessionOptions it was constructed with. */
+function makeOptionCapturingFactory(kind: string, seen: Record<string, AgentSessionOptions>): AgentFactory {
+  return {
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      seen[opts.issue.id] = opts;
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "captured" }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  };
+}
+
+test("the per-issue model reaches the backend verbatim; an unpinned issue passes none", async () => {
+  const seen: Record<string, AgentSessionOptions> = {};
+  registerAgentFactory(makeOptionCapturingFactory("fake-model-capture", seen));
+  const { wfPath, workflow, config } = setup("model-capture", {
+    // T-1 (from setup) pins nothing; T-2 pins a model the backend alone understands.
+    extraIssues: [{ id: "T-2", identifier: "T-2", title: "pinned", description: "x", state: "todo", dispatchable: true, model: " vendor/fast " }],
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    const both = await waitFor(() => seen["T-1"] != null && seen["T-2"] != null);
+    assert.ok(both, "both issues should dispatch");
+    assert.equal(seen["T-2"]!.model, "vendor/fast", "the pinned id goes through untouched (tracker-trimmed only)");
+    assert.equal(seen["T-1"]!.model, undefined, "no pin means no model key at all, so the backend uses its own default");
+    assert.equal("model" in seen["T-1"]!, false, "absent, not an explicit undefined");
+  } finally {
+    orch.stop();
+  }
+});
+
+test("broken model discovery never reaches dispatch: the issue still runs to completion", async () => {
+  // The verified failure mode of a real CLI probe is a hang, not a rejection, so the
+  // fake does both: dispatch must not await either one.
+  let hangs = 0;
+  registerAgentFactory({
+    ...makeFakeFactory("done"),
+    kind: "fake-broken-models",
+    listModels() {
+      hangs += 1;
+      return new Promise<never>(() => { /* never settles, like a wedged CLI */ });
+    },
+  });
+  registerAgentFactory({
+    ...makeFakeFactory("done"),
+    kind: "fake-rejecting-models",
+    listModels: () => Promise.reject(new Error("probe blew up")),
+  });
+
+  const { issuesDir, wfPath, workflow, config } = setup("broken-models");
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  await orch.start();
+  try {
+    // Ask for the listing exactly as the console would, and never await it.
+    let settled = false;
+    void orch.agentModels().then(() => { settled = true; }, () => { settled = true; });
+    void orch.refreshAgentModels().then(() => { settled = true; }, () => { settled = true; });
+
+    const done = await waitFor(() => readState(issuesDir) === "done");
+    assert.ok(done, "a wedged model probe must not stall or fail dispatch");
+    assert.equal(settled, false, "the probe really was still hanging while the run completed");
+    assert.ok(hangs > 0, "the hanging probe really was invoked");
+
+    // And a backend whose probe fails answers with an empty listing rather than throwing.
+    const view = await orch.agentModels("fake-rejecting-models");
+    assert.equal(view.kind, "fake-rejecting-models");
+    assert.deepEqual(view.models, []);
+  } finally {
+    orch.stop();
+  }
+});

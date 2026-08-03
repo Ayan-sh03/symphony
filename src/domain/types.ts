@@ -77,6 +77,13 @@ export interface Issue {
    */
   agent: string | null;
   /**
+   * OPTIONAL per-task model override (extension, SPEC Appendix B.7). Free text, passed
+   * to the backend verbatim: the CLI owns model validation and errors better than we
+   * could, so an id Symphony has never heard of is never rejected here. Null means the
+   * backend's own default.
+   */
+  model: string | null;
+  /**
    * Identifier of the issue this one follows up on (extension, SPEC Appendix B.5).
    * Lineage only — it records who asked for the follow-up; the branch and workspace
    * come from `stream_identifier`.

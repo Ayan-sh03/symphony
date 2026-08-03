@@ -62,6 +62,13 @@ export interface AgentSessionOptions {
   toolSpecs: ToolSpec[];
   /** Child environment (tracker secrets already stripped — SPEC §15.3). */
   env: NodeJS.ProcessEnv;
+  /**
+   * OPTIONAL per-run model (extension, SPEC Appendix B.7), taken from `issue.model`.
+   * Passed to the backend verbatim — Symphony never validates it, because the CLI is
+   * the authority and reports a bad id better than we can. A backend free to ignore
+   * this runs on its own default, which is also what absent means.
+   */
+  model?: string;
 }
 
 /** One persisted activity event, shaped like the console's `recent_events` rows. */
@@ -69,6 +76,48 @@ export interface TranscriptEvent {
   at: string;
   event: string;
   message: string;
+}
+
+/**
+ * One model a backend reports it can run (extension, SPEC Appendix B.7). `id` is the
+ * string handed back to the backend verbatim — Symphony never interprets it.
+ *
+ * `default` means the model this backend would *actually* use for a run with no
+ * per-issue override, resolved against the host's own config. It deliberately does
+ * not mean the vendor's flagship: codex's `model/list` marks `isDefault` on the
+ * newest model while `config/read` may name an entirely different one, and reporting
+ * the former would show a default that dispatch does not use. Omit the flag rather
+ * than guess (see M12's `2d9274d` for the same bug on agent kinds).
+ */
+export interface AgentModel {
+  id: string;
+  /** Human-readable name for the console, when the backend offers one. */
+  label?: string;
+  /** True only for the effective default — see above. */
+  default?: boolean;
+}
+
+/** One backend's model listing as one console/API payload (extension). */
+export interface AgentModelsView {
+  kind: string;
+  models: AgentModel[];
+  /** When the listing was last successfully fetched; null when never. */
+  fetched_at: string | null;
+  /** No probe has completed yet — an empty `models` here means unknown, not none. */
+  stale: boolean;
+}
+
+/** Everything a backend needs to enumerate its models. */
+export interface ModelQuery {
+  config: ServiceConfigValues;
+  logger: Logger;
+  /**
+   * Child environment discovery must spawn with. This is the *dispatch* env: opencode
+   * scopes its listing to configured credentials and several providers arrive via env
+   * vars, so probing with a different environment would advertise models the runs
+   * cannot actually reach.
+   */
+  env: NodeJS.ProcessEnv;
 }
 
 /** Lookup for reading a backend's own on-disk transcript after the fact. */
@@ -99,4 +148,16 @@ export interface AgentFactory {
    * side-effect free: no sessions, no tokens, no real app-server.
    */
   detect?(config: ServiceConfigValues, logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection>;
+  /**
+   * Optional capability (extension, SPEC Appendix B.7): enumerate the models this
+   * backend can run on this host. Symphony is not the source of truth for model
+   * inventory — the CLI is — so every model name in the console originates here.
+   *
+   * Best-effort and advisory: return `[]` (never throw) when the backend cannot
+   * answer. Callers must never put this on the dispatch path, and an unknown model
+   * is never rejected on the strength of an absent entry — the backend validates.
+   * Implementations own their own timeout and MUST kill any child they spawn: the
+   * verified failure mode is a hang, not a rejection.
+   */
+  listModels?(query: ModelQuery): Promise<AgentModel[]>;
 }

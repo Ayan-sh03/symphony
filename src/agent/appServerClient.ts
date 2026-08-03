@@ -84,11 +84,21 @@ export class CodexAppServerClient implements AgentSession {
       await this.request("initialize", {
         clientInfo: { name: "symphony", version: "1.0.0", title: "Symphony" },
       });
-      const threadRes = (await this.request("thread/start", {
+      const threadStart: Record<string, unknown> = {
         cwd: this.opts.workspacePath,
         approvalPolicy: this.codex.approval_policy,
         sandbox: this.codex.thread_sandbox,
-      })) as { thread?: { id?: string } };
+      };
+      // Per-run model override (extension, Appendix B.7). `ThreadStartParams.model` is
+      // `string|null` in the v2 protocol; omitted entirely when unset so codex applies
+      // its own configured default exactly as before.
+      //
+      // Verified: codex accepts an unknown model id here without complaint and only
+      // fails once a turn runs. So a typo surfaces as a failed turn, not a failed
+      // start — which is the intended division of labour (the CLI validates, we do
+      // not), but it does mean the operator learns about it from the run, not the form.
+      if (this.opts.model) threadStart.model = this.opts.model;
+      const threadRes = (await this.request("thread/start", threadStart)) as { thread?: { id?: string } };
       const tid = threadRes?.thread?.id;
       if (!tid) throw new Error("thread/start returned no thread id");
       this._threadId = tid;

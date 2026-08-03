@@ -8,6 +8,7 @@ import { fetchState, fetchBoard } from "../api.js";
 import { toast } from "../toast.js";
 import { pageHead } from "./page.js";
 import { availabilityOf } from "./agents.js";
+import { modelField, formModelKind, issueModelOf } from "./models.js";
 
 export function createPage() {
   const m = (store.state && store.state.meta) || {};
@@ -29,6 +30,7 @@ export function createPage() {
     <div class="field"><label for="f-prio">Priority</label>
       <select class="select" id="f-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
     ${agentField(m)}</div>
+    ${modelField("f", formModelKind(m), "")}
     <div class="field"><label for="f-labels">Labels</label>
       <input class="input" id="f-labels" name="labels" placeholder="docs, backend"><span class="hint">Comma-separated.</span></div>
     <div class="field-err" id="f-err" hidden></div>
@@ -50,11 +52,19 @@ function agentField(m) {
   // Only worth choosing when more than one backend is registered.
   if (kinds.length < 2) return null;
   return html`<div class="field"><label for="f-agent">Agent</label>
-    <select class="select" id="f-agent" name="agent">
+    <select class="select" id="f-agent" name="agent" data-form-agent>
       <option value="">Default (${m.default_agent})</option>
       ${kinds.map((k) => html`<option value=${k}>${k}</option>`)}
     </select>
     <span class="hint">Which coding agent runs this task.</span></div>`;
+}
+
+/**
+ * Whatever the model control currently holds, list-picked or hand-typed. Never checked
+ * against the listing: the backend owns model validation (SPEC Appendix B.7).
+ */
+function modelValue(f) {
+  return f.model ? String(f.model.value || "").trim() : "";
 }
 
 function submitCreate(e) {
@@ -68,6 +78,7 @@ function submitCreate(e) {
     state: f.state.value || null,
     priority: f.priority.value ? Number(f.priority.value) : null,
     agent: f.agent && f.agent.value ? f.agent.value : null,
+    model: modelValue(f) || null,
     labels: f.labels.value.split(",").map((s) => s.trim()).filter(Boolean),
   };
   if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }
@@ -93,6 +104,10 @@ function submitCreate(e) {
 export function editPage(d) {
   const labels = (d.labels || []).join(", ");
   const prio = d.priority == null ? "" : String(d.priority);
+  const m = (store.state && store.state.meta) || {};
+  // List the backend this issue actually runs on, not the project default — a pinned
+  // agent has its own model namespace.
+  const kind = d.agent || m.default_agent || m.agent_kind || null;
   return html`${pageHead("Edit " + d.issue_identifier, d.title || "")}
     <div class="page"><form class="form page-form" id="editform" autocomplete="off"
       data-issue-id=${d.issue_id} data-issue-identifier=${d.issue_identifier} @submit=${submitEdit}>
@@ -107,6 +122,7 @@ export function editPage(d) {
       </select></div>
     <div class="field"><label for="e-labels">Labels</label>
       <input class="input" id="e-labels" name="labels" .defaultValue=${labels}><span class="hint">Comma-separated.</span></div></div>
+    ${modelField("e", kind, issueModelOf(d))}
     <div class="field-err" id="e-err" hidden></div>
     <div class="form-actions"><button type="button" class="btn" data-nav=${hashFor("detail", d.issue_identifier)}>Cancel</button>
       <button type="submit" class="btn primary">Save changes</button></div>
@@ -123,6 +139,8 @@ function submitEdit(e) {
     description: f.description.value.trim() || null,
     priority: f.priority.value ? Number(f.priority.value) : null,
     labels: f.labels.value.split(",").map((s) => s.trim()).filter(Boolean),
+    // Empty string is meaningful here: it clears the pin back to the backend default.
+    model: modelValue(f),
   };
   if (!payload.title) { err.textContent = "Title is required."; err.hidden = false; return; }
   const btn = f.querySelector("button[type=submit]");
@@ -176,6 +194,7 @@ export function followUpPage(d) {
     <div class="field"><label for="u-prio">Priority</label>
       <select class="select" id="u-prio" name="priority"><option value="">None</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
     ${agentField(m)}</div>
+    ${modelField("u", formModelKind(m), "")}
     <div class="field"><label for="u-labels">Labels</label>
       <input class="input" id="u-labels" name="labels" placeholder="review"><span class="hint">Comma-separated.</span></div>
     <div class="field-err" id="u-err" hidden></div>
@@ -215,6 +234,7 @@ function submitFollowUp(e) {
     state: f.state.value || null,
     priority: f.priority.value ? Number(f.priority.value) : null,
     agent: f.agent && f.agent.value ? f.agent.value : null,
+    model: modelValue(f) || null,
     labels: f.labels.value.split(",").map((s) => s.trim()).filter(Boolean),
   };
   if (!payload.identifier || !payload.title) { err.textContent = "Identifier and title are required."; err.hidden = false; return; }

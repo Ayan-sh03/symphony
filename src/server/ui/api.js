@@ -156,6 +156,65 @@ export function refreshAgents(btn) {
     .then(() => { if (btn) btn.classList.remove("busy"); });
 }
 
+/**
+ * Model discovery for one backend (extension, SPEC Appendix B.7). Advisory: the model
+ * field is free text and the CLI is the authority, so a failed listing degrades the
+ * dropdown and nothing else. `loading` is set without a rerender on purpose — views
+ * call `ensureModels` while painting, and repainting mid-render would re-enter.
+ */
+function loadModels(kind, force, btn) {
+  const prev = store.models[kind];
+  store.models[kind] = {
+    kind,
+    models: (prev && prev.models) || [],
+    fetched_at: (prev && prev.fetched_at) || null,
+    stale: prev ? prev.stale : true,
+    loading: true,
+    error: null,
+  };
+  if (btn) btn.classList.add("busy");
+  const path = (force ? "/models/refresh" : "/models") + "?kind=" + encodeURIComponent(kind);
+  return fetch(apiBase() + path, force ? { method: "POST" } : { headers: { accept: "application/json" } })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then((res) => {
+      if (!res.ok) throw new Error((res.j.error && res.j.error.message) || "listing failed");
+      // The server answers for the kind it actually resolved, which may differ from
+      // the one we asked about (unknown kinds fall back to the effective default).
+      const view = res.j;
+      const entry = { kind: view.kind || kind, models: view.models || [], fetched_at: view.fetched_at || null,
+        stale: view.stale === true, loading: false, error: null };
+      store.models[entry.kind] = entry;
+      if (entry.kind !== kind) store.models[kind] = entry;
+      return entry;
+    })
+    .catch((ex) => {
+      const keep = store.models[kind];
+      // Keep whatever was listed before: a bad probe must not empty a dropdown the
+      // operator is mid-way through using.
+      store.models[kind] = { kind, models: (keep && keep.models) || [], fetched_at: (keep && keep.fetched_at) || null,
+        stale: keep ? keep.stale : true, loading: false, error: String(ex.message || ex) };
+      return null;
+    })
+    .then((entry) => { if (btn) btn.classList.remove("busy"); rerender(); return entry; });
+}
+
+/** Fetch a backend's models once. Idempotent, so views can call it while rendering. */
+export function ensureModels(kind) {
+  // An entry of any shape — loading, listed, empty or failed — is an answer already;
+  // re-probing on every paint would spawn a CLI per frame. Refresh is explicit.
+  if (!kind || store.models[kind]) return;
+  void loadModels(kind, false);
+}
+
+/** Re-probe a backend for its models on operator request — wired like the agent re-check. */
+export function refreshModels(kind, btn) {
+  return loadModels(kind, true, btn).then((entry) => {
+    if (!entry) { toast("Could not list models for " + kind, "err"); return; }
+    if (entry.models.length) toast(kind + " listed " + entry.models.length + " model(s)", "ok");
+    else toast(kind + " reported no models", "err");
+  });
+}
+
 export function setIssueAgent(id, agent, el) {
   if (el) el.disabled = true;
   fetch(apiBase() + "/issues/" + encodeURIComponent(id) + "/agent", {

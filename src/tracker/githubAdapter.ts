@@ -283,6 +283,10 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
       blocked_by: [],
       dispatchable: true,
       agent: null,
+      // Like `agent`, a per-task model needs somewhere to live on the issue. GitHub
+      // gives us labels and a body, neither of which is a field, so this adapter does
+      // not offer the override — the backend default applies to every GitHub issue.
+      model: null,
       follow_up_for: null,
       stream_identifier: null,
       delivery: null,

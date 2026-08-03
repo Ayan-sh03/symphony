@@ -8,6 +8,8 @@ import { ProjectManager } from "../src/project/manager.ts";
 import { saveManifest } from "../src/project/manifest.ts";
 import { SymphonyHttpServer } from "../src/server/httpServer.ts";
 import { OrchestratorError, type OrchestratorErrorCode } from "../src/orchestrator/orchestrator.ts";
+import { registerAgentFactory } from "../src/agent/registry.ts";
+import type { AgentModel, AgentSession } from "../src/agent/types.ts";
 import { Logger } from "../src/logger.ts";
 
 const silent = new Logger([{ name: "null", write() {} }], "error");
@@ -244,6 +246,58 @@ test("POST /issues persists the per-task agent override and rejects unknown kind
   });
 });
 
+test("POST /issues carries the per-task model onto the board; PATCH sets and clears it", async () => {
+  await withServer(async (base) => {
+    // backlog state: parked, so the create-triggered tick never dispatches a real agent.
+    const created = await fetch(`${base}/api/v1/projects/a/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identifier: "A-4", title: "pinned model", state: "backlog", model: "vendor/fast" }),
+    });
+    assert.equal(created.status, 201);
+
+    const row = async (identifier: string) => {
+      const board = (await (await fetch(`${base}/api/v1/projects/a/issues`)).json()) as any;
+      return board.issues.find((i: { identifier: string }) => i.identifier === identifier);
+    };
+    assert.equal((await row("A-4")).model, "vendor/fast", "the create should persist the model, not drop it");
+    assert.equal((await row("A-1")).model, null, "an issue that pinned nothing runs the backend default");
+
+    const patched = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "still A-1", model: "vendor/slow" }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(((await patched.json()) as any).issue.model, "vendor/slow", "the response echoes it so the form can rebind");
+    assert.equal((await row("A-1")).model, "vendor/slow");
+
+    // The form's "backend default" option comes back as a blank string.
+    const cleared = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "" }),
+    });
+    assert.equal(cleared.status, 200);
+    assert.equal(((await cleared.json()) as any).issue.model, null);
+    assert.equal((await row("A-1")).model, null);
+  });
+});
+
+test("a PATCH carrying only a model is a valid patch, not an empty one", async () => {
+  // Regression guard: `model` must count towards "at least one of", or the console's
+  // model-only edit answers 400 while looking like a well-formed request.
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/issues/A-1`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "vendor/only" }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as any).issue.model, "vendor/only");
+  });
+});
+
 test("a blank or whitespace host is treated as unset (binds loopback, not ::)", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-host-"));
   project(root, "a", "A-1");
@@ -412,5 +466,62 @@ test("POST /issues/<id>/follow-up 404s on an unknown parent and 501s without the
     });
     assert.equal(unsupported.status, 501);
     assert.equal(((await unsupported.json()) as any).error.code, "not_supported");
+  });
+});
+
+test("GET /models lists a backend's models and answers the second read from the cache", { timeout: 20000 }, async () => {
+  // A fake backend, so no real codex/opencode is ever spawned for a model listing.
+  const listing: AgentModel[] = [{ id: "vendor/a", label: "A" }, { id: "vendor/b", default: true }];
+  let calls = 0;
+  registerAgentFactory({
+    kind: "test-http-models",
+    create(): AgentSession {
+      throw new Error("this backend is never dispatched in this test");
+    },
+    async listModels() {
+      calls += 1;
+      return listing;
+    },
+  });
+
+  await withServer(async (base) => {
+    const url = `${base}/api/v1/projects/a/models?kind=test-http-models`;
+    const res = await fetch(url);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as any;
+    assert.equal(body.kind, "test-http-models", "?kind picks the backend, not the project default");
+    assert.deepEqual(body.models, listing);
+    assert.equal(body.stale, false, "a completed probe is not stale");
+    assert.ok(typeof body.fetched_at === "string" && body.fetched_at.length > 0);
+    assert.equal(calls, 1);
+
+    // Each probe costs a spawned CLI, so a second read inside the TTL must not re-probe.
+    const again = (await (await fetch(url)).json()) as any;
+    assert.deepEqual(again.models, listing);
+    assert.equal(calls, 1, "the second read is served from the cache");
+
+    // A forced refresh landing inside the force floor is deliberately served from the
+    // cache too — the answer is a moment old, and the endpoint is unauthenticated.
+    const refreshUrl = `${base}/api/v1/projects/a/models/refresh?kind=test-http-models`;
+    assert.equal((await fetch(refreshUrl, { method: "POST" })).status, 200);
+    assert.equal(calls, 1, "a refresh inside AGENT_MODELS_FORCE_MIN_MS re-uses the listing");
+
+    // Past the floor, the operator's refresh really does re-probe.
+    await new Promise((r) => setTimeout(r, 2100));
+    const refreshed = await fetch(refreshUrl, { method: "POST" });
+    assert.equal(refreshed.status, 200);
+    assert.deepEqual(((await refreshed.json()) as any).models, listing);
+    assert.equal(calls, 2, "a refresh past the floor bypasses the TTL");
+
+    // GET is the read; refresh is a POST and nothing else.
+    assert.equal((await fetch(`${base}/api/v1/projects/a/models`, { method: "POST" })).status, 405);
+    assert.equal((await fetch(refreshUrl)).status, 405);
+  });
+});
+
+test("GET /models falls back to the project's default backend when ?kind is unknown", async () => {
+  await withServer(async (base) => {
+    const body = (await (await fetch(`${base}/api/v1/projects/a/models?kind=no-such-backend`)).json()) as any;
+    assert.equal(body.kind, "codex", "an unrecognized kind is never trusted as a backend name");
   });
 });

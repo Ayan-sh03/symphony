@@ -258,6 +258,49 @@ test("delivery: absent or shapeless records normalize to null", async () => {
   assert.equal(all.find((i) => i.id === "B")!.delivery, null, "delivery without a branch is invalid");
 });
 
+test("model round-trips on create and is absent from the record when unset", async () => {
+  const dir = mkDir({});
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+
+  const pinned = await a.createIssue({ identifier: "M-1", title: "pinned", model: "  vendor/fast  " });
+  assert.equal(pinned.model, "vendor/fast", "the stored id is trimmed, never interpreted");
+  const [reloaded] = await a.fetchIssuesByIds(["M-1"]);
+  assert.equal(reloaded!.model, "vendor/fast", "it survives a reload, not just the create return");
+
+  const plain = await a.createIssue({ identifier: "M-2", title: "backend default" });
+  assert.equal(plain.model, null);
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "M-2.json"), "utf8"));
+  assert.equal("model" in raw, false, "an issue on the backend default carries no model field");
+});
+
+test("edit: updateIssue sets a model, and clearing it deletes the key from the record", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  const rawFile = path.join(dir, "a.json");
+  const raw = () => JSON.parse(fs.readFileSync(rawFile, "utf8")) as Record<string, unknown>;
+
+  const set = await a.updateIssue("A", { model: " vendor/slow " });
+  assert.equal(set.model, "vendor/slow");
+  assert.equal(raw().model, "vendor/slow");
+
+  // An unrelated patch must leave the pinned model exactly where it was.
+  const renamed = await a.updateIssue("A", { title: "new title" });
+  assert.equal(renamed.model, "vendor/slow", "a title edit never touches the model");
+  assert.equal(raw().model, "vendor/slow");
+
+  // Clearing drops the key entirely — the record must look like one that never pinned.
+  const cleared = await a.updateIssue("A", { model: null });
+  assert.equal(cleared.model, null);
+  assert.equal("model" in raw(), false, "clearing removes the key, it does not store null");
+
+  // The blank string is how the form's default option comes back; same outcome.
+  await a.updateIssue("A", { model: "vendor/slow" });
+  assert.equal(raw().model, "vendor/slow");
+  const blanked = await a.updateIssue("A", { model: "" });
+  assert.equal(blanked.model, null);
+  assert.equal("model" in raw(), false, 'an empty string clears it the same way null does');
+});
+
 test("follow-up fields round-trip on create and are never rewritten by an edit", async () => {
   const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "parent", state: "todo" } });
   const a = new FileTrackerAdapter({ dir, logger: silent });
