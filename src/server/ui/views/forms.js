@@ -8,7 +8,7 @@ import { fetchState, fetchBoard } from "../api.js";
 import { toast } from "../toast.js";
 import { pageHead } from "./page.js";
 import { availabilityOf } from "./agents.js";
-import { modelField, formModelKind, issueModelOf, CUSTOM_MODEL } from "./models.js";
+import { modelField, formModelKind, issueModelOf } from "./models.js";
 
 export function createPage() {
   const m = (store.state && store.state.meta) || {};
@@ -64,9 +64,7 @@ function agentField(m) {
  * against the listing: the backend owns model validation (SPEC Appendix B.7).
  */
 function modelValue(f) {
-  if (!f.model) return "";
-  const v = String(f.model.value || "").trim();
-  return v === CUSTOM_MODEL ? "" : v;
+  return f.model ? String(f.model.value || "").trim() : "";
 }
 
 function submitCreate(e) {

@@ -25,6 +25,8 @@ export const store = {
   models: {},
   modelCustom: false, // the open form's model field is in free-text mode
   modelDraft: null,   // last model picked from the list, prefills the free-text box
+  modelMenuOpen: false, // the picker's menu is open (state, not DOM — a poll must not close it)
+  modelFilter: "",    // filter typed into that menu, cleared each time it opens
   formAgent: null,    // agent kind chosen on the open form (null = project default)
   auto: true,
   conn: "poll",      // sse | poll | stale | down

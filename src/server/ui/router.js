@@ -70,6 +70,7 @@ export function applyRoute() {
     store.armDelete = null; // leaving the page disarms the confirm
     // Form-local model/agent picker state belongs to the form that is leaving.
     store.modelCustom = false; store.modelDraft = null; store.formAgent = null;
+    store.modelMenuOpen = false; store.modelFilter = "";
   }
   rerender();
   if (changed) {

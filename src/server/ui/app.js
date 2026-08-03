@@ -15,7 +15,6 @@ import { boardBody } from "./views/board.js";
 import { detailPage } from "./views/detail.js";
 import { createPage, editPage, followUpPage, addProjectPage } from "./views/forms.js";
 import { integratePage } from "./views/integrate.js";
-import { CUSTOM_MODEL } from "./views/models.js";
 import { pageHead, notFoundPage } from "./views/page.js";
 
 // ---- theme ----
@@ -58,7 +57,27 @@ setRenderer(doRender);
 
 // ---- events (delegated; independent of rendering) ----
 function closeProjMenu() { if (store.projMenuOpen) { store.projMenuOpen = false; rerender(); } }
+function closeModelMenu() { if (store.modelMenuOpen) { store.modelMenuOpen = false; store.modelFilter = ""; rerender(); } }
 document.addEventListener("click", (e) => {
+  // Model picker: same construction as the project switcher — open state lives in the
+  // store, so a background poll repaints straight through an open menu.
+  if (e.target.closest("[data-model-toggle]")) {
+    store.modelMenuOpen = !store.modelMenuOpen;
+    store.modelFilter = "";
+    rerender();
+    // Long listings are unusable without the filter; focus it on open (route-entry
+    // focus only, never on a repaint — the same rule the new-issue form follows).
+    if (store.modelMenuOpen) requestAnimationFrame(() => {
+      const f = document.querySelector("[data-model-filter]");
+      if (f) f.focus();
+    });
+    return;
+  }
+  const mp = e.target.closest("[data-model-pick]");
+  if (mp) { store.modelDraft = mp.getAttribute("data-model-pick"); closeModelMenu(); return; }
+  if (e.target.closest("[data-model-custom]")) { store.modelCustom = true; closeModelMenu(); return; }
+  if (store.modelMenuOpen && !e.target.closest(".model-pick")) closeModelMenu();
+
   // Project switcher: toggle, pick, or dismiss on outside click.
   const pick = e.target.closest("[data-pick]");
   if (pick) {
@@ -121,16 +140,9 @@ document.addEventListener("change", (e) => {
   if (fa) {
     store.formAgent = fa.value || null;
     store.modelCustom = false; store.modelDraft = null;
+    store.modelMenuOpen = false; store.modelFilter = "";
     ensureModels(store.formAgent || ((store.state && store.state.meta && store.state.meta.default_agent) || ""));
     rerender();
-    return;
-  }
-  const ms = e.target.closest("[data-model-select]");
-  if (ms) {
-    // "Other model…" swaps the select for a text box; anything else is remembered so
-    // that switching to free text starts from what was picked.
-    if (ms.value === CUSTOM_MODEL) { store.modelCustom = true; rerender(); }
-    else store.modelDraft = ms.value;
     return;
   }
   // A hand-typed id is remembered too, so returning to the list keeps it selected
@@ -141,6 +153,7 @@ document.addEventListener("change", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (store.projMenuOpen) { closeProjMenu(); return; }
+  if (store.modelMenuOpen) { closeModelMenu(); return; }
   if (store.route.name !== "board") goBoard();
 });
 window.addEventListener("hashchange", applyRoute);
