@@ -125,7 +125,7 @@ test("POST /agents/refresh re-probes and notifies; the wrong method is rejected"
   });
 });
 
-test("GET /events streams an initial snapshot, pushes on change, and unsubscribes on abort", { timeout: 15000 }, async () => {
+test("GET /events classifies live-only snapshots without invalidating the board", { timeout: 15000 }, async () => {
   await withServer(async (base, mgr) => {
     const orch = mgr.get("a")!.orchestrator;
     const observers = () => (orch as any).observers.size as number;
@@ -151,10 +151,13 @@ test("GET /events streams an initial snapshot, pushes on change, and unsubscribe
     };
 
     await readUntil(1); // initial snapshot on connect
+    assert.match(buf, /"board_dirty":true/, "a new client needs one board load");
     assert.equal(observers(), baseline + 1, "one hub observer registered for the project's clients");
 
-    (orch as any).notify(); // the call every state change ends in
+    (orch as any).notify(false); // live session activity must not reload the complete board
     await readUntil(2); // coalesced follow-up snapshot (~200 ms debounce)
+    const events = [...buf.matchAll(/event: snapshot\ndata: (.+)/g)].map((m) => JSON.parse(m[1]!));
+    assert.equal(events[1].board_dirty, false, "agent-only changes are snapshot-only SSE events");
 
     ac.abort();
     await new Promise((r) => setTimeout(r, 300));

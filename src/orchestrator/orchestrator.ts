@@ -202,6 +202,11 @@ export interface ValidationResult {
   error?: string;
 }
 
+/** A console update: live-session changes do not necessarily invalidate the tracker board. */
+export interface OrchestratorChange {
+  board_dirty: boolean;
+}
+
 export class Orchestrator {
   private config: ServiceConfigValues;
   private promptTemplate: string;
@@ -236,7 +241,7 @@ export class Orchestrator {
   private tickTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private refreshQueued = false;
-  private observers = new Set<() => void>();
+  private observers = new Set<(change: OrchestratorChange) => void>();
 
   constructor(deps: OrchestratorDeps) {
     this.config = deps.config;
@@ -256,14 +261,15 @@ export class Orchestrator {
   }
 
   /** Subscribe to state changes; callers must dispose subscriptions they no longer need. */
-  onChange(cb: () => void): () => void {
+  onChange(cb: (change: OrchestratorChange) => void): () => void {
     this.observers.add(cb);
     return () => this.observers.delete(cb);
   }
-  private notify(): void {
+  /** Notify console observers. Tracker/board mutations are dirty unless explicitly live-only. */
+  private notify(boardDirty = true): void {
     for (const cb of this.observers) {
       try {
-        cb();
+        cb({ board_dirty: boardDirty });
       } catch {
         /* observer must never break orchestration */
       }
@@ -1132,6 +1138,10 @@ export class Orchestrator {
       byAgent.input_tokens += dInp;
       byAgent.output_tokens += dOut;
     }
+
+    // Agent traffic changes the snapshot and open detail, but the tracker board is
+    // unchanged. Keeping this distinct prevents a 3,000-row reload per token ping.
+    this.notify(false);
   }
 
   // ---- worker exit + retry (SPEC §7.3, §16.6) ----

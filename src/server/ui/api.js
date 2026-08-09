@@ -5,26 +5,57 @@ import { toast } from "./toast.js";
 let eventSource = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
+let sseConnected = false;
+let stateRequest = null;
+let projectGeneration = 0;
+// Receipt order is authoritative within a project generation: a fetch commits only
+// if no SSE snapshot arrived since it started; later fetches or SSE may supersede it.
+let stateVersion = 0;
 
-export function fetchState() {
-  return fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
-    .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource ? "sse" : "poll"; rerender(); })
-    .catch(() => { store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender(); });
+function requestContext() {
+  return { pid: store.pid, generation: projectGeneration, base: apiBase() };
 }
 
-/** One EventSource follows the active project; polling remains the fallback path. */
+function isCurrent(context) {
+  return context.pid === store.pid && context.generation === projectGeneration;
+}
+
+export function fetchState() {
+  const context = requestContext();
+  if (stateRequest && stateRequest.pid === context.pid && stateRequest.generation === context.generation) return stateRequest.promise;
+  const version = stateVersion;
+  const request = fetch(context.base + "/state", { headers: { accept: "application/json" } })
+    .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+    .then((j) => {
+      if (!isCurrent(context) || stateVersion !== version) return;
+      stateVersion += 1;
+      store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender();
+    })
+    .catch(() => {
+      if (!isCurrent(context) || stateVersion !== version) return;
+      store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender();
+    });
+  const entry = { ...context, promise: request };
+  stateRequest = entry;
+  void request.then(() => { if (stateRequest === entry) stateRequest = null; });
+  return request;
+}
+
+/** One EventSource follows the active project; polling is reserved for a failed stream. */
 export function startLiveUpdates() {
   if (!store.auto || eventSource || reconnectTimer) return;
-  const source = new EventSource(apiBase() + "/events");
+  const context = requestContext();
+  const source = new EventSource(context.base + "/events");
   eventSource = source;
   source.addEventListener("snapshot", (event) => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
     try {
       const payload = JSON.parse(event.data);
       if (!payload || !payload.snapshot) return;
+      stateVersion += 1;
       store.state = payload.snapshot;
       store.lastOk = Date.now();
+      sseConnected = true;
       store.conn = "sse";
       rerender();
       if (payload.board_dirty) fetchBoard();
@@ -34,18 +65,20 @@ export function startLiveUpdates() {
     }
   });
   source.onopen = () => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
+    sseConnected = true;
     reconnectDelay = 1000;
     store.conn = "sse";
     rerender();
   };
   source.onerror = () => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
     source.close();
     eventSource = null;
+    sseConnected = false;
     store.conn = "stale";
     rerender();
-    void fetchState();
+    void pollLiveFallback();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       startLiveUpdates();
@@ -54,16 +87,25 @@ export function startLiveUpdates() {
   };
 }
 
+/** Start the console without racing a direct board fetch against SSE's initial dirty snapshot. */
+export function bootstrapLiveUpdates() {
+  void fetchState();
+  startLiveUpdates();
+}
+
 export function stopLiveUpdates() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
   if (eventSource) eventSource.close();
   eventSource = null;
+  sseConnected = false;
   reconnectDelay = 1000;
 }
 
 export function restartLiveUpdates() {
   stopLiveUpdates();
+  projectGeneration += 1;
+  stateVersion = 0;
   startLiveUpdates();
 }
 
@@ -79,11 +121,22 @@ export function setAutoRefresh(enabled) {
   rerender();
 }
 
+/** Poll only while SSE is unavailable; a healthy stream already carries state updates. */
+export function pollLiveFallback() {
+  if (!store.auto || (eventSource && sseConnected)) return Promise.resolve();
+  const context = requestContext();
+  return fetchState().then(() => {
+    if (!isCurrent(context) || (eventSource && sseConnected)) return;
+    return Promise.all([fetchBoard(), refreshOpenDetail()]);
+  });
+}
+
 export function fetchBoard() {
   if (!store.state || !store.state.meta || !store.state.meta.can_board) return Promise.resolve();
-  return fetch(apiBase() + "/issues", { headers: { accept: "application/json" } })
+  const context = requestContext();
+  return fetch(context.base + "/issues", { headers: { accept: "application/json" } })
     .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((j) => { store.board = j; rerender(); })
+    .then((j) => { if (isCurrent(context)) { store.board = j; rerender(); } })
     .catch(() => {});
 }
 
@@ -95,16 +148,17 @@ function viewingDetail(identifier) {
 }
 
 export function loadDetail(identifier) {
-  return fetch(apiBase() + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
+  const context = requestContext();
+  return fetch(context.base + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
     .then((res) => {
-      if (!viewingDetail(identifier)) return;
+      if (!isCurrent(context) || !viewingDetail(identifier)) return;
       if (res.ok) { store.detailData = res.j; store.detailErr = null; }
       else { store.detailData = null; store.detailErr = (res.j.error && res.j.error.message) || "Not found"; }
       rerender();
     })
     .catch(() => {
-      if (!viewingDetail(identifier)) return;
+      if (!isCurrent(context) || !viewingDetail(identifier)) return;
       if (!store.detailData) { store.detailErr = "Failed to load detail."; rerender(); }
     });
 }

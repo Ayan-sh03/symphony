@@ -49,6 +49,7 @@ interface SseHub {
   clients: Set<SseClient>;
   unsubscribe: (() => void) | null;
   notifyTimer: NodeJS.Timeout | null;
+  boardDirty: boolean;
 }
 
 const SSE_MAX_CLIENTS_PER_PROJECT = 16;
@@ -351,28 +352,32 @@ export class SymphonyHttpServer {
     req.once("aborted", close);
     res.once("close", close);
     client.heartbeat = setInterval(() => this.writeSse(client, ": heartbeat\n\n"), SSE_HEARTBEAT_MS);
-    this.writeSseSnapshot(client, orch);
+    // The initial snapshot has no board payload, so make the client load it once.
+    this.writeSseSnapshot(client, orch, true);
   }
 
   private sseHub(orch: Orchestrator): SseHub {
     const existing = this.sseHubs.get(orch);
     if (existing) return existing;
-    const hub: SseHub = { clients: new Set(), unsubscribe: null, notifyTimer: null };
-    hub.unsubscribe = orch.onChange(() => this.queueSseSnapshot(orch, hub));
+    const hub: SseHub = { clients: new Set(), unsubscribe: null, notifyTimer: null, boardDirty: false };
+    hub.unsubscribe = orch.onChange((change) => this.queueSseSnapshot(orch, hub, change.board_dirty));
     this.sseHubs.set(orch, hub);
     return hub;
   }
 
-  private queueSseSnapshot(orch: Orchestrator, hub: SseHub): void {
+  private queueSseSnapshot(orch: Orchestrator, hub: SseHub, boardDirty: boolean): void {
+    hub.boardDirty ||= boardDirty;
     if (hub.notifyTimer) return;
     hub.notifyTimer = setTimeout(() => {
       hub.notifyTimer = null;
-      for (const client of [...hub.clients]) this.writeSseSnapshot(client, orch);
+      const dirty = hub.boardDirty;
+      hub.boardDirty = false;
+      for (const client of [...hub.clients]) this.writeSseSnapshot(client, orch, dirty);
     }, SSE_COALESCE_MS);
   }
 
-  private writeSseSnapshot(client: SseClient, orch: Orchestrator): void {
-    this.writeSse(client, `event: snapshot\ndata: ${JSON.stringify({ snapshot: orch.snapshot(), board_dirty: true })}\n\n`);
+  private writeSseSnapshot(client: SseClient, orch: Orchestrator, boardDirty: boolean): void {
+    this.writeSse(client, `event: snapshot\ndata: ${JSON.stringify({ snapshot: orch.snapshot(), board_dirty: boardDirty })}\n\n`);
   }
 
   private writeSse(client: SseClient, payload: string): void {
@@ -389,6 +394,7 @@ export class SymphonyHttpServer {
     if (hub.clients.size !== 0) return;
     if (hub.notifyTimer) clearTimeout(hub.notifyTimer);
     hub.notifyTimer = null;
+    hub.boardDirty = false;
     hub.unsubscribe?.();
     hub.unsubscribe = null;
     this.sseHubs.delete(orch);

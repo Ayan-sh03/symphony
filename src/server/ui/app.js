@@ -1,12 +1,12 @@
 /**
- * Console entry (SPEC §13.7.1). Boots from the inlined snapshot, then polls
- * `/api/v1/projects/<pid>/state` for live updates. All painting goes through one
+ * Console entry (SPEC §13.7.1). Boots from the inlined snapshot, then uses SSE
+ * for live updates and bounded polling only while reconnecting. All painting goes through one
  * unconditional lit-html render — lit diffs the DOM in place, so background polls
  * never wipe focus, open menus, or in-flight form input.
  */
 import { html, render } from "./vendor/lit-html/lit-html.js";
 import { store, setRenderer, rerender, validPid, THEME_KEY } from "./store.js";
-import { fetchState, fetchBoard, refreshOpenDetail, startLiveUpdates, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue, refreshAgents, refreshModels, ensureModels } from "./api.js";
+import { fetchState, fetchBoard, bootstrapLiveUpdates, pollLiveFallback, pollNow, setAutoRefresh, setState, setDefaultAgent, setIssueAgent, stopIssue, pushBranch, deleteIssue, refreshAgents, refreshModels, ensureModels } from "./api.js";
 import { copyText } from "./clipboard.js";
 import { hashFor, navigate, goBoard, switchProject, applyRoute } from "./router.js";
 import { toast } from "./toast.js";
@@ -167,10 +167,8 @@ window.addEventListener("hashchange", applyRoute);
 applyRoute();
 // The inlined snapshot is only for boot.selected; fetch the active project's fresh
 // state so a restored (different) project paints immediately instead of on next poll.
-fetchState();
-fetchBoard();
-startLiveUpdates();
-setInterval(() => { if (store.auto) { fetchState(); fetchBoard(); refreshOpenDetail(); } }, 2500);
+bootstrapLiveUpdates();
+setInterval(() => { void pollLiveFallback(); }, 2500);
 // Keep relative times and the connection line honest between fetches; lit only
 // touches text whose value actually changed, so this is cheap and non-destructive.
 setInterval(rerender, 1000);
