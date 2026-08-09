@@ -822,6 +822,42 @@ test("stopping during a failed retry refresh cannot publish a retry after shutdo
   });
 });
 
+test("stopping during a candidate refresh cannot halt or claim work after shutdown", async () => {
+  registerAgentFactory(makeFakeFactory("tick-ok"));
+  registerAgentFactory(makeFakeFactory("tick-missing"));
+  const { wfPath, workflow, config } = setupWith("fake-tick-ok", [
+    todo("ST-1", { agent: "fake-tick-missing" }),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  (orch as any).agentDetection = [{
+    kind: "fake-tick-missing", registered: true, installed: false, command: "fake-tick-missing",
+    command_field: "test.command", usable: false, reason: "not installed",
+    checked_at: new Date().toISOString(),
+  }];
+  (orch as any).agentDetectionAt = Date.now();
+
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByStates.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByStates = async (states: string[]) => {
+    refreshStarted();
+    await refreshHeld;
+    return originalFetch(states);
+  };
+
+  const tick = orch.tick();
+  await refreshStartedAt;
+  orch.stop();
+  releaseRefresh();
+  await tick;
+
+  assert.equal(orch.snapshot().counts.halted, 0, "a stale tick must not publish a halt after stop");
+  assert.equal((orch as any).claimed.has("ST-1"), false, "a stale tick must not recreate a claim after stop");
+});
+
 test("retries stop at max_retry_attempts and the issue halts until its state changes", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
   const { issuesDir, wfPath } = setup("fail");

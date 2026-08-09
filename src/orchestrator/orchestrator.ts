@@ -958,12 +958,14 @@ export class Orchestrator {
   /** Poll-and-dispatch tick (SPEC §8.1, §16.2). */
   async tick(): Promise<void> {
     if (this.stopped) return;
+    const generation = this.lifecycleGeneration;
     this.refreshQueued = false;
     // Fire-and-forget: this tick uses whatever discovery already knows, and the
     // result lands for the next one. Dispatch never waits on a process spawn.
     this.scheduleAgentDetection();
     try {
       await this.reconcile();
+      if (!this.lifecycleIsActive(generation)) return;
 
       const v = this.validateDispatchConfig();
       if (!v.ok) {
@@ -980,6 +982,7 @@ export class Orchestrator {
         this.notify();
         return;
       }
+      if (!this.lifecycleIsActive(generation)) return;
 
       // A halted issue that left the active states (edited out-of-band) no longer
       // needs the operator hold; release its claim.
