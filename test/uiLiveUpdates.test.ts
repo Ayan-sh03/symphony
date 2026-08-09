@@ -26,7 +26,9 @@ test("healthy SSE snapshots avoid fallback polling and only reload a dirty board
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ meta: { can_board: true } }) });
   };
 
+  // @ts-expect-error Console assets are browser ES modules and intentionally have no .d.ts files.
   const api = await import("../src/server/ui/api.js");
+  // @ts-expect-error Console assets are browser ES modules and intentionally have no .d.ts files.
   const { store } = await import("../src/server/ui/store.js");
   store.state = { meta: { can_board: true } };
   store.route = { name: "board" };

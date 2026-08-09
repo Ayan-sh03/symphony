@@ -5,15 +5,16 @@ import { toast } from "./toast.js";
 let eventSource = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
+let sseConnected = false;
 
 export function fetchState() {
   return fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
     .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource ? "sse" : "poll"; rerender(); })
+    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender(); })
     .catch(() => { store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender(); });
 }
 
-/** One EventSource follows the active project; polling remains the fallback path. */
+/** One EventSource follows the active project; polling is reserved for a failed stream. */
 export function startLiveUpdates() {
   if (!store.auto || eventSource || reconnectTimer) return;
   const source = new EventSource(apiBase() + "/events");
@@ -25,6 +26,7 @@ export function startLiveUpdates() {
       if (!payload || !payload.snapshot) return;
       store.state = payload.snapshot;
       store.lastOk = Date.now();
+      sseConnected = true;
       store.conn = "sse";
       rerender();
       if (payload.board_dirty) fetchBoard();
@@ -35,6 +37,7 @@ export function startLiveUpdates() {
   });
   source.onopen = () => {
     if (eventSource !== source) return;
+    sseConnected = true;
     reconnectDelay = 1000;
     store.conn = "sse";
     rerender();
@@ -43,9 +46,10 @@ export function startLiveUpdates() {
     if (eventSource !== source) return;
     source.close();
     eventSource = null;
+    sseConnected = false;
     store.conn = "stale";
     rerender();
-    void fetchState();
+    void pollLiveFallback();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       startLiveUpdates();
@@ -59,6 +63,7 @@ export function stopLiveUpdates() {
   reconnectTimer = null;
   if (eventSource) eventSource.close();
   eventSource = null;
+  sseConnected = false;
   reconnectDelay = 1000;
 }
 
@@ -77,6 +82,12 @@ export function setAutoRefresh(enabled) {
     stopLiveUpdates();
   }
   rerender();
+}
+
+/** Poll only while SSE is unavailable; a healthy stream already carries state updates. */
+export function pollLiveFallback() {
+  if (!store.auto || (eventSource && sseConnected)) return Promise.resolve();
+  return Promise.all([fetchState(), fetchBoard(), refreshOpenDetail()]);
 }
 
 export function fetchBoard() {
