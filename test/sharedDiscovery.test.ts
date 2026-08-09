@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentDiscoveryCache } from "../src/agent/discoveryCache.ts";
+import { agentModelDiscoveryCacheKey } from "../src/agent/registry.ts";
 
 const config = {} as never;
 const logger = {} as never;
@@ -105,4 +106,56 @@ test("a failed shared probe is isolated and can be retried", async () => {
   await assert.rejects(cache.detect(config, logger), /unavailable/);
   await cache.detect(config, logger);
   assert.equal(calls, 2);
+});
+
+test("an older in-flight probe cannot overwrite a completed forced refresh", async () => {
+  let now = 0;
+  const releases: ((value: string) => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "same",
+    modelKey: () => "unused",
+    detect: () => new Promise((resolve) => releases.push((value) => resolve([{
+      kind: value,
+      registered: true,
+      installed: true,
+      command: value,
+      command_field: `${value}.command`,
+      usable: true,
+      checked_at: value,
+    }]))),
+    listModels: async () => [],
+    now: () => now,
+  });
+
+  const oldProbe = cache.detect(config, logger);
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 1001;
+  const refreshed = cache.detect(config, logger, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases.length, 2);
+
+  releases[1]!("new");
+  assert.equal((await refreshed)[0]?.kind, "new");
+  releases[0]!("old");
+  assert.equal((await oldProbe)[0]?.kind, "old", "the original caller still receives its own result");
+  assert.equal((await cache.detect(config, logger))[0]?.kind, "new", "cache publication follows probe generation, not completion order");
+});
+
+test("built-in model cache keys separate identical commands run from different cwd", () => {
+  const query = (kind: "codex" | "opencode", workflowDir: string) => ({
+    config: {
+      workflowDir,
+      codex: { command: "codex app-server" },
+      opencode: { command: "opencode", model: null },
+    } as never,
+    logger,
+    env: {},
+    kind,
+  });
+
+  for (const kind of ["codex", "opencode"] as const) {
+    const left = query(kind, "C:/projects/left");
+    const right = query(kind, "C:/projects/right");
+    assert.notEqual(agentModelDiscoveryCacheKey(kind, left), agentModelDiscoveryCacheKey(kind, right));
+  }
 });

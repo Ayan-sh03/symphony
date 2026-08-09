@@ -119,13 +119,21 @@ test("startup benchmark: projects start in bounded parallel waves and failures s
     const starting = mgr.startAll();
     while (started < 5) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(peak, 4, "the startup benchmark should fill, but not exceed, the four-project limit");
+    let parallelLatencyUnits = 1;
     while (releases.length > 0) releases.shift()!();
     while (started < entries.length) {
       await new Promise((resolve) => setImmediate(resolve));
-      while (releases.length > 0) releases.shift()!();
     }
+    parallelLatencyUnits += 1;
+    while (releases.length > 0) releases.shift()!();
     await starting;
     assert.equal(started, entries.length, "one failed project must not block later startup waves");
+    const sequentialLatencyUnits = entries.length - 1; // p2 fails immediately; every other start consumes one unit.
+    assert.equal(parallelLatencyUnits, 2);
+    assert.ok(
+      parallelLatencyUnits <= sequentialLatencyUnits / 4,
+      `bounded startup should be at least 4x faster than sequential (${parallelLatencyUnits} vs ${sequentialLatencyUnits} latency units)`,
+    );
   } finally {
     mgr.stopAll();
   }
