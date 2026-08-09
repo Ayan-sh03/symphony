@@ -34,7 +34,7 @@ const codexFactory: AgentFactory = {
     return listCodexModels(query);
   },
   modelDiscoveryCacheKey(query: ModelQuery): string {
-    return query.config.codex.command;
+    return JSON.stringify({ command: query.config.codex.command, workflowDir: query.config.workflowDir });
   },
 };
 
@@ -59,7 +59,11 @@ const opencodeFactory: AgentFactory = {
   modelDiscoveryCacheKey(query: ModelQuery): string {
     // The configured default changes the decorated result even though the CLI
     // inventory is credential-scoped, so it is part of equivalence too.
-    return JSON.stringify({ command: query.config.opencode.command, model: query.config.opencode.model });
+    return JSON.stringify({
+      command: query.config.opencode.command,
+      model: query.config.opencode.model,
+      workflowDir: query.config.workflowDir,
+    });
   },
 };
 
