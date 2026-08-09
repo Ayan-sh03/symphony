@@ -481,3 +481,54 @@ test("concurrent mutations to one issue are serialized without lost updates", as
     fsPromises.writeFile = originalWriteFile;
   }
 });
+
+test("a delete queued behind an in-flight mutation wins and cannot be recreated", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as {
+    rename: (...args: unknown[]) => Promise<unknown>;
+    unlink: (...args: unknown[]) => Promise<unknown>;
+  };
+  const originalRename = fsPromises.rename;
+  const originalUnlink = fsPromises.unlink;
+  let releaseRename!: () => void;
+  const released = new Promise<void>((resolve) => { releaseRename = resolve; });
+  let markRenameStarted!: () => void;
+  const renameStarted = new Promise<void>((resolve) => { markRenameStarted = resolve; });
+  let markTargetUnlinked!: () => void;
+  const targetUnlinked = new Promise<void>((resolve) => { markTargetUnlinked = resolve; });
+
+  fsPromises.rename = async (...args: unknown[]) => {
+    if (String(args[1]) === file) {
+      markRenameStarted();
+      await released;
+    }
+    return originalRename(...args);
+  };
+  fsPromises.unlink = async (...args: unknown[]) => {
+    const result = await originalUnlink(...args);
+    if (String(args[0]) === file) markTargetUnlinked();
+    return result;
+  };
+
+  try {
+    const mutation = a.setIssueState("A", "done");
+    await renameStarted;
+    const deletion = a.deleteIssue("A");
+    // The old implementation reaches unlink while the earlier rename is paused;
+    // a queued delete cannot reach it until the mutation publishes and releases.
+    await Promise.race([targetUnlinked, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    releaseRename();
+    await Promise.all([mutation, deletion]);
+
+    assert.equal(fs.existsSync(file), false, "the later successful delete is the final filesystem operation");
+    assert.deepEqual(await a.fetchIssuesByIds(["A"]), [], "the index retains the deletion tombstone");
+  } finally {
+    releaseRename();
+    fsPromises.rename = originalRename;
+    fsPromises.unlink = originalUnlink;
+  }
+});
