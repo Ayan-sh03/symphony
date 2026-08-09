@@ -320,3 +320,64 @@ test("follow-up fields round-trip on create and are never rewritten by an edit",
   assert.equal(edited.stream_identifier, "A-1", "the stream survives an edit untouched");
   assert.equal(edited.follow_up_for, "A-1");
 });
+
+test("indexed reads refresh hand edits without rereading unchanged issue files", async () => {
+  const files: Record<string, unknown> = {};
+  for (let i = 0; i < 80; i++) {
+    files[`${i}.json`] = { id: `I-${i}`, identifier: `I-${i}`, title: "t", state: "todo" };
+  }
+  const dir = mkDir(files);
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+
+  // Populate the index, then observe filesystem reads performed by steady-state
+  // id lookups. Directory metadata may be checked, but unchanged records must not
+  // be reparsed one by one.
+  await a.fetchIssuesByIds(["I-40"]);
+  const fsPromises = fs.promises as unknown as { readFile: typeof fs.promises.readFile };
+  const originalReadFile = fsPromises.readFile;
+  let reads = 0;
+  fsPromises.readFile = async (...args: Parameters<typeof fs.promises.readFile>) => {
+    reads++;
+    return originalReadFile(...args);
+  };
+  try {
+    const [unchanged] = await a.fetchIssuesByIds(["I-40"]);
+    assert.equal(unchanged!.state, "todo");
+    assert.equal(reads, 0, "a steady-state ID lookup does not reparse every record");
+
+    fs.writeFileSync(path.join(dir, "40.json"), JSON.stringify({ id: "I-40", identifier: "I-40", title: "t", state: "done" }));
+    const [edited] = await a.fetchIssuesByIds(["I-40"]);
+    assert.equal(edited!.state, "done", "hand edits are picked up from changed metadata");
+    assert.equal(reads, 1, "only the changed record is reread");
+
+    fs.unlinkSync(path.join(dir, "40.json"));
+    assert.deepEqual(await a.fetchIssuesByIds(["I-40"]), [], "hand deletions are picked up too");
+  } finally {
+    fsPromises.readFile = originalReadFile;
+  }
+});
+
+test("mutations use the index and return their normalized record without a second scan", async () => {
+  const files: Record<string, unknown> = {};
+  for (let i = 0; i < 80; i++) {
+    files[`${i}.json`] = { id: `I-${i}`, identifier: `I-${i}`, title: "t", state: "todo" };
+  }
+  const dir = mkDir(files);
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["I-40"]);
+
+  const fsPromises = fs.promises as unknown as { readFile: typeof fs.promises.readFile };
+  const originalReadFile = fsPromises.readFile;
+  let reads = 0;
+  fsPromises.readFile = async (...args: Parameters<typeof fs.promises.readFile>) => {
+    reads++;
+    return originalReadFile(...args);
+  };
+  try {
+    const updated = await a.setIssueState("I-40", "done");
+    assert.equal(updated.state, "done");
+    assert.equal(reads, 0, "the write returns its normalized in-memory record instead of rescanning it");
+  } finally {
+    fsPromises.readFile = originalReadFile;
+  }
+});
