@@ -45,7 +45,7 @@ function project(root: string, name: string, issueId: string, issueCount = 1): s
   return path.join(dir, "WORKFLOW.md");
 }
 
-async function withServer(fn: (base: string, mgr: ProjectManager, server: SymphonyHttpServer) => Promise<void>, issueCount = 1): Promise<void> {
+async function withServer(fn: (base: string, mgr: ProjectManager, server: SymphonyHttpServer, root: string) => Promise<void>, issueCount = 1): Promise<void> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-http-"));
   project(root, "a", "A-1", issueCount);
   project(root, "b", "B-1");
@@ -58,7 +58,7 @@ async function withServer(fn: (base: string, mgr: ProjectManager, server: Sympho
   const server = new SymphonyHttpServer({ manager: mgr, logger: silent, port: 0 });
   const port = await server.listen();
   try {
-    await fn(`http://127.0.0.1:${port}`, mgr, server);
+    await fn(`http://127.0.0.1:${port}`, mgr, server, root);
   } finally {
     server.close();
     mgr.stopAll();
@@ -85,7 +85,7 @@ class SlowSseResponse extends EventEmitter {
   }
 }
 
-test("board API is compact, conditionally readable, and caps a 3,000-issue page", { timeout: 15000 }, async () => {
+test("board API is compact and caps a 3,000-issue page", { timeout: 15000 }, async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/v1/projects/a/issues?limit=9999`);
     assert.equal(res.status, 200);
@@ -97,23 +97,80 @@ test("board API is compact, conditionally readable, and caps a 3,000-issue page"
     const page = JSON.parse(text) as any;
     assert.equal(page.issues.length, 500, "large responses are capped even when a higher limit is requested");
     assert.equal(page.total_issues, 3000);
-    assert.deepEqual(page.page, { limit: 500, next_cursor: "500" });
+    assert.equal(page.page.limit, 500);
+    assert.equal(typeof page.page.next_cursor, "string");
     assert.ok(text.length < JSON.stringify(page, null, 2).length, "compact serialization is smaller than indented JSON");
     assert.ok(page.issues.length < page.total_issues, "a large-board caller gets a bounded response instead of latency growing with every issue");
 
-    const unchanged = await fetch(`${base}/api/v1/projects/a/issues?limit=9999`, {
-      headers: { "if-none-match": etag! },
-    });
-    assert.equal(unchanged.status, 304);
-    assert.equal(await unchanged.text(), "");
-
-    const next = await fetch(`${base}/api/v1/projects/a/issues?limit=10&cursor=500`);
-    const nextPage = (await next.json()) as any;
-    assert.equal(next.status, 200);
-    assert.equal(nextPage.issues.length, 10);
-    assert.ok(!page.issues.some((issue: { identifier: string }) => issue.identifier === nextPage.issues[0].identifier), "the cursor advances beyond the first capped page");
-    assert.deepEqual(nextPage.page, { limit: 10, next_cursor: "510" });
   }, 3000);
+});
+
+test("board keyset cursors do not skip or duplicate issues across insertions and deletions", async () => {
+  await withServer(async (base, mgr, _server, root) => {
+    const issueDir = path.join(root, "a", "issues");
+    fs.unlinkSync(path.join(issueDir, "A-1.json"));
+    for (let n = 1; n <= 5; n += 1) {
+      const id = `I-${String(n).padStart(2, "0")}`;
+      fs.writeFileSync(path.join(issueDir, `${id}.json`), JSON.stringify({ identifier: id, title: id, state: "backlog" }));
+    }
+    (mgr.get("a")!.orchestrator as any).notify();
+    const url = `${base}/api/v1/projects/a/issues?limit=2`;
+    const first = (await (await fetch(url)).json()) as any;
+    assert.deepEqual(first.issues.map((issue: any) => issue.identifier), ["I-01", "I-02"]);
+    const cursor = first.page.next_cursor as string;
+
+    fs.unlinkSync(path.join(issueDir, "I-01.json"));
+    (mgr.get("a")!.orchestrator as any).notify();
+    const afterDelete = (await (await fetch(`${url}&cursor=${encodeURIComponent(cursor)}`)).json()) as any;
+    assert.deepEqual(afterDelete.issues.map((issue: any) => issue.identifier), ["I-03", "I-04"]);
+
+    fs.writeFileSync(path.join(issueDir, "I-025.json"), JSON.stringify({ identifier: "I-025", title: "inserted", state: "backlog" }));
+    (mgr.get("a")!.orchestrator as any).notify();
+    const afterInsert = (await (await fetch(`${url}&cursor=${encodeURIComponent(cursor)}`)).json()) as any;
+    assert.deepEqual(afterInsert.issues.map((issue: any) => issue.identifier), ["I-025", "I-03"]);
+  });
+});
+
+test("conditional board reads detect an external tracker edit immediately", async () => {
+  await withServer(async (base, _mgr, _server, root) => {
+    const url = `${base}/api/v1/projects/a/issues`;
+    const first = await fetch(url);
+    const etag = first.headers.get("etag")!;
+    fs.writeFileSync(path.join(root, "a", "issues", "A-1.json"), JSON.stringify({ identifier: "A-1", title: "edited externally", state: "backlog" }));
+
+    const changed = await fetch(url, { headers: { "if-none-match": etag } });
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get("etag"), etag);
+    const board = (await changed.json()) as any;
+    assert.equal(board.issues[0].title, "edited externally");
+  });
+});
+
+test("a board scan crossing notify cannot seed a stale conditional response", async () => {
+  await withServer(async (base, mgr, _server, root) => {
+    const orch = mgr.get("a")!.orchestrator as any;
+    const original = orch.adapter.listAllIssues.bind(orch.adapter);
+    const oldIssues = await original();
+    let entered!: () => void;
+    const scanning = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    orch.adapter.listAllIssues = async () => { entered(); await blocked; return oldIssues; };
+
+    const url = `${base}/api/v1/projects/a/issues`;
+    const pending = fetch(url);
+    await scanning;
+    fs.writeFileSync(path.join(root, "a", "issues", "A-1.json"), JSON.stringify({ identifier: "A-1", title: "changed during scan", state: "backlog" }));
+    orch.notify();
+    orch.adapter.listAllIssues = original;
+    release();
+    const stale = await pending;
+    const staleEtag = stale.headers.get("etag")!;
+
+    const fresh = await fetch(url, { headers: { "if-none-match": staleEtag } });
+    assert.equal(fresh.status, 200);
+    assert.equal(((await fresh.json()) as any).issues[0].title, "changed during scan");
+  });
 });
 
 test("GET /api/v1/projects lists every project and advertises add support", async () => {
