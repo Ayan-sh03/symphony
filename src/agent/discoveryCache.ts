@@ -32,10 +32,12 @@ export interface AgentDiscoveryCacheDeps {
 export class AgentDiscoveryCache {
   private availability = new Map<string, CacheEntry<AgentDetection[]>>();
   private availabilityInFlight = new Map<string, Promise<AgentDetection[]>>();
+  private availabilityForcedInFlight = new Map<string, Promise<AgentDetection[]>>();
   private availabilityGeneration = new Map<string, number>();
   private availabilityPublishedGeneration = new Map<string, number>();
   private models = new Map<string, CacheEntry<AgentModel[]>>();
   private modelsInFlight = new Map<string, Promise<AgentModel[]>>();
+  private modelsForcedInFlight = new Map<string, Promise<AgentModel[]>>();
   private modelsGeneration = new Map<string, number>();
   private modelsPublishedGeneration = new Map<string, number>();
   private availabilityKey: (config: ServiceConfigValues) => string;
@@ -54,19 +56,20 @@ export class AgentDiscoveryCache {
 
   async detect(config: ServiceConfigValues, logger: Logger, force = false): Promise<AgentDetection[]> {
     const key = this.availabilityKey(config);
-    return this.get(this.availability, this.availabilityInFlight, this.availabilityGeneration, this.availabilityPublishedGeneration, key, force, AVAILABILITY_TTL_MS, AVAILABILITY_FORCE_MIN_MS, () => this.detectAgentKinds(config, logger), () => true);
+    return this.get(this.availability, this.availabilityInFlight, this.availabilityForcedInFlight, this.availabilityGeneration, this.availabilityPublishedGeneration, key, force, AVAILABILITY_TTL_MS, AVAILABILITY_FORCE_MIN_MS, () => this.detectAgentKinds(config, logger), () => true);
   }
 
   async modelsFor(kind: string, query: ModelQuery, force = false): Promise<AgentModel[]> {
     // A digest makes credential/environment differences separate cache entries
     // without retaining their values in memory as map keys.
     const key = `${kind}:${this.modelKey(kind, query)}:${environmentFingerprint(query.env)}`;
-    return this.get(this.models, this.modelsInFlight, this.modelsGeneration, this.modelsPublishedGeneration, key, force, MODELS_TTL_MS, MODELS_FORCE_MIN_MS, () => this.listAgentModels(kind, query), (models) => models.length > 0);
+    return this.get(this.models, this.modelsInFlight, this.modelsForcedInFlight, this.modelsGeneration, this.modelsPublishedGeneration, key, force, MODELS_TTL_MS, MODELS_FORCE_MIN_MS, () => this.listAgentModels(kind, query), (models) => models.length > 0);
   }
 
   private get<T>(
     values: Map<string, CacheEntry<T>>,
     inFlight: Map<string, Promise<T>>,
+    forcedInFlight: Map<string, Promise<T>>,
     generations: Map<string, number>,
     publishedGenerations: Map<string, number>,
     key: string,
@@ -80,6 +83,8 @@ export class AgentDiscoveryCache {
     const age = hit ? this.now() - hit.at : Infinity;
     if (hit && !force && age < ttlMs) return Promise.resolve(hit.value);
     if (hit && force && age < forceMinMs) return Promise.resolve(hit.value);
+    const activeForced = forcedInFlight.get(key);
+    if (activeForced) return activeForced;
     if (!force) {
       const active = inFlight.get(key);
       if (active) return active;
@@ -98,9 +103,10 @@ export class AgentDiscoveryCache {
       }
       return value;
     }).finally(() => {
-      if (inFlight.get(key) === task) inFlight.delete(key);
+      const active = force ? forcedInFlight : inFlight;
+      if (active.get(key) === task) active.delete(key);
     });
-    inFlight.set(key, task);
+    (force ? forcedInFlight : inFlight).set(key, task);
     return task;
   }
 }
