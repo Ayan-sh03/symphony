@@ -15,7 +15,7 @@ import { refKey } from "../src/workspace/manager.ts";
 const silent = new Logger([{ name: "null", write() {} }], "error");
 
 /** Fake agent backend: on its first turn writes a "done" result file, then completes. */
-function makeFakeFactory(behavior: "done" | "fail"): AgentFactory {
+function makeFakeFactory(behavior: string): AgentFactory {
   return {
     kind: `fake-${behavior}`,
     create(opts: AgentSessionOptions): AgentSession {
@@ -199,9 +199,15 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
   }
 });
 
-test("completion bursts batch tracker refreshes and keep the event loop responsive", async () => {
+test("completion bursts coalesce refreshes, bound finalization, and keep the event loop responsive", async (t) => {
+  // Bounded finalization holds two 40 ms slices (< 300 ms); an unbounded 20-stream
+  // burst holds roughly 800 ms, reproducing the issue's second-scale-stall direction.
+  const eventLoopLagTargetMs = 300;
   const kind = "fake-completion-burst";
   const started = new Set<string>();
+  const turnsEntered = new Set<string>();
+  let releaseTurns!: () => void;
+  const turnBarrier = new Promise<void>((resolve) => { releaseTurns = resolve; });
   registerAgentFactory({
     kind,
     create(opts: AgentSessionOptions): AgentSession {
@@ -211,6 +217,9 @@ test("completion bursts batch tracker refreshes and keep the event loop responsi
         get pid() { return "0"; },
         async start() { return { threadId: "t1" }; },
         async runTurn() {
+          turnsEntered.add(opts.issue.id);
+          if (turnsEntered.size === 20) releaseTurns();
+          await turnBarrier;
           fs.writeFileSync(
             path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
             JSON.stringify({ state: "done", comment: "completed in the burst" }),
@@ -237,7 +246,11 @@ test("completion bursts batch tracker refreshes and keep the event loop responsi
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
   const adapter = (orch as any).adapter;
   const fetchIssuesByIds = adapter.fetchIssuesByIds.bind(adapter);
+  const listAllIssues = adapter.listAllIssues.bind(adapter);
   const refreshes: string[][] = [];
+  let finalizationCalls = 0;
+  let activeFinalizations = 0;
+  let maxActiveFinalizations = 0;
   adapter.fetchIssuesByIds = async (ids: string[]) => {
     refreshes.push([...ids]);
     // Model a modest synchronous adapter cost. Twenty independent callbacks make
@@ -246,11 +259,29 @@ test("completion bursts batch tracker refreshes and keep the event loop responsi
     while (Date.now() < until) { /* deliberate synthetic tracker work */ }
     return fetchIssuesByIds(ids);
   };
+  adapter.listAllIssues = async () => {
+    finalizationCalls++;
+    activeFinalizations++;
+    maxActiveFinalizations = Math.max(maxActiveFinalizations, activeFinalizations);
+    // A real file-backed finalization has synchronous directory and JSON work. Add a
+    // fixed slice plus an async handoff so this test catches unbounded cleanup bursts.
+    const until = Date.now() + 40;
+    while (Date.now() < until) { /* deliberate synthetic finalization work */ }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      return await listAllIssues();
+    } finally {
+      activeFinalizations--;
+    }
+  };
 
   await orch.start();
   let heartbeat: NodeJS.Timeout | null = null;
   try {
     assert.ok(await waitFor(() => started.size === 20), "all synthetic workers should dispatch");
+    assert.ok(await waitFor(() => turnsEntered.size === 20), "all synthetic workers should enter the completion barrier");
+    assert.ok(await waitFor(() => orch.snapshot().counts.running === 0), "the completion burst should leave the worker set");
+    refreshes.length = 0; // Ignore the per-worker result refreshes; measure continuation handling only.
     let maxLagMs = 0;
     let expected = Date.now() + 10;
     heartbeat = setInterval(() => {
@@ -260,16 +291,24 @@ test("completion bursts batch tracker refreshes and keep the event loop responsi
     }, 10);
     const batched = await waitFor(() => refreshes.some((ids) => ids.length === 20), 3000);
     assert.ok(batched, "a completion burst should refresh all pending retries in one tracker request");
-    assert.ok(maxLagMs < 100, `completion handling should not stall the event loop (observed ${maxLagMs} ms)`);
+    assert.ok(await waitFor(() => finalizationCalls === 20, 5000), "every completed stream should reach file-tracker finalization");
+    assert.equal(refreshes.length, 1, "the completion burst should make exactly one tracker refresh");
+    assert.equal(maxActiveFinalizations, 2, "finalization should use its bounded two-stream slice");
+    assert.ok(maxLagMs < eventLoopLagTargetMs, `completion handling should not stall the event loop (observed ${maxLagMs} ms)`);
+    t.diagnostic(`completion burst: refreshes=${refreshes.length}, finalization_peak=${maxActiveFinalizations}, event_loop_lag_ms=${maxLagMs}/${eventLoopLagTargetMs}`);
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     orch.stop();
   }
 });
 
-async function syntheticBurstDuration(maxConcurrent: number): Promise<number> {
-  const kind = `fake-throughput-${maxConcurrent}`;
-  const completed = new Set<string>();
+interface BurstMetrics {
+  durationMs: number;
+  issuesPerSecond: number;
+}
+
+async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetrics> {
+  const kind = `fake-file-throughput-${maxConcurrent}`;
   let firstStartedAt = 0;
   registerAgentFactory({
     kind,
@@ -280,8 +319,11 @@ async function syntheticBurstDuration(maxConcurrent: number): Promise<number> {
         async start() { return { threadId: "t1" }; },
         async runTurn() {
           firstStartedAt ||= Date.now();
-          await new Promise((resolve) => setTimeout(resolve, 150));
-          completed.add(opts.issue.id);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "synthetic file-tracker throughput worker" }),
+          );
           return { status: "completed" } as const;
         },
         stop() { /* no-op */ },
@@ -296,36 +338,40 @@ async function syntheticBurstDuration(maxConcurrent: number): Promise<number> {
     state: "todo",
     dispatchable: true,
   }));
-  const { dir, wfPath, workflow, config } = setup(`throughput-${maxConcurrent}`, {
+  const { issuesDir, wfPath, workflow, config } = setup(`file-throughput-${maxConcurrent}`, {
     extraIssues,
     pollIntervalMs: 20,
     agentExtra: `\n  max_concurrent_agents: ${maxConcurrent}`,
   });
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
-  // The test measures agent-capacity scheduling, not per-workspace setup or the file
-  // tracker's synchronous reads (covered independently). A shared empty directory is
-  // safe because this backend never writes agent output.
-  (orch as any).workspaceManager = {
-    createForIssue: async () => ({ path: dir }),
-    deliveryBranchFor: () => null,
-    runBeforeRun: async () => true,
-    runAfterRun: async () => {},
-  };
   await orch.start();
   try {
-    assert.ok(await waitFor(() => completed.size === 20, 10000), `all workers should finish at concurrency ${maxConcurrent}`);
-    return Date.now() - firstStartedAt;
+    const identifiers = ["T-1", ...extraIssues.map((issue) => String(issue.identifier))];
+    assert.ok(await waitFor(
+      () => identifiers.every((id) => JSON.parse(fs.readFileSync(path.join(issuesDir, `${id}.json`), "utf8")).state === "done"),
+      15000,
+    ), `all file-tracker workers should finish at concurrency ${maxConcurrent}`);
+    const durationMs = Date.now() - firstStartedAt;
+    return { durationMs, issuesPerSecond: (identifiers.length * 1000) / durationMs };
   } finally {
     orch.stop();
   }
 }
 
-test("synthetic worker throughput scales from five to twenty concurrent agents", async () => {
-  const atFive = await syntheticBurstDuration(5);
-  const atTwenty = await syntheticBurstDuration(20);
+test("file-tracker completion throughput scales from five to twenty concurrent agents", async (t) => {
+  const atFive = await fileTrackerBurstMetrics(5);
+  const atTwenty = await fileTrackerBurstMetrics(20);
   assert.ok(
-    atTwenty < atFive * 0.65,
-    `20 workers should complete materially faster than 5 (5=${atFive} ms, 20=${atTwenty} ms)`,
+    atTwenty.durationMs < atFive.durationMs * 0.6,
+    `20 workers should complete materially faster than 5 (5=${atFive.durationMs} ms, 20=${atTwenty.durationMs} ms)`,
+  );
+  assert.ok(
+    atTwenty.issuesPerSecond > atFive.issuesPerSecond * 1.8,
+    `20 workers should increase real completion throughput (5=${atFive.issuesPerSecond.toFixed(2)}/s, 20=${atTwenty.issuesPerSecond.toFixed(2)}/s)`,
+  );
+  t.diagnostic(
+    `file-tracker burst: 5=${atFive.durationMs} ms (${atFive.issuesPerSecond.toFixed(2)}/s), `
+      + `20=${atTwenty.durationMs} ms (${atTwenty.issuesPerSecond.toFixed(2)}/s)`,
   );
 });
 

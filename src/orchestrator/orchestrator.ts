@@ -224,6 +224,8 @@ export class Orchestrator {
   private running = new Map<string, RunningEntry>();
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
+  /** Due retries remain stream owners while their coalesced tracker refresh is in flight. */
+  private drainingRetries = new Map<string, RetryEntry>();
   private halted = new Map<string, HaltedEntry>();
   private completed = new Set<string>();
   /** Streams whose delivery/cleanup is still in flight — busy, though nothing is running. */
@@ -334,6 +336,8 @@ export class Orchestrator {
    *   that matters most: a normal exit schedules a continuation retry, and the issue's
    *   delivery is only recorded when that timer fires. A sibling let in beforehand runs
    *   in a worktree that is about to be measured and cleaned for someone else.
+   * - `drainingRetries` — a due retry has left its timer map but its batched tracker
+   *   refresh has not replied yet. It keeps the same ownership across that async gap.
    * - `halted` — a stopped run can leave half-finished work in the worktree; mixing a
    *   sibling into it would put both on the branch. The hold ends when the operator
    *   changes the halted issue's state, which is the same thing that frees its claim.
@@ -342,6 +346,7 @@ export class Orchestrator {
     const out = new Set<string>(this.finalizing);
     for (const [, e] of this.running) out.add(e.stream);
     for (const [, r] of this.retry_attempts) out.add(r.stream);
+    for (const [, r] of this.drainingRetries) out.add(r.stream);
     for (const [, h] of this.halted) out.add(h.stream);
     return out;
   }
@@ -1488,6 +1493,7 @@ export class Orchestrator {
       const retry = this.retry_attempts.get(issueId);
       if (!retry) continue;
       this.retry_attempts.delete(issueId);
+      this.drainingRetries.set(issueId, retry);
       retries.push(retry);
     }
     if (retries.length === 0) return;
@@ -1497,17 +1503,22 @@ export class Orchestrator {
       refreshed = await this.adapter.fetchIssuesByIds(retries.map((retry) => retry.issue_id));
     } catch {
       for (const retry of retries) {
+        this.drainingRetries.delete(retry.issue_id);
         this.scheduleRetry(retry.issue_id, retry.attempt + 1, retry.identifier, retry.stream, "retry refresh failed", false);
       }
       return;
     }
 
     const refreshedById = new Map(refreshed.map((issue) => [issue.id, issue]));
-    const busy = this.busyStreams();
     let availableSlots = this.availableSlots();
     const runningByState = this.runningCountsByState();
     for (const retry of retries) {
       const issueId = retry.issue_id;
+      // The async gap has closed for this entry. Removing it before its synchronous
+      // reconciliation lets the retry itself re-enter, while other draining siblings
+      // in the same stream still keep their ownership.
+      this.drainingRetries.delete(issueId);
+      const busy = this.busyStreams();
       const issue = refreshedById.get(issueId);
       if (!issue) {
         this.claimed.delete(issueId);
