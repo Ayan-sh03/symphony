@@ -186,7 +186,7 @@ test("GET /events classifies live-only snapshots without invalidating the board"
   });
 });
 
-test("SSE backpressure retains only the latest snapshot and cleans up its drain listener", async () => {
+test("an initially backpressured SSE stream stays bounded until drain and cleans up", async () => {
   await withServer(async (_base, mgr, server) => {
     const orch = mgr.get("a")!.orchestrator;
     const response = new SlowSseResponse([false, true, false, false]);
@@ -201,10 +201,12 @@ test("SSE backpressure retains only the latest snapshot and cleans up its drain 
     try {
       assert.equal(client.backpressured, true, "a false write marks the client as blocked");
       assert.equal(response.listenerCount("drain"), 1, "only one drain listener is registered");
+      assert.match(response.writes[0]!, /\"board_dirty\":true/, "the accepted initial write requests the first board load");
 
       for (version = 1; version <= 5; version += 1) impl.writeSseSnapshot(client, orch, version === 2);
       impl.writeSse(orch, hub, client, ": heartbeat\n\n");
       assert.equal(response.writes.length, 1, "a blocked client receives no queued snapshots or heartbeats");
+      assert.deepEqual(client.pendingSnapshot, { boardDirty: true }, "the no-drain path retains one bounded snapshot state");
 
       version = 5;
       response.emit("drain");
