@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,7 +42,7 @@ function project(root: string, name: string, issueId: string): string {
   return path.join(dir, "WORKFLOW.md");
 }
 
-async function withServer(fn: (base: string, mgr: ProjectManager) => Promise<void>): Promise<void> {
+async function withServer(fn: (base: string, mgr: ProjectManager, server: SymphonyHttpServer) => Promise<void>): Promise<void> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-http-"));
   project(root, "a", "A-1");
   project(root, "b", "B-1");
@@ -54,10 +55,30 @@ async function withServer(fn: (base: string, mgr: ProjectManager) => Promise<voi
   const server = new SymphonyHttpServer({ manager: mgr, logger: silent, port: 0 });
   const port = await server.listen();
   try {
-    await fn(`http://127.0.0.1:${port}`, mgr);
+    await fn(`http://127.0.0.1:${port}`, mgr, server);
   } finally {
     server.close();
     mgr.stopAll();
+  }
+}
+
+/** A response whose kernel buffer stays full until the test explicitly emits drain. */
+class SlowSseResponse extends EventEmitter {
+  destroyed = false;
+  writableEnded = false;
+  writes: string[] = [];
+  private results: boolean[];
+
+  constructor(results: boolean[]) {
+    super();
+    this.results = results;
+  }
+
+  writeHead(): void {}
+  flushHeaders(): void {}
+  write(payload: string): boolean {
+    this.writes.push(payload);
+    return this.results.shift() ?? true;
   }
 }
 
@@ -162,6 +183,55 @@ test("GET /events classifies live-only snapshots without invalidating the board"
     ac.abort();
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(observers(), baseline, "last client leaving disposes the orchestrator observer");
+  });
+});
+
+test("an initially backpressured SSE stream stays bounded until drain and cleans up", async () => {
+  await withServer(async (_base, mgr, server) => {
+    const orch = mgr.get("a")!.orchestrator;
+    const response = new SlowSseResponse([false, true, false, false]);
+    const request = new EventEmitter();
+    const impl = server as any;
+    let version = 0;
+    (orch as any).snapshot = () => ({ version });
+
+    impl.openEventStream(orch, request, response);
+    const hub = impl.sseHubs.get(orch);
+    const client = [...hub.clients][0];
+    try {
+      assert.equal(client.backpressured, true, "a false write marks the client as blocked");
+      assert.equal(response.listenerCount("drain"), 1, "only one drain listener is registered");
+      assert.match(response.writes[0]!, /\"board_dirty\":true/, "the accepted initial write requests the first board load");
+
+      for (version = 1; version <= 5; version += 1) impl.writeSseSnapshot(client, orch, version === 2);
+      impl.writeSse(orch, hub, client, ": heartbeat\n\n");
+      assert.equal(response.writes.length, 1, "a blocked client receives no queued snapshots or heartbeats");
+      assert.deepEqual(client.pendingSnapshot, { boardDirty: true }, "the no-drain path retains one bounded snapshot state");
+
+      version = 5;
+      response.emit("drain");
+      assert.equal(response.writes.length, 2, "drain flushes one coalesced snapshot");
+      assert.match(response.writes[1]!, /\"version\":5/, "the flushed snapshot is the newest state");
+      assert.match(response.writes[1]!, /\"board_dirty\":true/, "coalescing preserves a pending board refresh");
+      assert.equal(response.listenerCount("drain"), 0, "a drained client does not retain a stale listener");
+
+      version = 6;
+      impl.writeSseSnapshot(client, orch, false);
+      assert.equal(client.backpressured, true, "a later false write blocks the client again");
+      assert.equal(response.listenerCount("drain"), 1, "each blocked period owns one listener");
+      version = 7;
+      impl.writeSseSnapshot(client, orch, false);
+      response.emit("drain");
+      assert.equal(client.backpressured, true, "a blocked drain flush can immediately block again");
+      assert.equal(response.listenerCount("drain"), 1, "a reblocked flush still has exactly one listener");
+      response.emit("close");
+      assert.equal(client.closed, true);
+      assert.equal(client.heartbeat, null, "closing clears the heartbeat timer");
+      assert.equal(response.listenerCount("drain"), 0, "closing removes an outstanding drain listener");
+      assert.equal(hub.clients.size, 0, "closing drops the client from the project hub");
+    } finally {
+      response.emit("close");
+    }
   });
 });
 

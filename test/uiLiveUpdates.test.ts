@@ -34,8 +34,38 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   const { store } = await import("../src/server/ui/store.js");
   store.state = { meta: { can_board: true } };
   store.route = { name: "board" };
+
+  // Opening the HTTP stream is not an application-level handshake: a server
+  // whose initial write is backpressured has sent headers but no usable snapshot.
   api.bootstrapLiveUpdates();
-  const source = FakeEventSource.instances[0]!;
+  const stalledSource = FakeEventSource.instances[0]!;
+  stalledSource.open();
+  await new Promise((resolve) => setImmediate(resolve));
+  calls.length = 0;
+
+  await api.pollLiveFallback();
+  assert.deepEqual(calls.sort(), ["/api/v1/projects/p/issues", "/api/v1/projects/p/state"].sort(),
+    "an open stream without its initial snapshot must remain in fallback mode");
+  assert.equal(store.conn, "poll", "transport open alone must not advertise SSE readiness");
+  calls.length = 0;
+  await api.pollLiveFallback();
+  assert.equal(boardRequestCount(), 1, "a permanently blocked initial write keeps bounded polling alive");
+
+  calls.length = 0;
+  stalledSource.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(boardRequestCount(), 1, "the drained initial snapshot still carries its board refresh");
+  assert.equal(store.conn, "sse", "the first valid snapshot completes the SSE handshake");
+  calls.length = 0;
+  await api.pollLiveFallback();
+  assert.deepEqual(calls, [], "fallback stops once a valid snapshot arrives");
+  api.stopLiveUpdates();
+
+  // Normal boot still has one board request: its initial snapshot arrives before
+  // the first fallback interval has a reason to run.
+  calls.length = 0;
+  api.bootstrapLiveUpdates();
+  const source = FakeEventSource.instances[1]!;
   source.open();
 
   source.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
@@ -68,7 +98,7 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   store.state = null;
   store.route = { name: "board" };
   api.bootstrapLiveUpdates();
-  const nullBootSource = FakeEventSource.instances[1]!;
+  const nullBootSource = FakeEventSource.instances[2]!;
   nullBootSource.open();
   nullBootSource.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
   await new Promise((resolve) => setImmediate(resolve));
@@ -78,7 +108,7 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   calls.length = 0;
   store.state = null;
   api.bootstrapLiveUpdates();
-  const failedBeforeSnapshot = FakeEventSource.instances[2]!;
+  const failedBeforeSnapshot = FakeEventSource.instances[3]!;
   failedBeforeSnapshot.error();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -121,10 +151,14 @@ test("project switches isolate delayed state, board, detail, and fallback respon
   store.pid = "b";
   store.state = null; store.board = null; store.detailData = null;
   api.restartLiveUpdates();
+  const bSource = FakeEventSource.instances.at(-1)!;
+  store.conn = "stale";
+  aSource.open();
+  assert.equal(store.conn, "stale", "a stale SSE open cannot complete the new project's snapshot handshake");
   aSource.emit("snapshot", { snapshot: { project: "a", meta: { can_board: true } }, board_dirty: true });
   assert.equal(store.state, null, "a stale SSE bootstrap snapshot cannot paint the new project");
   assert.equal(pending.some((request) => request.url.endsWith("/a/issues")), false, "a stale SSE snapshot cannot dirty the old board");
-  FakeEventSource.instances.at(-1)!.error();
+  bSource.error();
   assert.equal(pending.filter((request) => request.url.endsWith("/b/state")).length, 1,
     "project B fallback must not reuse project A's state request");
 
