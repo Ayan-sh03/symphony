@@ -111,6 +111,58 @@ test("createIssue writes a dispatchable file and rejects duplicates", async () =
   await assert.rejects(() => a.createIssue({ identifier: "NEW-1", title: "again" }), (e) => e instanceof AdapterError);
 });
 
+test("concurrent creates for one identifier have exactly one winner", async () => {
+  const dir = mkDir({});
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let calls = 0;
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) {
+      await Promise.race([secondStarted, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    } else if (calls === 2) {
+      markSecondStarted();
+    }
+    return originalWriteFile(...args);
+  };
+
+  try {
+    const results = await Promise.allSettled([
+      a.createIssue({ identifier: "NEW-1", title: "first" }),
+      a.createIssue({ identifier: "NEW-1", title: "second" }),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    assert.equal(fulfilled.length, 1, "only one caller publishes the stable target");
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0]!.reason instanceof AdapterError);
+    assert.equal(rejected[0]!.reason.category, "invalid_tracker_config");
+    assert.equal((await a.listAllIssues()).length, 1);
+  } finally {
+    markSecondStarted();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("createIssue never replaces an externally occupied target", async () => {
+  const dir = mkDir({});
+  const file = path.join(dir, "EXT-1.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.listAllIssues();
+  const external = { id: "OTHER", identifier: "OTHER", title: "external", state: "backlog" };
+  fs.writeFileSync(file, JSON.stringify(external));
+
+  await assert.rejects(
+    () => a.createIssue({ identifier: "EXT-1", title: "must not replace" }),
+    (err) => err instanceof AdapterError && err.category === "invalid_tracker_config" && /already exists/.test(err.message),
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), external);
+});
+
 test("createIssue requires identifier and title", async () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   await assert.rejects(() => a.createIssue({ identifier: "", title: "t" }), (e) => e instanceof AdapterError);
