@@ -86,3 +86,78 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
     "the first null-bootstrap fallback recovers state and board without duplicate requests");
   api.stopLiveUpdates();
 });
+
+test("project switches isolate delayed state, board, detail, and fallback responses", async (t) => {
+  type Pending = { url: string; resolve: (response: unknown) => void };
+  const pending: Pending[] = [];
+  (globalThis as any).fetch = (url: string) => new Promise((resolve) => pending.push({ url, resolve }));
+  FakeEventSource.instances.length = 0;
+
+  // @ts-expect-error Console assets are browser ES modules and intentionally have no .d.ts files.
+  const api = await import("../src/server/ui/api.js");
+  // @ts-expect-error Console assets are browser ES modules and intentionally have no .d.ts files.
+  const { store } = await import("../src/server/ui/store.js");
+  t.after(() => {
+    api.stopLiveUpdates();
+    for (const request of pending.splice(0)) request.resolve({ ok: false, json: () => Promise.resolve({}) });
+  });
+
+  const take = (url: string): Pending => {
+    const index = pending.findIndex((request) => request.url === url);
+    assert.notEqual(index, -1, `expected pending request ${url}; got ${pending.map((request) => request.url).join(", ")}`);
+    return pending.splice(index, 1)[0]!;
+  };
+  const answer = (request: Pending, body: unknown) => request.resolve({ ok: true, json: () => Promise.resolve(body) });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  store.pid = "a";
+  store.state = null; store.board = null; store.detailData = null; store.route = { name: "board" };
+  api.restartLiveUpdates();
+  const aState = api.fetchState();
+  const aStateAgain = api.fetchState();
+  assert.equal(pending.filter((request) => request.url.endsWith("/a/state")).length, 1, "dedupe applies within one project generation");
+
+  store.pid = "b";
+  store.state = null; store.board = null; store.detailData = null;
+  api.restartLiveUpdates();
+  FakeEventSource.instances.at(-1)!.error();
+  assert.equal(pending.filter((request) => request.url.endsWith("/b/state")).length, 1,
+    "project B fallback must not reuse project A's state request");
+
+  answer(take("/api/v1/projects/a/state"), { project: "a", meta: { can_board: true } });
+  await Promise.all([aState, aStateAgain]);
+  assert.equal(store.state, null, "a delayed project A state cannot commit after switching to B");
+  assert.equal(pending.some((request) => request.url.endsWith("/a/issues")), false, "stale A state cannot trigger an A board fallback");
+
+  answer(take("/api/v1/projects/b/state"), { project: "b", meta: { can_board: true } });
+  await flush();
+  answer(take("/api/v1/projects/b/issues"), { project: "b", issues: [] });
+  await flush();
+  assert.equal(store.state.project, "b");
+  assert.equal(store.board.project, "b", "project B's first fallback commits its own board");
+  api.stopLiveUpdates();
+
+  store.state = { project: "b", meta: { can_board: true } }; store.board = null;
+  const staleBoard = api.fetchBoard();
+  store.pid = "c"; store.state = { project: "c", meta: { can_board: true } }; store.board = null;
+  api.restartLiveUpdates();
+  const currentBoard = api.fetchBoard();
+  answer(take("/api/v1/projects/b/issues"), { project: "b", issues: ["stale"] });
+  await staleBoard;
+  assert.equal(store.board, null, "a delayed board cannot cross project generations");
+  answer(take("/api/v1/projects/c/issues"), { project: "c", issues: [] });
+  await currentBoard;
+  assert.equal(store.board.project, "c");
+
+  store.route = { name: "detail", id: "SAME-1" }; store.detailData = null;
+  const staleDetail = api.loadDetail("SAME-1");
+  store.pid = "d"; store.route = { name: "detail", id: "SAME-1" }; store.detailData = null;
+  api.restartLiveUpdates();
+  const currentDetail = api.loadDetail("SAME-1");
+  answer(take("/api/v1/projects/c/SAME-1"), { project: "c", issue_identifier: "SAME-1" });
+  await staleDetail;
+  assert.equal(store.detailData, null, "same-identifier detail responses remain project-scoped");
+  answer(take("/api/v1/projects/d/SAME-1"), { project: "d", issue_identifier: "SAME-1" });
+  await currentDetail;
+  assert.equal(store.detailData.project, "d");
+});
