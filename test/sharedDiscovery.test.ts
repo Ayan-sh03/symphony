@@ -159,3 +159,73 @@ test("built-in model cache keys separate identical commands run from different c
     assert.notEqual(agentModelDiscoveryCacheKey(kind, left), agentModelDiscoveryCacheKey(kind, right));
   }
 });
+
+test("an older successful model probe survives a newer forced empty failure sentinel", async () => {
+  let now = 0;
+  let calls = 0;
+  const releases: ((models: { id: string }[]) => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "unused",
+    modelKey: () => "same",
+    detect: async () => [],
+    listModels: () => {
+      calls += 1;
+      return new Promise((resolve) => releases.push(resolve));
+    },
+    now: () => now,
+  });
+  const query = { config, logger, env: {} };
+
+  const older = cache.modelsFor("codex", query);
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 2001;
+  const forced = cache.modelsFor("codex", query, true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  releases[1]!([]);
+  assert.deepEqual(await forced, [], "the refresh caller sees that its own probe failed");
+  releases[0]!([{ id: "good" }]);
+  assert.deepEqual(await older, [{ id: "good" }], "the original caller sees its successful result");
+  assert.deepEqual(await cache.modelsFor("codex", query), [{ id: "good" }]);
+  assert.equal(calls, 2, "the older success becomes last-known-good instead of forcing a third probe");
+});
+
+test("a forced empty model result returns empty but preserves an existing last-known-good", async () => {
+  let now = 0;
+  let calls = 0;
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "unused",
+    modelKey: () => "same",
+    detect: async () => [],
+    listModels: async () => {
+      calls += 1;
+      return calls === 1 ? [{ id: "good" }] : [];
+    },
+    now: () => now,
+  });
+  const query = { config, logger, env: {} };
+
+  assert.deepEqual(await cache.modelsFor("codex", query), [{ id: "good" }]);
+  now = 2001;
+  assert.deepEqual(await cache.modelsFor("codex", query, true), []);
+  assert.deepEqual(await cache.modelsFor("codex", query), [{ id: "good" }]);
+  assert.equal(calls, 2);
+});
+
+test("an initial empty model result is not shared for the TTL", async () => {
+  let calls = 0;
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "unused",
+    modelKey: () => "same",
+    detect: async () => [],
+    listModels: async () => {
+      calls += 1;
+      return calls === 1 ? [] : [{ id: "recovered" }];
+    },
+  });
+  const query = { config, logger, env: {} };
+
+  assert.deepEqual(await cache.modelsFor("codex", query), []);
+  assert.deepEqual(await cache.modelsFor("codex", query), [{ id: "recovered" }]);
+  assert.equal(calls, 2, "an equivalent project retries instead of inheriting an empty failure sentinel");
+});
