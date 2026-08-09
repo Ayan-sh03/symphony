@@ -137,9 +137,22 @@ export function pollLiveFallback() {
 export function fetchBoard() {
   if (!store.state || !store.state.meta || !store.state.meta.can_board) return Promise.resolve();
   const context = requestContext();
-  return fetch(context.base + "/issues", { headers: { accept: "application/json" } })
-    .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((j) => { if (isCurrent(context)) { store.board = j; rerender(); } })
+  const headers = { accept: "application/json" };
+  if (store.boardEtag) headers["if-none-match"] = store.boardEtag;
+  return fetch(context.base + "/issues", { headers })
+    .then((r) => {
+      if (r.status === 304) return null;
+      if (!r.ok) return Promise.reject();
+      const etag = r.headers.get("etag");
+      return r.json().then((board) => ({ board, etag }));
+    })
+    .then((result) => {
+      if (result && isCurrent(context)) {
+        store.boardEtag = result.etag;
+        store.board = result.board;
+        rerender();
+      }
+    })
     .catch(() => {});
 }
 

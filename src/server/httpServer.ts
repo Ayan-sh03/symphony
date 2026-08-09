@@ -8,12 +8,13 @@
  * per-project issue identifiers, which are only unique within a single tracker scope.
  */
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import type { Orchestrator } from "../orchestrator/orchestrator.ts";
+import type { BoardPageOptions, BoardView, Orchestrator } from "../orchestrator/orchestrator.ts";
 import { OrchestratorError } from "../orchestrator/orchestrator.ts";
 import type { IssuePatch } from "../tracker/types.ts";
 import type { ProjectManager } from "../project/manager.ts";
@@ -63,6 +64,9 @@ interface SseHub {
 const SSE_MAX_CLIENTS_PER_PROJECT = 16;
 const SSE_COALESCE_MS = 200;
 const SSE_HEARTBEAT_MS = 25000;
+/** An explicit board page never serializes more than this many issue rows. */
+const MAX_BOARD_PAGE_SIZE = 500;
+const DEFAULT_BOARD_PAGE_SIZE = 100;
 
 export class SymphonyHttpServer {
   private server: http.Server;
@@ -207,9 +211,11 @@ export class SymphonyHttpServer {
         if (!orch.canBoard()) {
           return this.json(res, 501, { error: { code: "not_supported", message: "tracker does not support a board view" } });
         }
+        const page = this.boardPage(req, res);
+        if (page === undefined) return;
         void orch
-          .board()
-          .then((b) => this.json(res, 200, b))
+          .board(page)
+          .then((b) => this.boardJson(req, res, b))
           .catch((err) => this.json(res, 500, { error: { code: "board_failed", message: String(err) } }));
         return;
       }
@@ -660,13 +666,65 @@ export class SymphonyHttpServer {
     }
   }
 
+  /** Parse an opt-in bounded board page; an omitted query preserves the legacy full board. */
+  private boardPage(req: http.IncomingMessage, res: http.ServerResponse): BoardPageOptions | null | undefined {
+    const query = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).searchParams;
+    const limitRaw = query.get("limit");
+    const cursorRaw = query.get("cursor");
+    if (limitRaw === null && cursorRaw === null) return null;
+
+    const integer = (raw: string | null): number | null => {
+      if (raw === null || !/^\d+$/.test(raw)) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) ? value : null;
+    };
+    const requestedLimit = limitRaw === null ? DEFAULT_BOARD_PAGE_SIZE : integer(limitRaw);
+    const offset = cursorRaw === null ? 0 : integer(cursorRaw);
+    if (requestedLimit === null || requestedLimit < 1 || offset === null) {
+      this.json(res, 400, { error: { code: "bad_request", message: "limit must be a positive integer and cursor must be a non-negative integer" } });
+      return undefined;
+    }
+    return { offset, limit: Math.min(requestedLimit, MAX_BOARD_PAGE_SIZE) };
+  }
+
+  /**
+   * Board reads use a weak ETag because `generated_at` is presentation metadata:
+   * its clock value can change while the board data is identical. Clients can
+   * therefore revalidate without downloading or parsing the same board again.
+   */
+  private boardJson(req: http.IncomingMessage, res: http.ServerResponse, board: BoardView): void {
+    const serialized = JSON.stringify(board);
+    const stable = serialized.replace(`"generated_at":"${board.generated_at}"`, '"generated_at":""');
+    const etag = `W/"${createHash("sha256").update(stable).digest("base64url")}"`;
+    if (etagMatches(req.headers["if-none-match"], etag)) {
+      res.writeHead(304, { etag, "cache-control": "private, must-revalidate" });
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "content-length": String(Buffer.byteLength(serialized)),
+      etag,
+      "cache-control": "private, must-revalidate",
+    });
+    res.end(serialized);
+  }
+
   private json(res: http.ServerResponse, status: number, body: unknown): void {
     res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(body, null, 2));
+    res.end(JSON.stringify(body));
   }
   private methodNotAllowed(res: http.ServerResponse): void {
     this.json(res, 405, { error: { code: "method_not_allowed", message: "unsupported method" } });
   }
+}
+
+/** `If-None-Match` uses weak comparison, which is exactly what board metadata needs. */
+function etagMatches(header: string | undefined, etag: string): boolean {
+  if (!header) return false;
+  const normalize = (value: string) => value.trim().replace(/^W\//i, "");
+  const wanted = normalize(etag);
+  return header.split(",").some((candidate) => candidate.trim() === "*" || normalize(candidate) === wanted);
 }
 
 /** Read and JSON-parse a request body, capped to guard against oversized payloads. */

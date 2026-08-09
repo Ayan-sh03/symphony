@@ -14,6 +14,7 @@ export const store = {
   pid: boot.selected || (boot.projects && boot.projects[0] && boot.projects[0].id) || "default",
   state: null,       // latest /state snapshot for the active project
   board: null,       // latest /issues board payload
+  boardEtag: null,   // conditional-read token for the active project's board
   route: { name: "board" },
   detailData: null,  // cached detail payload for the open issue
   detailErr: null,   // error string if the detail fetch failed

@@ -122,6 +122,9 @@ const AGENT_MODELS_FORCE_MIN_MS = 2000;
 /** Halt-reason prefix for "this host cannot run the backend this issue needs". */
 const AGENT_UNAVAILABLE = "agent_unavailable";
 
+/** A board burst (conditional read or adjacent page) should reuse its file scan. */
+const BOARD_SOURCE_CACHE_MS = 1000;
+
 interface RetryEntry {
   issue_id: string;
   identifier: string;
@@ -136,6 +139,12 @@ interface FinalizationJob {
   run: () => Promise<void>;
   resolve: () => void;
   reject: (err: unknown) => void;
+}
+
+interface BoardSource {
+  all: Issue[];
+  divergence: Map<string, { ahead: number; behind: number }>;
+  at: number;
 }
 
 /**
@@ -250,6 +259,9 @@ export class Orchestrator {
   private agentModelCache = new Map<string, { models: AgentModel[]; at: number; fetched_at: string }>();
   private agentModelsInFlight = new Map<string, Promise<AgentModel[]>>();
   private agentDiscoveryCache: AgentDiscoveryCache;
+  private boardSourceCache: BoardSource | null = null;
+  private boardSourceInFlight: Promise<BoardSource> | null = null;
+  private boardRevision = 0;
   /** Last "dispatch parked" reason logged, so a standing condition warns once. */
   private lastParkReason: string | null = null;
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
@@ -289,6 +301,10 @@ export class Orchestrator {
   }
   /** Notify console observers. Tracker/board mutations are dirty unless explicitly live-only. */
   private notify(boardDirty = true): void {
+    if (boardDirty) {
+      this.boardRevision += 1;
+      this.boardSourceCache = null;
+    }
     for (const cb of this.observers) {
       try {
         cb({ board_dirty: boardDirty });
@@ -873,14 +889,12 @@ export class Orchestrator {
     return typeof this.adapter.supportsBoard === "function" && this.adapter.supportsBoard();
   }
 
-  /** Full board view: every issue with its live runtime status, plus state ordering. */
-  async board(): Promise<BoardView> {
+  /** Full board view, or an explicit bounded page, with live runtime status and state ordering. */
+  async board(page: BoardPageOptions | null = null): Promise<BoardView> {
     if (!this.canBoard() || !this.adapter.listAllIssues) {
       throw new Error("the active tracker does not support a board view");
     }
-    const all = await this.adapter.listAllIssues();
-    // One git process for the whole board, not one per issue.
-    const divergence = await this.workspaceManager.branchAheadBehind();
+    const { all, divergence } = await this.boardSource();
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
@@ -890,7 +904,8 @@ export class Orchestrator {
       this.config.tracker.terminal_states,
       all.map((i) => i.state),
     );
-    const issues = all.map((i) => {
+    const visible = page ? all.slice(page.offset, page.offset + page.limit) : all;
+    const issues = visible.map((i) => {
       const run = this.running.get(i.id);
       const halt = this.halted.get(i.id) ?? null;
       const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : halt ? "halted" : "idle";
@@ -932,7 +947,7 @@ export class Orchestrator {
         merged_hint: delivered && counts !== null && counts.ahead === 0,
       };
     });
-    return {
+    const board: BoardView = {
       generated_at: new Date().toISOString(),
       order,
       active_states: this.config.tracker.active_states,
@@ -942,6 +957,42 @@ export class Orchestrator {
       start_state: this.config.tracker.active_states[0] ?? "todo",
       issues,
     };
+    if (!page) return board;
+    return {
+      ...board,
+      total_issues: all.length,
+      page: {
+        limit: page.limit,
+        next_cursor: page.offset + page.limit < all.length ? String(page.offset + page.limit) : null,
+      },
+    };
+  }
+
+  /** Reuse one complete tracker scan for immediate revalidation and nearby pages. */
+  private async boardSource(): Promise<BoardSource> {
+    const listAllIssues = this.adapter.listAllIssues;
+    if (!listAllIssues) throw new Error("the active tracker does not support a board view");
+    const now = Date.now();
+    if (this.boardSourceCache && now - this.boardSourceCache.at < BOARD_SOURCE_CACHE_MS) return this.boardSourceCache;
+    if (this.boardSourceInFlight) return this.boardSourceInFlight;
+
+    const revision = this.boardRevision;
+    const load = Promise.all([
+      listAllIssues.call(this.adapter),
+      // One git process for the whole board, not one per issue.
+      this.workspaceManager.branchAheadBehind(),
+    ]).then(([all, divergence]) => {
+      const source: BoardSource = { all, divergence, at: Date.now() };
+      // Never repopulate the cache with a scan that overlapped a runtime change.
+      if (this.boardRevision === revision) this.boardSourceCache = source;
+      return source;
+    });
+    this.boardSourceInFlight = load;
+    try {
+      return await load;
+    } finally {
+      this.boardSourceInFlight = null;
+    }
   }
 
   /** Move an issue to a new state, then poll promptly so dispatch reflects it. */
@@ -2174,6 +2225,16 @@ export interface BoardView {
   review_state: string | null;
   start_state: string;
   issues: BoardIssueView[];
+  /** Present for an explicitly paginated board response. */
+  total_issues?: number;
+  /** Present for an explicitly paginated board response. */
+  page?: { limit: number; next_cursor: string | null };
+}
+
+/** Offset page requested by the HTTP board route; null keeps the compatibility response. */
+export interface BoardPageOptions {
+  offset: number;
+  limit: number;
 }
 
 /** Order states for the board: backlog, then active, then terminal, then any others seen. */

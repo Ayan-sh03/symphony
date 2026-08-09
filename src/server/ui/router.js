@@ -43,7 +43,7 @@ export function switchProject(np) {
   if (!validPid(np) || np === store.pid) return;
   store.pid = np; savePid(np);
   // Model listings are per project (each resolves its own backend and config).
-  store.state = null; store.board = null; store.detailData = null; store.detailErr = null; store.models = {};
+  store.state = null; store.board = null; store.boardEtag = null; store.detailData = null; store.detailErr = null; store.models = {};
   navigate(hashFor("board"));
   restartLiveUpdates();
   fetchState(); fetchBoard();
@@ -55,7 +55,7 @@ export function applyRoute() {
   let changed = next.name !== store.route.name || next.id !== store.route.id;
   if (store.pid !== pidBefore) {
     // Model listings are per project (each resolves its own backend and config).
-  store.state = null; store.board = null; store.detailData = null; store.detailErr = null; store.models = {};
+  store.state = null; store.board = null; store.boardEtag = null; store.detailData = null; store.detailErr = null; store.models = {};
     restartLiveUpdates();
     fetchState(); fetchBoard();
     changed = true;
