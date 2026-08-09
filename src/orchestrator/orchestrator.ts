@@ -251,6 +251,8 @@ export class Orchestrator {
   private retryDrainTimer: NodeJS.Immediate | null = null;
   private dueRetries = new Set<string>();
   private stopped = false;
+  /** Invalidates async scheduler continuations that began before shutdown. */
+  private lifecycleGeneration = 0;
   private refreshQueued = false;
   private observers = new Set<() => void>();
 
@@ -424,6 +426,7 @@ export class Orchestrator {
   }
 
   stop(): void {
+    if (!this.stopped) this.lifecycleGeneration++;
     this.stopped = true;
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.retryDrainTimer) clearImmediate(this.retryDrainTimer);
@@ -1077,6 +1080,10 @@ export class Orchestrator {
   // ---- dispatch (SPEC §16.4) ----
 
   private dispatch(issue: Issue, attempt: number | null): void {
+    if (this.stopped) {
+      this.claimed.delete(issue.id);
+      return;
+    }
     const agentKind = this.resolveAgentKind(issue);
     const stream = this.streamOf(issue);
     const entry: RunningEntry = {
@@ -1243,6 +1250,10 @@ export class Orchestrator {
 
   /** SPEC §8.4 backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
   private scheduleRetry(issueId: string, attempt: number, identifier: string, stream: string, error: string | null, continuation: boolean): void {
+    if (this.stopped) {
+      this.claimed.delete(issueId);
+      return;
+    }
     // Failure-retry cap (extension): past the limit, halt instead of rescheduling.
     const cap = this.config.max_retry_attempts;
     if (!continuation && cap > 0 && attempt > cap) {
@@ -1480,12 +1491,12 @@ export class Orchestrator {
     if (this.retryDrainTimer) return;
     this.retryDrainTimer = setImmediate(() => {
       this.retryDrainTimer = null;
-      void this.drainRetries();
+      void this.drainRetries(this.lifecycleGeneration);
     });
   }
 
   /** SPEC §16.6 on_retry_timer, coalesced once per event-loop turn. */
-  private async drainRetries(): Promise<void> {
+  private async drainRetries(generation = this.lifecycleGeneration): Promise<void> {
     const dueIds = [...this.dueRetries];
     this.dueRetries.clear();
     const retries: RetryEntry[] = [];
@@ -1502,10 +1513,18 @@ export class Orchestrator {
     try {
       refreshed = await this.adapter.fetchIssuesByIds(retries.map((retry) => retry.issue_id));
     } catch {
+      if (!this.lifecycleIsActive(generation)) {
+        this.cancelDrainingRetries(retries);
+        return;
+      }
       for (const retry of retries) {
         this.drainingRetries.delete(retry.issue_id);
         this.scheduleRetry(retry.issue_id, retry.attempt + 1, retry.identifier, retry.stream, "retry refresh failed", false);
       }
+      return;
+    }
+    if (!this.lifecycleIsActive(generation)) {
+      this.cancelDrainingRetries(retries);
       return;
     }
 
@@ -1568,6 +1587,19 @@ export class Orchestrator {
       availableSlots--;
       const state = this.normState(issue.state);
       runningByState.set(state, (runningByState.get(state) ?? 0) + 1);
+    }
+    this.notify();
+  }
+
+  private lifecycleIsActive(generation: number): boolean {
+    return !this.stopped && generation === this.lifecycleGeneration;
+  }
+
+  /** Release retry ownership when shutdown invalidates an in-flight tracker read. */
+  private cancelDrainingRetries(retries: RetryEntry[]): void {
+    for (const retry of retries) {
+      this.drainingRetries.delete(retry.issue_id);
+      this.claimed.delete(retry.issue_id);
     }
     this.notify();
   }

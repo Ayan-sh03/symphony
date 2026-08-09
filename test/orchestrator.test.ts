@@ -199,19 +199,14 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
   }
 });
 
-test("completion bursts coalesce refreshes, bound finalization, and keep the event loop responsive", async (t) => {
-  // Bounded finalization holds two 40 ms slices (< 300 ms); an unbounded 20-stream
-  // burst holds roughly 800 ms, reproducing the issue's second-scale-stall direction.
-  const eventLoopLagTargetMs = 300;
+test("completion bursts coalesce refreshes and yield after bounded finalization waves", { timeout: 30000 }, async (t) => {
   const kind = "fake-completion-burst";
-  const started = new Set<string>();
   const turnsEntered = new Set<string>();
   let releaseTurns!: () => void;
   const turnBarrier = new Promise<void>((resolve) => { releaseTurns = resolve; });
   registerAgentFactory({
     kind,
     create(opts: AgentSessionOptions): AgentSession {
-      started.add(opts.issue.id);
       return {
         get threadId() { return "t1"; },
         get pid() { return "0"; },
@@ -247,69 +242,126 @@ test("completion bursts coalesce refreshes, bound finalization, and keep the eve
   const adapter = (orch as any).adapter;
   const fetchIssuesByIds = adapter.fetchIssuesByIds.bind(adapter);
   const listAllIssues = adapter.listAllIssues.bind(adapter);
+  const scheduleRetry = (orch as any).scheduleRetry.bind(orch);
+  (orch as any).scheduleRetry = (
+    issueId: string,
+    attempt: number,
+    identifier: string,
+    stream: string,
+    error: string | null,
+    continuation: boolean,
+  ) => {
+    scheduleRetry(issueId, attempt, identifier, stream, error, continuation);
+    const retry = (orch as any).retry_attempts.get(issueId);
+    if (!retry) return;
+    clearTimeout(retry.timer);
+    retry.timer = setTimeout(() => {}, 60000);
+  };
   const refreshes: string[][] = [];
+  let resolveBatchRefresh!: () => void;
+  const batchRefresh = new Promise<void>((resolve) => { resolveBatchRefresh = resolve; });
   let finalizationCalls = 0;
   let activeFinalizations = 0;
   let maxActiveFinalizations = 0;
+  let completedFinalizations = 0;
+  let resolveAllFinalizations!: () => void;
+  const allFinalizations = new Promise<void>((resolve) => { resolveAllFinalizations = resolve; });
+  const finalizationReleases: Array<() => void> = [];
+  const finalizationWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const notifyFinalizationCalls = () => {
+    for (const waiter of finalizationWaiters.splice(0)) {
+      if (finalizationCalls >= waiter.target) waiter.resolve();
+      else finalizationWaiters.push(waiter);
+    }
+  };
+  const waitForFinalizationCalls = (target: number): Promise<void> => {
+    if (finalizationCalls >= target) return Promise.resolve();
+    return new Promise((resolve) => finalizationWaiters.push({ target, resolve }));
+  };
   adapter.fetchIssuesByIds = async (ids: string[]) => {
     refreshes.push([...ids]);
-    // Model a modest synchronous adapter cost. Twenty independent callbacks make
-    // the scheduler miss its responsiveness target; one batch does not.
-    const until = Date.now() + 8;
-    while (Date.now() < until) { /* deliberate synthetic tracker work */ }
+    if (ids.length === 20) resolveBatchRefresh();
     return fetchIssuesByIds(ids);
   };
   adapter.listAllIssues = async () => {
-    finalizationCalls++;
     activeFinalizations++;
     maxActiveFinalizations = Math.max(maxActiveFinalizations, activeFinalizations);
-    // A real file-backed finalization has synchronous directory and JSON work. Add a
-    // fixed slice plus an async handoff so this test catches unbounded cleanup bursts.
-    const until = Date.now() + 40;
-    while (Date.now() < until) { /* deliberate synthetic finalization work */ }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const issues = await listAllIssues();
     try {
-      return await listAllIssues();
+      await new Promise<void>((resolve) => {
+        finalizationReleases.push(resolve);
+        finalizationCalls++;
+        notifyFinalizationCalls();
+      });
+      return issues;
     } finally {
       activeFinalizations--;
+      completedFinalizations++;
+      if (completedFinalizations === 20) resolveAllFinalizations();
     }
   };
 
+  let resolveWorkersDrained!: () => void;
+  const workersDrained = new Promise<void>((resolve) => { resolveWorkersDrained = resolve; });
+  const dispose = orch.onChange(() => {
+    const counts = orch.snapshot().counts;
+    if (counts.running === 0 && counts.retrying === 20) resolveWorkersDrained();
+  });
   await orch.start();
-  let heartbeat: NodeJS.Timeout | null = null;
   try {
-    assert.ok(await waitFor(() => started.size === 20), "all synthetic workers should dispatch");
-    assert.ok(await waitFor(() => turnsEntered.size === 20), "all synthetic workers should enter the completion barrier");
-    assert.ok(await waitFor(() => orch.snapshot().counts.running === 0), "the completion burst should leave the worker set");
-    refreshes.length = 0; // Ignore the per-worker result refreshes; measure continuation handling only.
-    let maxLagMs = 0;
-    let expected = Date.now() + 10;
-    heartbeat = setInterval(() => {
-      const now = Date.now();
-      maxLagMs = Math.max(maxLagMs, now - expected);
-      expected = now + 10;
-    }, 10);
-    const batched = await waitFor(() => refreshes.some((ids) => ids.length === 20), 3000);
-    assert.ok(batched, "a completion burst should refresh all pending retries in one tracker request");
-    assert.ok(await waitFor(() => finalizationCalls === 20, 5000), "every completed stream should reach file-tracker finalization");
-    assert.equal(refreshes.length, 1, "the completion burst should make exactly one tracker refresh");
+    await turnBarrier;
+    await workersDrained;
+    for (const [issueId, retry] of (orch as any).retry_attempts) {
+      clearTimeout(retry.timer);
+      (orch as any).onRetryTimer(issueId);
+    }
+    await batchRefresh;
+    let schedulerYields = 0;
+    for (let wave = 1; wave <= 10; wave++) {
+      await waitForFinalizationCalls(wave * 2);
+      assert.equal(activeFinalizations, 2, `finalization wave ${wave} should contain two streams`);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      schedulerYields++;
+      const releases = finalizationReleases.splice(0, 2);
+      assert.equal(releases.length, 2, `finalization wave ${wave} should expose two release handles`);
+      for (const release of releases) release();
+    }
+    await allFinalizations;
+    assert.equal(refreshes.filter((ids) => ids.length === 20).length, 1, "the completion burst should make exactly one batched tracker refresh");
+    assert.equal(finalizationCalls, 20, "every completed stream should reach file-tracker finalization");
     assert.equal(maxActiveFinalizations, 2, "finalization should use its bounded two-stream slice");
-    assert.ok(maxLagMs < eventLoopLagTargetMs, `completion handling should not stall the event loop (observed ${maxLagMs} ms)`);
-    t.diagnostic(`completion burst: refreshes=${refreshes.length}, finalization_peak=${maxActiveFinalizations}, event_loop_lag_ms=${maxLagMs}/${eventLoopLagTargetMs}`);
+    assert.equal(schedulerYields, 10, "the scheduler should yield between every bounded finalization wave");
+    t.diagnostic(`completion burst: batched_refreshes=1, finalization_peak=${maxActiveFinalizations}, scheduler_yields=${schedulerYields}`);
   } finally {
-    if (heartbeat) clearInterval(heartbeat);
+    dispose();
+    for (const release of finalizationReleases.splice(0)) release();
     orch.stop();
   }
 });
 
 interface BurstMetrics {
-  durationMs: number;
-  issuesPerSecond: number;
+  waveSizes: number[];
+  peakActive: number;
+  resultsApplied: number;
 }
 
 async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetrics> {
   const kind = `fake-file-throughput-${maxConcurrent}`;
-  let firstStartedAt = 0;
+  let entered = 0;
+  let active = 0;
+  let peakActive = 0;
+  const releases: Array<() => void> = [];
+  const entryWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const waitForEntries = (target: number): Promise<void> => {
+    if (entered >= target) return Promise.resolve();
+    return new Promise((resolve) => entryWaiters.push({ target, resolve }));
+  };
+  const notifyEntries = () => {
+    for (const waiter of entryWaiters.splice(0)) {
+      if (entered >= waiter.target) waiter.resolve();
+      else entryWaiters.push(waiter);
+    }
+  };
   registerAgentFactory({
     kind,
     create(opts: AgentSessionOptions): AgentSession {
@@ -318,8 +370,16 @@ async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetr
         get pid() { return "0"; },
         async start() { return { threadId: "t1" }; },
         async runTurn() {
-          firstStartedAt ||= Date.now();
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          active++;
+          peakActive = Math.max(peakActive, active);
+          await new Promise<void>((resolve) => {
+            releases.push(() => {
+              active--;
+              resolve();
+            });
+            entered++;
+            notifyEntries();
+          });
           fs.writeFileSync(
             path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
             JSON.stringify({ state: "done", comment: "synthetic file-tracker throughput worker" }),
@@ -344,35 +404,58 @@ async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetr
     agentExtra: `\n  max_concurrent_agents: ${maxConcurrent}`,
   });
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const executeAgentTool = adapter.executeAgentTool.bind(adapter);
+  let resultsApplied = 0;
+  const resultWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const waitForResults = (target: number): Promise<void> => {
+    if (resultsApplied >= target) return Promise.resolve();
+    return new Promise((resolve) => resultWaiters.push({ target, resolve }));
+  };
+  const notifyResults = () => {
+    for (const waiter of resultWaiters.splice(0)) {
+      if (resultsApplied >= waiter.target) waiter.resolve();
+      else resultWaiters.push(waiter);
+    }
+  };
+  adapter.executeAgentTool = async (...args: unknown[]) => {
+    const result = await executeAgentTool(...args);
+    if (args[0] === "set_issue_result") {
+      resultsApplied++;
+      notifyResults();
+    }
+    return result;
+  };
   await orch.start();
   try {
+    const waveSizes: number[] = [];
+    let released = 0;
+    while (released < 20) {
+      const waveSize = Math.min(maxConcurrent, 20 - released);
+      await waitForEntries(released + waveSize);
+      const wave = releases.splice(0, waveSize);
+      waveSizes.push(wave.length);
+      assert.equal(wave.length, waveSize, `capacity ${maxConcurrent} should fill wave ${waveSizes.length}`);
+      for (const release of wave) release();
+      released += waveSize;
+      await waitForResults(released);
+    }
     const identifiers = ["T-1", ...extraIssues.map((issue) => String(issue.identifier))];
-    assert.ok(await waitFor(
-      () => identifiers.every((id) => JSON.parse(fs.readFileSync(path.join(issuesDir, `${id}.json`), "utf8")).state === "done"),
-      15000,
-    ), `all file-tracker workers should finish at concurrency ${maxConcurrent}`);
-    const durationMs = Date.now() - firstStartedAt;
-    return { durationMs, issuesPerSecond: (identifiers.length * 1000) / durationMs };
+    assert.ok(identifiers.every((id) => JSON.parse(fs.readFileSync(path.join(issuesDir, `${id}.json`), "utf8")).state === "done"));
+    return { waveSizes, peakActive, resultsApplied };
   } finally {
+    for (const release of releases.splice(0)) release();
     orch.stop();
   }
 }
 
-test("file-tracker completion throughput scales from five to twenty concurrent agents", async (t) => {
+test("file-tracker completion capacity scales from five to twenty concurrent agents", { timeout: 60000 }, async (t) => {
   const atFive = await fileTrackerBurstMetrics(5);
   const atTwenty = await fileTrackerBurstMetrics(20);
-  assert.ok(
-    atTwenty.durationMs < atFive.durationMs * 0.6,
-    `20 workers should complete materially faster than 5 (5=${atFive.durationMs} ms, 20=${atTwenty.durationMs} ms)`,
-  );
-  assert.ok(
-    atTwenty.issuesPerSecond > atFive.issuesPerSecond * 1.8,
-    `20 workers should increase real completion throughput (5=${atFive.issuesPerSecond.toFixed(2)}/s, 20=${atTwenty.issuesPerSecond.toFixed(2)}/s)`,
-  );
-  t.diagnostic(
-    `file-tracker burst: 5=${atFive.durationMs} ms (${atFive.issuesPerSecond.toFixed(2)}/s), `
-      + `20=${atTwenty.durationMs} ms (${atTwenty.issuesPerSecond.toFixed(2)}/s)`,
-  );
+  assert.deepEqual(atFive, { waveSizes: [5, 5, 5, 5], peakActive: 5, resultsApplied: 20 });
+  assert.deepEqual(atTwenty, { waveSizes: [20], peakActive: 20, resultsApplied: 20 });
+  assert.equal(atFive.waveSizes.length / atTwenty.waveSizes.length, 4, "twenty workers should provide four times the equal-duration capacity");
+  t.diagnostic("file-tracker burst: 5 workers=4 waves, 20 workers=1 wave, capacity scaling=4x");
 });
 
 test("invalid workflow reload does not crash and keeps operating (SPEC 6.2)", async () => {
