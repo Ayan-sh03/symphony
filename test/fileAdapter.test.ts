@@ -392,3 +392,92 @@ test("mutations use the index and return their normalized record without a secon
     fsPromises.readFile = originalReadFile;
   }
 });
+
+test("mutations publish complete JSON atomically to concurrent readers", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let releaseWrite!: () => void;
+  const released = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let exposeWrite!: (file: string) => void;
+  const writeStarted = new Promise<string>((resolve) => { exposeWrite = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    const writtenFile = String(args[0]);
+    await originalWriteFile(writtenFile, "", "utf8");
+    exposeWrite(writtenFile);
+    await released;
+    return originalWriteFile(...args);
+  };
+
+  try {
+    const mutation = a.setIssueState("A", "done");
+    const writtenFile = await writeStarted;
+    const visible = JSON.parse(fs.readFileSync(file, "utf8")) as { state: string };
+    assert.equal(visible.state, "todo", "readers keep seeing the prior complete record until rename");
+    assert.notEqual(writtenFile, file, "the in-progress write targets a sibling temporary file");
+    releaseWrite();
+    assert.equal((await mutation).state, "done");
+  } finally {
+    releaseWrite();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("a failed mutation leaves both the cache and disk at the prior record", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let failNext = true;
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("injected write failure");
+    }
+    return originalWriteFile(...args);
+  };
+  try {
+    await assert.rejects(() => a.setIssueState("A", "done"), /injected write failure/);
+    const updated = await a.setIssueAgent("A", "codex");
+    assert.equal(updated.state, "todo", "a later successful mutation does not resurrect the failed change");
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8")) as { state: string; agent: string };
+    assert.deepEqual({ state: raw.state, agent: raw.agent }, { state: "todo", agent: "codex" });
+  } finally {
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("concurrent mutations to one issue are serialized without lost updates", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let calls = 0;
+  let secondStarted!: () => void;
+  const secondWrite = new Promise<void>((resolve) => { secondStarted = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) {
+      await Promise.race([secondWrite, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    } else if (calls === 2) {
+      secondStarted();
+    }
+    return originalWriteFile(...args);
+  };
+  try {
+    await Promise.all([a.setIssueState("A", "done"), a.setIssueAgent("A", "codex")]);
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8")) as { state: string; agent: string };
+    assert.deepEqual({ state: raw.state, agent: raw.agent }, { state: "done", agent: "codex" });
+  } finally {
+    secondStarted();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
