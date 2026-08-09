@@ -247,23 +247,86 @@ test("completion bursts batch tracker refreshes and keep the event loop responsi
     return fetchIssuesByIds(ids);
   };
 
-  let maxLagMs = 0;
-  let expected = Date.now() + 10;
-  const heartbeat = setInterval(() => {
-    const now = Date.now();
-    maxLagMs = Math.max(maxLagMs, now - expected);
-    expected = now + 10;
-  }, 10);
   await orch.start();
+  let heartbeat: NodeJS.Timeout | null = null;
   try {
     assert.ok(await waitFor(() => started.size === 20), "all synthetic workers should dispatch");
+    let maxLagMs = 0;
+    let expected = Date.now() + 10;
+    heartbeat = setInterval(() => {
+      const now = Date.now();
+      maxLagMs = Math.max(maxLagMs, now - expected);
+      expected = now + 10;
+    }, 10);
     const batched = await waitFor(() => refreshes.some((ids) => ids.length === 20), 3000);
     assert.ok(batched, "a completion burst should refresh all pending retries in one tracker request");
     assert.ok(maxLagMs < 100, `completion handling should not stall the event loop (observed ${maxLagMs} ms)`);
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     orch.stop();
   }
+});
+
+async function syntheticBurstDuration(maxConcurrent: number): Promise<number> {
+  const kind = `fake-throughput-${maxConcurrent}`;
+  const completed = new Set<string>();
+  let firstStartedAt = 0;
+  registerAgentFactory({
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          firstStartedAt ||= Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          completed.add(opts.issue.id);
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  });
+  const extraIssues = Array.from({ length: 19 }, (_, n) => ({
+    id: `P-${n + 2}`,
+    identifier: `P-${n + 2}`,
+    title: "throughput task",
+    description: "x",
+    state: "todo",
+    dispatchable: true,
+  }));
+  const { dir, wfPath, workflow, config } = setup(`throughput-${maxConcurrent}`, {
+    extraIssues,
+    pollIntervalMs: 20,
+    agentExtra: `\n  max_concurrent_agents: ${maxConcurrent}`,
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  // The test measures agent-capacity scheduling, not per-workspace setup or the file
+  // tracker's synchronous reads (covered independently). A shared empty directory is
+  // safe because this backend never writes agent output.
+  (orch as any).workspaceManager = {
+    createForIssue: async () => ({ path: dir }),
+    deliveryBranchFor: () => null,
+    runBeforeRun: async () => true,
+    runAfterRun: async () => {},
+  };
+  await orch.start();
+  try {
+    assert.ok(await waitFor(() => completed.size === 20, 10000), `all workers should finish at concurrency ${maxConcurrent}`);
+    return Date.now() - firstStartedAt;
+  } finally {
+    orch.stop();
+  }
+}
+
+test("synthetic worker throughput scales from five to twenty concurrent agents", async () => {
+  const atFive = await syntheticBurstDuration(5);
+  const atTwenty = await syntheticBurstDuration(20);
+  assert.ok(
+    atTwenty < atFive * 0.65,
+    `20 workers should complete materially faster than 5 (5=${atFive} ms, 20=${atTwenty} ms)`,
+  );
 });
 
 test("invalid workflow reload does not crash and keeps operating (SPEC 6.2)", async () => {
