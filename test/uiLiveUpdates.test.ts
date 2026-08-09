@@ -164,4 +164,21 @@ test("project switches isolate delayed state, board, detail, and fallback respon
   answer(take("/api/v1/projects/d/SAME-1"), { project: "d", issue_identifier: "SAME-1" });
   await currentDetail;
   assert.equal(store.detailData.project, "d");
+
+  store.pid = "fresh"; store.state = null; store.route = { name: "board" };
+  api.restartLiveUpdates();
+  const freshSource = FakeEventSource.instances.at(-1)!;
+  const delayedInitialState = api.fetchState();
+  freshSource.emit("snapshot", { snapshot: { source: "sse-first", meta: { can_board: true } }, board_dirty: false });
+  assert.equal(store.state.source, "sse-first");
+  answer(take("/api/v1/projects/fresh/state"), { source: "older-fetch", meta: { can_board: true } });
+  await delayedInitialState;
+  assert.equal(store.state.source, "sse-first", "an older state fetch cannot overwrite a newer SSE snapshot");
+
+  const fetchAfterSse = api.fetchState();
+  answer(take("/api/v1/projects/fresh/state"), { source: "newer-fetch", meta: { can_board: true } });
+  await fetchAfterSse;
+  assert.equal(store.state.source, "newer-fetch", "a fetch started after the last SSE snapshot may commit");
+  freshSource.emit("snapshot", { snapshot: { source: "later-sse", meta: { can_board: true } }, board_dirty: false });
+  assert.equal(store.state.source, "later-sse", "a subsequently received SSE snapshot is newest");
 });
