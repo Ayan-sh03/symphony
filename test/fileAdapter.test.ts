@@ -111,6 +111,58 @@ test("createIssue writes a dispatchable file and rejects duplicates", async () =
   await assert.rejects(() => a.createIssue({ identifier: "NEW-1", title: "again" }), (e) => e instanceof AdapterError);
 });
 
+test("concurrent creates for one identifier have exactly one winner", async () => {
+  const dir = mkDir({});
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let calls = 0;
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) {
+      await Promise.race([secondStarted, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    } else if (calls === 2) {
+      markSecondStarted();
+    }
+    return originalWriteFile(...args);
+  };
+
+  try {
+    const results = await Promise.allSettled([
+      a.createIssue({ identifier: "NEW-1", title: "first" }),
+      a.createIssue({ identifier: "NEW-1", title: "second" }),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    assert.equal(fulfilled.length, 1, "only one caller publishes the stable target");
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0]!.reason instanceof AdapterError);
+    assert.equal(rejected[0]!.reason.category, "invalid_tracker_config");
+    assert.equal((await a.listAllIssues()).length, 1);
+  } finally {
+    markSecondStarted();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("createIssue never replaces an externally occupied target", async () => {
+  const dir = mkDir({});
+  const file = path.join(dir, "EXT-1.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.listAllIssues();
+  const external = { id: "OTHER", identifier: "OTHER", title: "external", state: "backlog" };
+  fs.writeFileSync(file, JSON.stringify(external));
+
+  await assert.rejects(
+    () => a.createIssue({ identifier: "EXT-1", title: "must not replace" }),
+    (err) => err instanceof AdapterError && err.category === "invalid_tracker_config" && /already exists/.test(err.message),
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), external);
+});
+
 test("createIssue requires identifier and title", async () => {
   const a = new FileTrackerAdapter({ dir: mkDir({}), logger: silent });
   await assert.rejects(() => a.createIssue({ identifier: "", title: "t" }), (e) => e instanceof AdapterError);
@@ -319,4 +371,252 @@ test("follow-up fields round-trip on create and are never rewritten by an edit",
   assert.equal(edited.title, "renamed");
   assert.equal(edited.stream_identifier, "A-1", "the stream survives an edit untouched");
   assert.equal(edited.follow_up_for, "A-1");
+});
+
+test("indexed reads refresh hand edits without rereading unchanged issue files", async () => {
+  const files: Record<string, unknown> = {};
+  for (let i = 0; i < 80; i++) {
+    files[`${i}.json`] = { id: `I-${i}`, identifier: `I-${i}`, title: "t", state: "todo" };
+  }
+  const dir = mkDir(files);
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+
+  // Populate the index, then observe filesystem reads performed by steady-state
+  // id lookups. Directory metadata may be checked, but unchanged records must not
+  // be reparsed one by one.
+  await a.fetchIssuesByIds(["I-40"]);
+  const fsPromises = fs.promises as unknown as { readFile: (...args: unknown[]) => Promise<unknown> };
+  const originalReadFile = fsPromises.readFile;
+  let reads = 0;
+  fsPromises.readFile = async (...args: unknown[]) => {
+    reads++;
+    return originalReadFile(...args);
+  };
+  try {
+    const [unchanged] = await a.fetchIssuesByIds(["I-40"]);
+    assert.equal(unchanged!.state, "todo");
+    assert.equal(reads, 0, "a steady-state ID lookup does not reparse every record");
+
+    fs.writeFileSync(path.join(dir, "40.json"), JSON.stringify({ id: "I-40", identifier: "I-40", title: "t", state: "done" }));
+    const [edited] = await a.fetchIssuesByIds(["I-40"]);
+    assert.equal(edited!.state, "done", "hand edits are picked up from changed metadata");
+    assert.equal(reads, 1, "only the changed record is reread");
+
+    fs.writeFileSync(path.join(dir, "40.json"), JSON.stringify({ id: "I-40", identifier: "I-40", title: "", state: "done" }));
+    await assert.rejects(
+      () => a.fetchIssuesByIds(["I-40"]),
+      (err) => err instanceof AdapterError && err.category === "tracker_response",
+      "a malformed hand edit still fails an ID refresh",
+    );
+
+    fs.unlinkSync(path.join(dir, "40.json"));
+    assert.deepEqual(await a.fetchIssuesByIds(["I-40"]), [], "hand deletions are picked up too");
+
+    fs.writeFileSync(path.join(dir, "new.json"), JSON.stringify({ id: "I-new", identifier: "I-new", title: "new", state: "todo" }));
+    const [added] = await a.fetchIssuesByIds(["I-new"]);
+    assert.equal(added!.title, "new", "hand additions are indexed without a directory rescan");
+  } finally {
+    fsPromises.readFile = originalReadFile;
+  }
+});
+
+test("mutations use the index and return their normalized record without a second scan", async () => {
+  const files: Record<string, unknown> = {};
+  for (let i = 0; i < 80; i++) {
+    files[`${i}.json`] = { id: `I-${i}`, identifier: `I-${i}`, title: "t", state: "todo" };
+  }
+  const dir = mkDir(files);
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["I-40"]);
+
+  const fsPromises = fs.promises as unknown as { readFile: (...args: unknown[]) => Promise<unknown> };
+  const originalReadFile = fsPromises.readFile;
+  let reads = 0;
+  fsPromises.readFile = async (...args: unknown[]) => {
+    reads++;
+    return originalReadFile(...args);
+  };
+  try {
+    const updated = await a.setIssueState("I-40", "done");
+    assert.equal(updated.state, "done");
+    assert.equal(reads, 0, "the write returns its normalized in-memory record instead of rescanning it");
+  } finally {
+    fsPromises.readFile = originalReadFile;
+  }
+});
+
+test("mutations publish complete JSON atomically to concurrent readers", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let releaseWrite!: () => void;
+  const released = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let exposeWrite!: (file: string) => void;
+  const writeStarted = new Promise<string>((resolve) => { exposeWrite = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    const writtenFile = String(args[0]);
+    if (writtenFile === file) await originalWriteFile(writtenFile, "", "utf8");
+    exposeWrite(writtenFile);
+    await released;
+    return originalWriteFile(...args);
+  };
+
+  try {
+    const mutation = a.setIssueState("A", "done");
+    const writtenFile = await writeStarted;
+    const visible = JSON.parse(fs.readFileSync(file, "utf8")) as { state: string };
+    assert.equal(visible.state, "todo", "readers keep seeing the prior complete record until rename");
+    assert.notEqual(writtenFile, file, "the in-progress write targets a sibling temporary file");
+    releaseWrite();
+    assert.equal((await mutation).state, "done");
+  } finally {
+    releaseWrite();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("a failed mutation leaves both the cache and disk at the prior record", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let failNext = true;
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    if (failNext) {
+      failNext = false;
+      throw new Error("injected write failure");
+    }
+    return originalWriteFile(...args);
+  };
+  try {
+    await assert.rejects(() => a.setIssueState("A", "done"), /injected write failure/);
+    const updated = await a.setIssueAgent("A", "codex");
+    assert.equal(updated.state, "todo", "a later successful mutation does not resurrect the failed change");
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8")) as { state: string; agent: string };
+    assert.deepEqual({ state: raw.state, agent: raw.agent }, { state: "todo", agent: "codex" });
+  } finally {
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("concurrent mutations to one issue are serialized without lost updates", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { writeFile: (...args: unknown[]) => Promise<unknown> };
+  const originalWriteFile = fsPromises.writeFile;
+  let calls = 0;
+  let secondStarted!: () => void;
+  const secondWrite = new Promise<void>((resolve) => { secondStarted = resolve; });
+  fsPromises.writeFile = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) {
+      await Promise.race([secondWrite, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    } else if (calls === 2) {
+      secondStarted();
+    }
+    return originalWriteFile(...args);
+  };
+  try {
+    await Promise.all([a.setIssueState("A", "done"), a.setIssueAgent("A", "codex")]);
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "a.json"), "utf8")) as { state: string; agent: string };
+    assert.deepEqual({ state: raw.state, agent: raw.agent }, { state: "done", agent: "codex" });
+  } finally {
+    secondStarted();
+    fsPromises.writeFile = originalWriteFile;
+  }
+});
+
+test("a delete queued behind an in-flight mutation wins and cannot be recreated", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as {
+    rename: (...args: unknown[]) => Promise<unknown>;
+    unlink: (...args: unknown[]) => Promise<unknown>;
+  };
+  const originalRename = fsPromises.rename;
+  const originalUnlink = fsPromises.unlink;
+  let releaseRename!: () => void;
+  const released = new Promise<void>((resolve) => { releaseRename = resolve; });
+  let markRenameStarted!: () => void;
+  const renameStarted = new Promise<void>((resolve) => { markRenameStarted = resolve; });
+  let markTargetUnlinked!: () => void;
+  const targetUnlinked = new Promise<void>((resolve) => { markTargetUnlinked = resolve; });
+
+  fsPromises.rename = async (...args: unknown[]) => {
+    if (String(args[1]) === file) {
+      markRenameStarted();
+      await released;
+    }
+    return originalRename(...args);
+  };
+  fsPromises.unlink = async (...args: unknown[]) => {
+    const result = await originalUnlink(...args);
+    if (String(args[0]) === file) markTargetUnlinked();
+    return result;
+  };
+
+  try {
+    const mutation = a.setIssueState("A", "done");
+    await renameStarted;
+    const deletion = a.deleteIssue("A");
+    // The old implementation reaches unlink while the earlier rename is paused;
+    // a queued delete cannot reach it until the mutation publishes and releases.
+    await Promise.race([targetUnlinked, new Promise<void>((resolve) => setTimeout(resolve, 100))]);
+    releaseRename();
+    await Promise.all([mutation, deletion]);
+
+    assert.equal(fs.existsSync(file), false, "the later successful delete is the final filesystem operation");
+    assert.deepEqual(await a.fetchIssuesByIds(["A"]), [], "the index retains the deletion tombstone");
+  } finally {
+    releaseRename();
+    fsPromises.rename = originalRename;
+    fsPromises.unlink = originalUnlink;
+  }
+});
+
+test("a mutation queued behind an in-flight delete observes the tombstone", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { unlink: (...args: unknown[]) => Promise<unknown> };
+  const originalUnlink = fsPromises.unlink;
+  let releaseUnlink!: () => void;
+  const released = new Promise<void>((resolve) => { releaseUnlink = resolve; });
+  let markUnlinkStarted!: () => void;
+  const unlinkStarted = new Promise<void>((resolve) => { markUnlinkStarted = resolve; });
+  fsPromises.unlink = async (...args: unknown[]) => {
+    if (String(args[0]) === file) {
+      markUnlinkStarted();
+      await released;
+    }
+    return originalUnlink(...args);
+  };
+
+  try {
+    const deletion = a.deleteIssue("A");
+    await unlinkStarted;
+    const mutation = a.setIssueState("A", "done");
+    releaseUnlink();
+    await deletion;
+    await assert.rejects(mutation, (err) => err instanceof AdapterError && err.category === "tracker_response");
+
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(await a.fetchIssuesByIds(["A"]), []);
+  } finally {
+    releaseUnlink();
+    fsPromises.unlink = originalUnlink;
+  }
 });
