@@ -151,10 +151,14 @@ test("project switches isolate delayed state, board, detail, and fallback respon
   store.pid = "b";
   store.state = null; store.board = null; store.detailData = null;
   api.restartLiveUpdates();
+  const bSource = FakeEventSource.instances.at(-1)!;
+  store.conn = "stale";
+  aSource.open();
+  assert.equal(store.conn, "stale", "a stale SSE open cannot complete the new project's snapshot handshake");
   aSource.emit("snapshot", { snapshot: { project: "a", meta: { can_board: true } }, board_dirty: true });
   assert.equal(store.state, null, "a stale SSE bootstrap snapshot cannot paint the new project");
   assert.equal(pending.some((request) => request.url.endsWith("/a/issues")), false, "a stale SSE snapshot cannot dirty the old board");
-  FakeEventSource.instances.at(-1)!.error();
+  bSource.error();
   assert.equal(pending.filter((request) => request.url.endsWith("/b/state")).length, 1,
     "project B fallback must not reuse project A's state request");
 
