@@ -108,7 +108,7 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   calls.length = 0;
   store.state = null;
   api.bootstrapLiveUpdates();
-  const failedBeforeSnapshot = FakeEventSource.instances[2]!;
+  const failedBeforeSnapshot = FakeEventSource.instances[3]!;
   failedBeforeSnapshot.error();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
