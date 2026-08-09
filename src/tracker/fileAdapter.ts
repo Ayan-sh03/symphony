@@ -54,10 +54,23 @@ interface FileAdapterOptions {
   logger: Logger;
 }
 
+interface IndexedRecord {
+  file: string;
+  stamp: string;
+  raw: Record<string, unknown> | null;
+  candidateId: string;
+  issue: Issue | null;
+}
+
 export class FileTrackerAdapter implements TrackerAdapter {
   readonly kind = "file";
   private dir: string;
   private logger: Logger;
+  private records = new Map<string, IndexedRecord>();
+  private filesById = new Map<string, Set<string>>();
+  private watcher: fs.FSWatcher | null = null;
+  private needsFullRefresh = true;
+  private dirtyFiles = new Set<string>();
 
   constructor(opts: FileAdapterOptions) {
     this.dir = opts.dir;
@@ -83,29 +96,102 @@ export class FileTrackerAdapter implements TrackerAdapter {
     }
   }
 
-  private ensureDir(): void {
+  private async ensureDir(): Promise<void> {
     try {
-      fs.mkdirSync(this.dir, { recursive: true });
+      await fs.promises.mkdir(this.dir, { recursive: true });
     } catch (err) {
       throw new AdapterError("tracker_request", `cannot access issue dir ${this.dir}: ${(err as Error).message}`);
     }
+    this.startWatcher();
   }
 
-  private listFiles(): string[] {
-    this.ensureDir();
-    let entries: string[];
+  private startWatcher(): void {
+    if (this.watcher) return;
     try {
-      entries = fs.readdirSync(this.dir);
+      this.watcher = fs.watch(this.dir, { persistent: false }, (_event, name) => {
+        if (!name) {
+          this.needsFullRefresh = true;
+          return;
+        }
+        const file = path.join(this.dir, name.toString());
+        if (file.toLowerCase().endsWith(".json")) this.dirtyFiles.add(file);
+      });
+      this.watcher.on("error", () => {
+        this.watcher?.close();
+        this.watcher = null;
+        this.needsFullRefresh = true;
+      });
+    } catch {
+      // Some filesystems cannot watch directories. The async full refresh below
+      // remains the correctness fallback in that case.
+      this.needsFullRefresh = true;
+    }
+  }
+
+  /**
+   * Reconcile the in-memory index with directory metadata. The first access reads
+   * each record; later accesses only reread files whose metadata changed. This
+   * deliberately keeps expensive JSON parsing off the event loop and out of
+   * steady-state single-issue paths.
+   */
+  private async refreshIndex(): Promise<void> {
+    await this.ensureDir();
+    if (!this.needsFullRefresh) {
+      // Give a synchronous hand edit a chance to reach fs.watch before deciding
+      // that this is a no-I/O steady-state lookup.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const dirty = [...this.dirtyFiles];
+      this.dirtyFiles.clear();
+      await mapConcurrent(dirty, 64, async (file) => this.refreshFile(file));
+      return;
+    }
+
+    let names: string[];
+    try {
+      names = await fs.promises.readdir(this.dir);
     } catch (err) {
       throw new AdapterError("tracker_request", `cannot read issue dir ${this.dir}: ${(err as Error).message}`);
     }
-    return entries.filter((f) => f.toLowerCase().endsWith(".json")).sort().map((f) => path.join(this.dir, f));
+
+    const files = names
+      .filter((name) => name.toLowerCase().endsWith(".json"))
+      .sort()
+      .map((name) => path.join(this.dir, name));
+    const present = new Set(files);
+    for (const entry of this.records.values()) {
+      if (!present.has(entry.file)) this.removeRecord(entry);
+    }
+    await mapConcurrent(files, 64, async (file) => this.refreshFile(file));
+    this.needsFullRefresh = false;
   }
 
-  private readRaw(file: string): Record<string, unknown> | null {
+  private async refreshFile(file: string): Promise<void> {
+    let stamp: string;
+    try {
+      const stat = await fs.promises.stat(file);
+      stamp = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch {
+      const existing = this.records.get(file);
+      if (existing) this.removeRecord(existing);
+      return;
+    }
+    const existing = this.records.get(file);
+    if (existing?.stamp === stamp) return;
+    if (existing) this.removeRecord(existing);
+    const raw = await this.readRaw(file);
+    this.addRecord({
+      file,
+      stamp,
+      raw,
+      candidateId: raw ? str(raw.id) || str(raw.identifier) : "",
+      issue: this.normalize(raw),
+    });
+  }
+
+  private async readRaw(file: string): Promise<Record<string, unknown> | null> {
     let text: string;
     try {
-      text = fs.readFileSync(file, "utf8");
+      text = await fs.promises.readFile(file, "utf8");
     } catch {
       return null;
     }
@@ -115,6 +201,49 @@ export class FileTrackerAdapter implements TrackerAdapter {
       return parsed as Record<string, unknown>;
     } catch {
       return null;
+    }
+  }
+
+  private addRecord(record: IndexedRecord): void {
+    this.records.set(record.file, record);
+    if (!record.candidateId) return;
+    const files = this.filesById.get(record.candidateId) ?? new Set<string>();
+    files.add(record.file);
+    this.filesById.set(record.candidateId, files);
+  }
+
+  private removeRecord(record: IndexedRecord): void {
+    this.records.delete(record.file);
+    if (!record.candidateId) return;
+    const files = this.filesById.get(record.candidateId);
+    if (!files) return;
+    files.delete(record.file);
+    if (files.size === 0) this.filesById.delete(record.candidateId);
+  }
+
+  /** Existing file order resolves duplicate ids deterministically. */
+  private recordForId(id: string, last: boolean): IndexedRecord | undefined {
+    const files = this.filesById.get(id);
+    if (!files || files.size === 0) return undefined;
+    const ordered = [...files].sort();
+    return this.records.get(last ? ordered.at(-1)! : ordered[0]!);
+  }
+
+  private async storeRecord(record: IndexedRecord): Promise<void> {
+    if (!record.raw) return;
+    try {
+      await fs.promises.writeFile(record.file, JSON.stringify(record.raw, null, 2) + "\n", "utf8");
+      const stat = await fs.promises.stat(record.file);
+      this.removeRecord(record);
+      this.addRecord({
+        file: record.file,
+        stamp: `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
+        raw: record.raw,
+        candidateId: str(record.raw.id) || str(record.raw.identifier),
+        issue: this.normalize(record.raw),
+      });
+    } catch (err) {
+      throw new AdapterError("tracker_request", `failed to persist issue ${record.candidateId}: ${(err as Error).message}`);
     }
   }
 
@@ -161,36 +290,32 @@ export class FileTrackerAdapter implements TrackerAdapter {
 
   async fetchIssuesByStates(stateNames: string[]): Promise<Issue[]> {
     if (stateNames.length === 0) return []; // SPEC §11.1: empty => empty, no request
+    await this.refreshIndex();
     const wanted = new Set(stateNames.map((s) => s.trim().toLowerCase()));
     const out: Issue[] = [];
-    for (const file of this.listFiles()) {
-      const raw = this.readRaw(file);
-      const issue = this.normalize(raw);
-      if (!issue) {
+    for (const record of [...this.records.values()].sort((a, b) => a.file.localeCompare(b.file))) {
+      if (!record.issue) {
         // State-list read: log and omit malformed record (SPEC §11.1).
-        this.logger.warn("tracker omitted malformed record", { adapter: this.kind, file });
+        this.logger.warn("tracker omitted malformed record", { adapter: this.kind, file: record.file });
         continue;
       }
-      if (wanted.has(issue.state.trim().toLowerCase())) out.push(issue);
+      if (wanted.has(record.issue.state.trim().toLowerCase())) out.push(record.issue);
     }
     return out;
   }
 
   async fetchIssuesByIds(issueIds: string[]): Promise<Issue[]> {
     if (issueIds.length === 0) return []; // SPEC §11.1: empty => empty, no request
-    const wanted = new Set(issueIds);
+    await this.refreshIndex();
     const byId = new Map<string, Issue>();
-    for (const file of this.listFiles()) {
-      const raw = this.readRaw(file);
-      // Determine candidate id cheaply to know if this file is requested.
-      const candidateId = raw ? (str(raw.id) || str(raw.identifier)) : "";
-      if (!wanted.has(candidateId)) continue;
-      const issue = this.normalize(raw);
-      if (!issue) {
+    for (const id of issueIds) {
+      const record = this.recordForId(id, true);
+      if (!record) continue;
+      if (!record.issue) {
         // ID refresh: a malformed requested record MUST fail (SPEC §11.1).
-        throw new AdapterError("tracker_response", `requested issue record is malformed: ${file}`);
+        throw new AdapterError("tracker_response", `requested issue record is malformed: ${record.file}`);
       }
-      byId.set(issue.id, issue); // each dispatch id at most once (SPEC §11.1)
+      byId.set(record.issue.id, record.issue); // each dispatch id at most once (SPEC §11.1)
     }
     return [...byId.values()];
   }
@@ -203,10 +328,10 @@ export class FileTrackerAdapter implements TrackerAdapter {
 
   /** Every normalized issue in the tracker, regardless of state (malformed omitted). */
   async listAllIssues(): Promise<Issue[]> {
+    await this.refreshIndex();
     const out: Issue[] = [];
-    for (const file of this.listFiles()) {
-      const issue = this.normalize(this.readRaw(file));
-      if (issue) out.push(issue);
+    for (const record of [...this.records.values()].sort((a, b) => a.file.localeCompare(b.file))) {
+      if (record.issue) out.push(record.issue);
     }
     return out;
   }
@@ -257,11 +382,10 @@ export class FileTrackerAdapter implements TrackerAdapter {
   }
 
   private async patch(id: string, fn: (rec: Record<string, unknown>) => void, ok: Record<string, unknown>): Promise<Issue> {
-    const res = this.mutate(id, fn, ok);
-    if (!res.success) throw new AdapterError("tracker_response", String((res.output as { error?: string }).error ?? "update failed"));
-    const refreshed = await this.fetchIssuesByIds([id]);
-    if (refreshed.length === 0) throw new AdapterError("tracker_response", `issue ${id} not found after update`);
-    return refreshed[0]!;
+    const { result, issue } = await this.mutateRecord(id, fn, ok);
+    if (!result.success) throw new AdapterError("tracker_response", String((result.output as { error?: string }).error ?? "update failed"));
+    if (!issue) throw new AdapterError("tracker_response", `issue ${id} not found after update`);
+    return issue;
   }
 
   // ---- Provider-native agent tools (SPEC §10.5) ----
@@ -332,15 +456,13 @@ export class FileTrackerAdapter implements TrackerAdapter {
     if (!identifier) throw new AdapterError("invalid_tracker_config", "identifier is required");
     if (!title) throw new AdapterError("invalid_tracker_config", "title is required");
 
-    this.ensureDir();
+    await this.refreshIndex();
     // Filename derives from the sanitized identifier so it is filesystem-safe and
     // stable; a colliding id is rejected rather than silently overwritten.
     const fileName = `${workspaceKey(identifier)}.json`;
     const file = path.join(this.dir, fileName);
-    for (const existing of this.listFiles()) {
-      const raw = this.readRaw(existing);
-      const id = raw ? str(raw.id) || str(raw.identifier) : "";
-      if (id === identifier) throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
+    if (this.recordForId(identifier, false)) {
+      throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
     }
 
     const record: Record<string, unknown> = {
@@ -361,7 +483,15 @@ export class FileTrackerAdapter implements TrackerAdapter {
     if (str(input.follow_up_for)) record.follow_up_for = str(input.follow_up_for);
     if (str(input.stream_identifier)) record.stream_identifier = str(input.stream_identifier);
     try {
-      fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", "utf8");
+      await fs.promises.writeFile(file, JSON.stringify(record, null, 2) + "\n", "utf8");
+      const stat = await fs.promises.stat(file);
+      this.addRecord({
+        file,
+        stamp: `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
+        raw: record,
+        candidateId: identifier,
+        issue: this.normalize(record),
+      });
     } catch (err) {
       throw new AdapterError("tracker_request", `failed to write issue ${identifier}: ${(err as Error).message}`);
     }
@@ -403,18 +533,15 @@ export class FileTrackerAdapter implements TrackerAdapter {
 
   /** Remove an issue by deleting its file. Unknown id is an error, not a no-op. */
   async deleteIssue(id: string): Promise<void> {
-    for (const file of this.listFiles()) {
-      const raw = this.readRaw(file);
-      if (!raw) continue;
-      if ((str(raw.id) || str(raw.identifier)) !== id) continue;
-      try {
-        fs.unlinkSync(file);
-      } catch (err) {
-        throw new AdapterError("tracker_request", `failed to delete issue ${id}: ${(err as Error).message}`);
-      }
-      return;
+    await this.refreshIndex();
+    const record = this.recordForId(id, false);
+    if (!record) throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
+    try {
+      await fs.promises.unlink(record.file);
+      this.removeRecord(record);
+    } catch (err) {
+      throw new AdapterError("tracker_request", `failed to delete issue ${id}: ${(err as Error).message}`);
     }
-    throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
   }
 
   async executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -423,23 +550,23 @@ export class FileTrackerAdapter implements TrackerAdapter {
       case "update_issue_state": {
         const state = str(a.state);
         if (!state) return fail("update_issue_state requires a non-empty 'state'");
-        return this.mutate(ctx.issue.id, (rec) => {
+        return (await this.mutateRecord(ctx.issue.id, (rec) => {
           rec.state = state;
           if (str(a.comment)) appendComment(rec, str(a.comment));
-        }, { state });
+        }, { state })).result;
       }
       case "add_issue_comment": {
         const comment = str(a.comment);
         if (!comment) return fail("add_issue_comment requires a non-empty 'comment'");
-        return this.mutate(ctx.issue.id, (rec) => appendComment(rec, comment), { commented: true });
+        return (await this.mutateRecord(ctx.issue.id, (rec) => appendComment(rec, comment), { commented: true })).result;
       }
       case "set_issue_result": {
-        return this.mutate(ctx.issue.id, (rec) => {
+        return (await this.mutateRecord(ctx.issue.id, (rec) => {
           if (str(a.state)) rec.state = str(a.state);
           if (str(a.comment)) appendComment(rec, str(a.comment));
           if (str(a.pr_url)) rec.pr_url = str(a.pr_url);
           if (str(a.tests)) rec.result_tests = str(a.tests);
-        }, { result_recorded: true });
+        }, { result_recorded: true })).result;
       }
       default:
         // Unsupported tool name -> structured failure (SPEC §10.5).
@@ -448,26 +575,44 @@ export class FileTrackerAdapter implements TrackerAdapter {
   }
 
   /** Load, mutate, and persist an issue record by dispatch id. Used by agent tools. */
-  private mutate(id: string, fn: (rec: Record<string, unknown>) => void, ok: Record<string, unknown>): ToolResult {
-    for (const file of this.listFiles()) {
-      const raw = this.readRaw(file);
-      if (!raw) continue;
-      const candidateId = str(raw.id) || str(raw.identifier);
-      if (candidateId !== id) continue;
-      fn(raw);
-      raw.updated_at = new Date().toISOString();
-      try {
-        fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n", "utf8");
-      } catch (err) {
-        return fail(`failed to persist issue ${id}: ${(err as Error).message}`);
-      }
-      return { success: true, output: { issue_id: id, state: raw.state, ...ok } };
+  private async mutateRecord(
+    id: string,
+    fn: (rec: Record<string, unknown>) => void,
+    ok: Record<string, unknown>,
+  ): Promise<{ result: ToolResult; issue: Issue | null }> {
+    await this.refreshIndex();
+    const record = this.recordForId(id, false);
+    if (!record || !record.raw) return { result: fail(`issue ${id} not found in tracker`), issue: null };
+    fn(record.raw);
+    record.raw.updated_at = new Date().toISOString();
+    try {
+      await this.storeRecord(record);
+    } catch (err) {
+      return { result: fail(`failed to persist issue ${id}: ${(err as Error).message}`), issue: null };
     }
-    return fail(`issue ${id} not found in tracker`);
+    const updated = this.recordForId(id, false);
+    return {
+      result: { success: true, output: { issue_id: id, state: record.raw.state, ...ok } },
+      issue: updated?.issue ?? null,
+    };
   }
 }
 
 // ---- normalization helpers ----
+
+/** Keep large directory refreshes asynchronous without opening unbounded handles. */
+async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const current = next++;
+      out[current] = await fn(items[current]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";

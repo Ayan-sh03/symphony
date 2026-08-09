@@ -333,10 +333,10 @@ test("indexed reads refresh hand edits without rereading unchanged issue files",
   // id lookups. Directory metadata may be checked, but unchanged records must not
   // be reparsed one by one.
   await a.fetchIssuesByIds(["I-40"]);
-  const fsPromises = fs.promises as unknown as { readFile: typeof fs.promises.readFile };
+  const fsPromises = fs.promises as unknown as { readFile: (...args: unknown[]) => Promise<unknown> };
   const originalReadFile = fsPromises.readFile;
   let reads = 0;
-  fsPromises.readFile = async (...args: Parameters<typeof fs.promises.readFile>) => {
+  fsPromises.readFile = async (...args: unknown[]) => {
     reads++;
     return originalReadFile(...args);
   };
@@ -350,8 +350,19 @@ test("indexed reads refresh hand edits without rereading unchanged issue files",
     assert.equal(edited!.state, "done", "hand edits are picked up from changed metadata");
     assert.equal(reads, 1, "only the changed record is reread");
 
+    fs.writeFileSync(path.join(dir, "40.json"), JSON.stringify({ id: "I-40", identifier: "I-40", title: "", state: "done" }));
+    await assert.rejects(
+      () => a.fetchIssuesByIds(["I-40"]),
+      (err) => err instanceof AdapterError && err.category === "tracker_response",
+      "a malformed hand edit still fails an ID refresh",
+    );
+
     fs.unlinkSync(path.join(dir, "40.json"));
     assert.deepEqual(await a.fetchIssuesByIds(["I-40"]), [], "hand deletions are picked up too");
+
+    fs.writeFileSync(path.join(dir, "new.json"), JSON.stringify({ id: "I-new", identifier: "I-new", title: "new", state: "todo" }));
+    const [added] = await a.fetchIssuesByIds(["I-new"]);
+    assert.equal(added!.title, "new", "hand additions are indexed without a directory rescan");
   } finally {
     fsPromises.readFile = originalReadFile;
   }
@@ -366,10 +377,10 @@ test("mutations use the index and return their normalized record without a secon
   const a = new FileTrackerAdapter({ dir, logger: silent });
   await a.fetchIssuesByIds(["I-40"]);
 
-  const fsPromises = fs.promises as unknown as { readFile: typeof fs.promises.readFile };
+  const fsPromises = fs.promises as unknown as { readFile: (...args: unknown[]) => Promise<unknown> };
   const originalReadFile = fsPromises.readFile;
   let reads = 0;
-  fsPromises.readFile = async (...args: Parameters<typeof fs.promises.readFile>) => {
+  fsPromises.readFile = async (...args: unknown[]) => {
     reads++;
     return originalReadFile(...args);
   };
