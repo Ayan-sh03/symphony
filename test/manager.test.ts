@@ -91,3 +91,42 @@ test("single-project mode uses id 'default' and cannot add", async () => {
     mgr.stopAll();
   }
 });
+
+test("startup benchmark: projects start in bounded parallel waves and failures stay isolated", async () => {
+  const root = tmpRoot();
+  const entries = Array.from({ length: 9 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, workflow: `./p${i}/WORKFLOW.md` }));
+  for (const entry of entries) project(root, entry.id);
+  const mp = path.join(root, "projects.json");
+  saveManifest(mp, entries);
+  const mgr = ProjectManager.fromManifest(mp, silent);
+  const releases: (() => void)[] = [];
+  let running = 0;
+  let peak = 0;
+  let started = 0;
+  for (const entry of entries) {
+    const p = mgr.get(entry.id)!;
+    Object.defineProperty(p.orchestrator, "start", { value: async () => {
+      started += 1;
+      if (entry.id === "p2") throw new Error("broken project");
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise<void>((resolve) => releases.push(() => { running -= 1; resolve(); }));
+    } });
+    Object.defineProperty(p.watcher, "start", { value: () => {} });
+  }
+
+  try {
+    const starting = mgr.startAll();
+    while (started < 5) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(peak, 4, "the startup benchmark should fill, but not exceed, the four-project limit");
+    while (releases.length > 0) releases.shift()!();
+    while (started < entries.length) {
+      await new Promise((resolve) => setImmediate(resolve));
+      while (releases.length > 0) releases.shift()!();
+    }
+    await starting;
+    assert.equal(started, entries.length, "one failed project must not block later startup waves");
+  } finally {
+    mgr.stopAll();
+  }
+});
