@@ -108,6 +108,8 @@ interface SetupOptions {
   agentExtra?: string;
   /** Additional issue records beyond T-1. */
   extraIssues?: Record<string, unknown>[];
+  /** Keep scheduled reconciliation out of timing-sensitive scheduler tests. */
+  pollIntervalMs?: number;
 }
 
 function setup(behavior: string, opts: SetupOptions = {}) {
@@ -130,7 +132,7 @@ tracker:
   active_states: ["todo", "in progress"]
   terminal_states: ["done"]
 polling:
-  interval_ms: 200
+  interval_ms: ${opts.pollIntervalMs ?? 200}
 workspace:
   root: ./ws
 agent:
@@ -193,6 +195,73 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
     assert.equal(detail.state, undefined, "sync history detail has no state field");
     assert.equal((await orch.issueDetailFor("T-1"))?.state, "done");
   } finally {
+    orch.stop();
+  }
+});
+
+test("completion bursts batch tracker refreshes and keep the event loop responsive", async () => {
+  const kind = "fake-completion-burst";
+  const started = new Set<string>();
+  registerAgentFactory({
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      started.add(opts.issue.id);
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "completed in the burst" }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  });
+  const extraIssues = Array.from({ length: 19 }, (_, n) => ({
+    id: `B-${n + 2}`,
+    identifier: `B-${n + 2}`,
+    title: "burst task",
+    description: "x",
+    state: "todo",
+    dispatchable: true,
+  }));
+  const { wfPath, workflow, config } = setup("completion-burst", {
+    extraIssues,
+    pollIntervalMs: 10_000,
+    agentExtra: "\n  max_concurrent_agents: 20",
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const fetchIssuesByIds = adapter.fetchIssuesByIds.bind(adapter);
+  const refreshes: string[][] = [];
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    refreshes.push([...ids]);
+    // Model a modest synchronous adapter cost. Twenty independent callbacks make
+    // the scheduler miss its responsiveness target; one batch does not.
+    const until = Date.now() + 8;
+    while (Date.now() < until) { /* deliberate synthetic tracker work */ }
+    return fetchIssuesByIds(ids);
+  };
+
+  let maxLagMs = 0;
+  let expected = Date.now() + 10;
+  const heartbeat = setInterval(() => {
+    const now = Date.now();
+    maxLagMs = Math.max(maxLagMs, now - expected);
+    expected = now + 10;
+  }, 10);
+  await orch.start();
+  try {
+    assert.ok(await waitFor(() => started.size === 20), "all synthetic workers should dispatch");
+    const batched = await waitFor(() => refreshes.some((ids) => ids.length === 20), 3000);
+    assert.ok(batched, "a completion burst should refresh all pending retries in one tracker request");
+    assert.ok(maxLagMs < 100, `completion handling should not stall the event loop (observed ${maxLagMs} ms)`);
+  } finally {
+    clearInterval(heartbeat);
     orch.stop();
   }
 });
