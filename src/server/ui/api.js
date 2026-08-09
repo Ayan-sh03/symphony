@@ -6,12 +6,17 @@ let eventSource = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
 let sseConnected = false;
+let stateRequest = null;
 
 export function fetchState() {
-  return fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
+  if (stateRequest) return stateRequest;
+  const request = fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
     .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
     .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender(); })
     .catch(() => { store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender(); });
+  stateRequest = request;
+  void request.then(() => { if (stateRequest === request) stateRequest = null; });
+  return request;
 }
 
 /** One EventSource follows the active project; polling is reserved for a failed stream. */
@@ -93,7 +98,7 @@ export function setAutoRefresh(enabled) {
 /** Poll only while SSE is unavailable; a healthy stream already carries state updates. */
 export function pollLiveFallback() {
   if (!store.auto || (eventSource && sseConnected)) return Promise.resolve();
-  return Promise.all([fetchState(), fetchBoard(), refreshOpenDetail()]);
+  return fetchState().then(() => Promise.all([fetchBoard(), refreshOpenDetail()]));
 }
 
 export function fetchBoard() {
