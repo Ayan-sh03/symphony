@@ -11,6 +11,7 @@ let projectGeneration = 0;
 // Receipt order is authoritative within a project generation: a fetch commits only
 // if no SSE snapshot arrived since it started; later fetches or SSE may supersede it.
 let stateVersion = 0;
+let boardRequestSequence = 0;
 
 function requestContext() {
   return { pid: store.pid, generation: projectGeneration, base: apiBase() };
@@ -137,9 +138,21 @@ export function pollLiveFallback() {
 export function fetchBoard() {
   if (!store.state || !store.state.meta || !store.state.meta.can_board) return Promise.resolve();
   const context = requestContext();
-  return fetch(context.base + "/issues", { headers: { accept: "application/json" } })
-    .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((j) => { if (isCurrent(context)) { store.board = j; rerender(); } })
+  const sequence = ++boardRequestSequence;
+  const headers = { accept: "application/json" };
+  if (store.boardEtag) headers["if-none-match"] = store.boardEtag;
+  return fetch(context.base + "/issues", { headers })
+    .then(async (r) => {
+      if (r.status === 304) return { board: null, etag: null };
+      if (!r.ok) return Promise.reject();
+      return { board: await r.json(), etag: r.headers?.get?.("etag") ?? null };
+    })
+    .then((result) => {
+      if (sequence !== boardRequestSequence || !isCurrent(context) || !result.board) return;
+      store.board = result.board;
+      store.boardEtag = result.etag;
+      rerender();
+    })
     .catch(() => {});
 }
 

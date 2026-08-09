@@ -138,6 +138,11 @@ interface FinalizationJob {
   reject: (err: unknown) => void;
 }
 
+interface BoardSource {
+  all: Issue[];
+  divergence: Map<string, { ahead: number; behind: number }>;
+}
+
 /**
  * A halted issue: retries stopped (limit reached, or operator pressed Stop). The
  * claim is kept so the poll loop cannot re-dispatch it; it is released when the
@@ -873,14 +878,12 @@ export class Orchestrator {
     return typeof this.adapter.supportsBoard === "function" && this.adapter.supportsBoard();
   }
 
-  /** Full board view: every issue with its live runtime status, plus state ordering. */
-  async board(): Promise<BoardView> {
+  /** Full board view, or an explicit bounded page, with live runtime status and state ordering. */
+  async board(page: BoardPageOptions | null = null): Promise<BoardView> {
     if (!this.canBoard() || !this.adapter.listAllIssues) {
       throw new Error("the active tracker does not support a board view");
     }
-    const all = await this.adapter.listAllIssues();
-    // One git process for the whole board, not one per issue.
-    const divergence = await this.workspaceManager.branchAheadBehind();
+    const { all, divergence } = await this.boardSource();
     const order = orderedStates(
       this.config.tracker.backlog_states,
       this.config.tracker.active_states,
@@ -890,7 +893,17 @@ export class Orchestrator {
       this.config.tracker.terminal_states,
       all.map((i) => i.state),
     );
-    const issues = all.map((i) => {
+    // Paged reads have their own stable key order. The compatibility response keeps
+    // adapter order, while a cursor continues strictly after an immutable issue id.
+    const pageOrder = page ? [...all].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : all;
+    let start = 0;
+    if (page && page.after !== null) {
+      const after = page.after;
+      const found = pageOrder.findIndex((issue) => issue.id > after);
+      start = found < 0 ? pageOrder.length : found;
+    }
+    const visible = page ? pageOrder.slice(start, start + page.limit) : all;
+    const issues = visible.map((i) => {
       const run = this.running.get(i.id);
       const halt = this.halted.get(i.id) ?? null;
       const runtime: BoardIssueView["runtime"] = run ? "running" : this.retry_attempts.has(i.id) ? "retrying" : halt ? "halted" : "idle";
@@ -932,7 +945,7 @@ export class Orchestrator {
         merged_hint: delivered && counts !== null && counts.ahead === 0,
       };
     });
-    return {
+    const board: BoardView = {
       generated_at: new Date().toISOString(),
       order,
       active_states: this.config.tracker.active_states,
@@ -942,6 +955,27 @@ export class Orchestrator {
       start_state: this.config.tracker.active_states[0] ?? "todo",
       issues,
     };
+    if (!page) return board;
+    return {
+      ...board,
+      total_issues: all.length,
+      page: {
+        limit: page.limit,
+        next_cursor: start + visible.length < pageOrder.length ? visible.at(-1)?.id ?? null : null,
+      },
+    };
+  }
+
+  /** Reuse one complete tracker scan for immediate revalidation and nearby pages. */
+  private async boardSource(): Promise<BoardSource> {
+    const listAllIssues = this.adapter.listAllIssues;
+    if (!listAllIssues) throw new Error("the active tracker does not support a board view");
+    const [all, divergence] = await Promise.all([
+      listAllIssues.call(this.adapter),
+      // One git process for the whole board, not one per issue.
+      this.workspaceManager.branchAheadBehind(),
+    ]);
+    return { all, divergence };
   }
 
   /** Move an issue to a new state, then poll promptly so dispatch reflects it. */
@@ -2174,6 +2208,16 @@ export interface BoardView {
   review_state: string | null;
   start_state: string;
   issues: BoardIssueView[];
+  /** Present for an explicitly paginated board response. */
+  total_issues?: number;
+  /** Present for an explicitly paginated board response. */
+  page?: { limit: number; next_cursor: string | null };
+}
+
+/** Keyset page requested by the HTTP board route; null keeps the compatibility response. */
+export interface BoardPageOptions {
+  after: string | null;
+  limit: number;
 }
 
 /** Order states for the board: backlog, then active, then terminal, then any others seen. */
