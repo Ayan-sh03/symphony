@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -16,7 +17,7 @@ class FakeEventSource {
   emit(name: string, data: unknown): void { this.listeners.get(name)?.({ data: JSON.stringify(data) }); }
 }
 
-test("healthy SSE snapshots avoid fallback polling and only reload a dirty board", async () => {
+test("console bootstrap loads the board once, then healthy SSE only reloads a dirty board", async () => {
   const calls: string[] = [];
   (globalThis as any).window = { __SYMPHONY__: { projects: [{ id: "p" }], selected: "p", snapshot: null } };
   (globalThis as any).localStorage = { getItem: () => null, setItem: () => {} };
@@ -32,9 +33,16 @@ test("healthy SSE snapshots avoid fallback polling and only reload a dirty board
   const { store } = await import("../src/server/ui/store.js");
   store.state = { meta: { can_board: true } };
   store.route = { name: "board" };
-  api.startLiveUpdates();
+  api.bootstrapLiveUpdates();
   const source = FakeEventSource.instances[0]!;
   source.open();
+
+  source.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter((url) => url.endsWith("/issues")).length, 1, "normal boot must issue one full board request");
+  const appSource = fs.readFileSync(new URL("../src/server/ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /bootstrapLiveUpdates\(\);/, "the app boot path must use the single-request bootstrap");
+  calls.length = 0;
 
   await api.pollLiveFallback();
   assert.deepEqual(calls, [], "a healthy stream must not poll state, board, or detail");
