@@ -15,7 +15,7 @@ import { refKey } from "../src/workspace/manager.ts";
 const silent = new Logger([{ name: "null", write() {} }], "error");
 
 /** Fake agent backend: on its first turn writes a "done" result file, then completes. */
-function makeFakeFactory(behavior: "done" | "fail"): AgentFactory {
+function makeFakeFactory(behavior: string): AgentFactory {
   return {
     kind: `fake-${behavior}`,
     create(opts: AgentSessionOptions): AgentSession {
@@ -108,6 +108,8 @@ interface SetupOptions {
   agentExtra?: string;
   /** Additional issue records beyond T-1. */
   extraIssues?: Record<string, unknown>[];
+  /** Keep scheduled reconciliation out of timing-sensitive scheduler tests. */
+  pollIntervalMs?: number;
 }
 
 function setup(behavior: string, opts: SetupOptions = {}) {
@@ -130,7 +132,7 @@ tracker:
   active_states: ["todo", "in progress"]
   terminal_states: ["done"]
 polling:
-  interval_ms: 200
+  interval_ms: ${opts.pollIntervalMs ?? 200}
 workspace:
   root: ./ws
 agent:
@@ -195,6 +197,265 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
   } finally {
     orch.stop();
   }
+});
+
+test("completion bursts coalesce refreshes and yield after bounded finalization waves", { timeout: 30000 }, async (t) => {
+  const kind = "fake-completion-burst";
+  const turnsEntered = new Set<string>();
+  let releaseTurns!: () => void;
+  const turnBarrier = new Promise<void>((resolve) => { releaseTurns = resolve; });
+  registerAgentFactory({
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          turnsEntered.add(opts.issue.id);
+          if (turnsEntered.size === 20) releaseTurns();
+          await turnBarrier;
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "completed in the burst" }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  });
+  const extraIssues = Array.from({ length: 19 }, (_, n) => ({
+    id: `B-${n + 2}`,
+    identifier: `B-${n + 2}`,
+    title: "burst task",
+    description: "x",
+    state: "todo",
+    dispatchable: true,
+  }));
+  const { wfPath, workflow, config } = setup("completion-burst", {
+    extraIssues,
+    pollIntervalMs: 10_000,
+    agentExtra: "\n  max_concurrent_agents: 20",
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const fetchIssuesByIds = adapter.fetchIssuesByIds.bind(adapter);
+  const listAllIssues = adapter.listAllIssues.bind(adapter);
+  const scheduleRetry = (orch as any).scheduleRetry.bind(orch);
+  (orch as any).scheduleRetry = (
+    issueId: string,
+    attempt: number,
+    identifier: string,
+    stream: string,
+    error: string | null,
+    continuation: boolean,
+  ) => {
+    scheduleRetry(issueId, attempt, identifier, stream, error, continuation);
+    const retry = (orch as any).retry_attempts.get(issueId);
+    if (!retry) return;
+    clearTimeout(retry.timer);
+    retry.timer = setTimeout(() => {}, 60000);
+  };
+  const refreshes: string[][] = [];
+  let resolveBatchRefresh!: () => void;
+  const batchRefresh = new Promise<void>((resolve) => { resolveBatchRefresh = resolve; });
+  let finalizationCalls = 0;
+  let activeFinalizations = 0;
+  let maxActiveFinalizations = 0;
+  let completedFinalizations = 0;
+  let resolveAllFinalizations!: () => void;
+  const allFinalizations = new Promise<void>((resolve) => { resolveAllFinalizations = resolve; });
+  const finalizationReleases: Array<() => void> = [];
+  const finalizationWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const notifyFinalizationCalls = () => {
+    for (const waiter of finalizationWaiters.splice(0)) {
+      if (finalizationCalls >= waiter.target) waiter.resolve();
+      else finalizationWaiters.push(waiter);
+    }
+  };
+  const waitForFinalizationCalls = (target: number): Promise<void> => {
+    if (finalizationCalls >= target) return Promise.resolve();
+    return new Promise((resolve) => finalizationWaiters.push({ target, resolve }));
+  };
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    refreshes.push([...ids]);
+    if (ids.length === 20) resolveBatchRefresh();
+    return fetchIssuesByIds(ids);
+  };
+  adapter.listAllIssues = async () => {
+    activeFinalizations++;
+    maxActiveFinalizations = Math.max(maxActiveFinalizations, activeFinalizations);
+    const issues = await listAllIssues();
+    try {
+      await new Promise<void>((resolve) => {
+        finalizationReleases.push(resolve);
+        finalizationCalls++;
+        notifyFinalizationCalls();
+      });
+      return issues;
+    } finally {
+      activeFinalizations--;
+      completedFinalizations++;
+      if (completedFinalizations === 20) resolveAllFinalizations();
+    }
+  };
+
+  let resolveWorkersDrained!: () => void;
+  const workersDrained = new Promise<void>((resolve) => { resolveWorkersDrained = resolve; });
+  const dispose = orch.onChange(() => {
+    const counts = orch.snapshot().counts;
+    if (counts.running === 0 && counts.retrying === 20) resolveWorkersDrained();
+  });
+  await orch.start();
+  try {
+    await turnBarrier;
+    await workersDrained;
+    for (const [issueId, retry] of (orch as any).retry_attempts) {
+      clearTimeout(retry.timer);
+      (orch as any).onRetryTimer(issueId);
+    }
+    await batchRefresh;
+    let schedulerYields = 0;
+    for (let wave = 1; wave <= 10; wave++) {
+      await waitForFinalizationCalls(wave * 2);
+      assert.equal(activeFinalizations, 2, `finalization wave ${wave} should contain two streams`);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      schedulerYields++;
+      const releases = finalizationReleases.splice(0, 2);
+      assert.equal(releases.length, 2, `finalization wave ${wave} should expose two release handles`);
+      for (const release of releases) release();
+    }
+    await allFinalizations;
+    assert.equal(refreshes.filter((ids) => ids.length === 20).length, 1, "the completion burst should make exactly one batched tracker refresh");
+    assert.equal(finalizationCalls, 20, "every completed stream should reach file-tracker finalization");
+    assert.equal(maxActiveFinalizations, 2, "finalization should use its bounded two-stream slice");
+    assert.equal(schedulerYields, 10, "the scheduler should yield between every bounded finalization wave");
+    t.diagnostic(`completion burst: batched_refreshes=1, finalization_peak=${maxActiveFinalizations}, scheduler_yields=${schedulerYields}`);
+  } finally {
+    dispose();
+    for (const release of finalizationReleases.splice(0)) release();
+    orch.stop();
+  }
+});
+
+interface BurstMetrics {
+  waveSizes: number[];
+  peakActive: number;
+  resultsApplied: number;
+}
+
+async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetrics> {
+  const kind = `fake-file-throughput-${maxConcurrent}`;
+  let entered = 0;
+  let active = 0;
+  let peakActive = 0;
+  const releases: Array<() => void> = [];
+  const entryWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const waitForEntries = (target: number): Promise<void> => {
+    if (entered >= target) return Promise.resolve();
+    return new Promise((resolve) => entryWaiters.push({ target, resolve }));
+  };
+  const notifyEntries = () => {
+    for (const waiter of entryWaiters.splice(0)) {
+      if (entered >= waiter.target) waiter.resolve();
+      else entryWaiters.push(waiter);
+    }
+  };
+  registerAgentFactory({
+    kind,
+    create(opts: AgentSessionOptions): AgentSession {
+      return {
+        get threadId() { return "t1"; },
+        get pid() { return "0"; },
+        async start() { return { threadId: "t1" }; },
+        async runTurn() {
+          active++;
+          peakActive = Math.max(peakActive, active);
+          await new Promise<void>((resolve) => {
+            releases.push(() => {
+              active--;
+              resolve();
+            });
+            entered++;
+            notifyEntries();
+          });
+          fs.writeFileSync(
+            path.join(opts.workspacePath, "SYMPHONY_RESULT.json"),
+            JSON.stringify({ state: "done", comment: "synthetic file-tracker throughput worker" }),
+          );
+          return { status: "completed" } as const;
+        },
+        stop() { /* no-op */ },
+      };
+    },
+  });
+  const extraIssues = Array.from({ length: 19 }, (_, n) => ({
+    id: `P-${n + 2}`,
+    identifier: `P-${n + 2}`,
+    title: "throughput task",
+    description: "x",
+    state: "todo",
+    dispatchable: true,
+  }));
+  const { issuesDir, wfPath, workflow, config } = setup(`file-throughput-${maxConcurrent}`, {
+    extraIssues,
+    pollIntervalMs: 20,
+    agentExtra: `\n  max_concurrent_agents: ${maxConcurrent}`,
+  });
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const executeAgentTool = adapter.executeAgentTool.bind(adapter);
+  let resultsApplied = 0;
+  const resultWaiters: Array<{ target: number; resolve: () => void }> = [];
+  const waitForResults = (target: number): Promise<void> => {
+    if (resultsApplied >= target) return Promise.resolve();
+    return new Promise((resolve) => resultWaiters.push({ target, resolve }));
+  };
+  const notifyResults = () => {
+    for (const waiter of resultWaiters.splice(0)) {
+      if (resultsApplied >= waiter.target) waiter.resolve();
+      else resultWaiters.push(waiter);
+    }
+  };
+  adapter.executeAgentTool = async (...args: unknown[]) => {
+    const result = await executeAgentTool(...args);
+    if (args[0] === "set_issue_result") {
+      resultsApplied++;
+      notifyResults();
+    }
+    return result;
+  };
+  await orch.start();
+  try {
+    const waveSizes: number[] = [];
+    let released = 0;
+    while (released < 20) {
+      const waveSize = Math.min(maxConcurrent, 20 - released);
+      await waitForEntries(released + waveSize);
+      const wave = releases.splice(0, waveSize);
+      waveSizes.push(wave.length);
+      assert.equal(wave.length, waveSize, `capacity ${maxConcurrent} should fill wave ${waveSizes.length}`);
+      for (const release of wave) release();
+      released += waveSize;
+      await waitForResults(released);
+    }
+    const identifiers = ["T-1", ...extraIssues.map((issue) => String(issue.identifier))];
+    assert.ok(identifiers.every((id) => JSON.parse(fs.readFileSync(path.join(issuesDir, `${id}.json`), "utf8")).state === "done"));
+    return { waveSizes, peakActive, resultsApplied };
+  } finally {
+    for (const release of releases.splice(0)) release();
+    orch.stop();
+  }
+}
+
+test("file-tracker completion capacity scales from five to twenty concurrent agents", { timeout: 60000 }, async (t) => {
+  const atFive = await fileTrackerBurstMetrics(5);
+  const atTwenty = await fileTrackerBurstMetrics(20);
+  assert.deepEqual(atFive, { waveSizes: [5, 5, 5, 5], peakActive: 5, resultsApplied: 20 });
+  assert.deepEqual(atTwenty, { waveSizes: [20], peakActive: 20, resultsApplied: 20 });
+  assert.equal(atFive.waveSizes.length / atTwenty.waveSizes.length, 4, "twenty workers should provide four times the equal-duration capacity");
+  t.diagnostic("file-tracker burst: 5 workers=4 waves, 20 workers=1 wave, capacity scaling=4x");
 });
 
 test("invalid workflow reload does not crash and keeps operating (SPEC 6.2)", async () => {
@@ -459,6 +720,142 @@ test("failing agent schedules a backoff retry", async () => {
   } finally {
     orch.stop();
   }
+});
+
+test("a retry refresh keeps its work stream busy until the tracker reply arrives", async () => {
+  registerAgentFactory(makeFakeFactory("retry-race"));
+  const { wfPath, workflow, config } = setupWith("fake-retry-race", [
+    todo("RR-1"),
+    todo("RR-1-a", { follow_up_for: "RR-1", stream_identifier: "RR-1" }),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByIds.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    if (ids.length === 1 && ids[0] === "RR-1") {
+      refreshStarted();
+      await refreshHeld;
+    }
+    return originalFetch(ids);
+  };
+  const timer = setTimeout(() => {}, 10000);
+  (orch as any).retry_attempts.set("RR-1", {
+    issue_id: "RR-1", identifier: "RR-1", stream: "RR-1", attempt: 1,
+    due_at_ms: Date.now(), timer, error: null,
+  });
+  (orch as any).claimed.add("RR-1");
+
+  (orch as any).onRetryTimer("RR-1");
+  await refreshStartedAt;
+  try {
+    await orch.tick();
+    assert.equal(orch.snapshot().counts.running, 0, "a sibling must not dispatch while its stream retry is refreshing");
+  } finally {
+    releaseRefresh();
+    clearTimeout(timer);
+    orch.stop();
+  }
+});
+
+async function stoppedRetryDrain(rejectRefresh: boolean): Promise<{
+  dispatches: number;
+  running: number;
+  retrying: number;
+  draining: number;
+  claimed: boolean;
+}> {
+  const behavior = rejectRefresh ? "shutdown-failure" : "shutdown-success";
+  registerAgentFactory(makeFakeFactory(behavior));
+  const { wfPath, workflow, config } = setupWith(`fake-${behavior}`, [todo("SD-1")]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByIds.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    refreshStarted();
+    await refreshHeld;
+    if (rejectRefresh) throw new Error("held refresh failed");
+    return originalFetch(ids);
+  };
+  let dispatches = 0;
+  (orch as any).dispatch = () => { dispatches++; };
+  const timer = setTimeout(() => {}, 10000);
+  (orch as any).retry_attempts.set("SD-1", {
+    issue_id: "SD-1", identifier: "SD-1", stream: "SD-1", attempt: 1,
+    due_at_ms: Date.now(), timer, error: null,
+  });
+  (orch as any).claimed.add("SD-1");
+  (orch as any).dueRetries.add("SD-1");
+
+  const drain = (orch as any).drainRetries();
+  await refreshStartedAt;
+  orch.stop();
+  releaseRefresh();
+  await drain;
+  clearTimeout(timer);
+  for (const retry of (orch as any).retry_attempts.values()) clearTimeout(retry.timer);
+  return {
+    dispatches,
+    running: orch.snapshot().counts.running,
+    retrying: orch.snapshot().counts.retrying,
+    draining: (orch as any).drainingRetries.size,
+    claimed: (orch as any).claimed.has("SD-1"),
+  };
+}
+
+test("stopping during a successful retry refresh cannot dispatch work after shutdown", async () => {
+  assert.deepEqual(await stoppedRetryDrain(false), {
+    dispatches: 0, running: 0, retrying: 0, draining: 0, claimed: false,
+  });
+});
+
+test("stopping during a failed retry refresh cannot publish a retry after shutdown", async () => {
+  assert.deepEqual(await stoppedRetryDrain(true), {
+    dispatches: 0, running: 0, retrying: 0, draining: 0, claimed: false,
+  });
+});
+
+test("stopping during a candidate refresh cannot halt or claim work after shutdown", async () => {
+  registerAgentFactory(makeFakeFactory("tick-ok"));
+  registerAgentFactory(makeFakeFactory("tick-missing"));
+  const { wfPath, workflow, config } = setupWith("fake-tick-ok", [
+    todo("ST-1", { agent: "fake-tick-missing" }),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  (orch as any).agentDetection = [{
+    kind: "fake-tick-missing", registered: true, installed: false, command: "fake-tick-missing",
+    command_field: "test.command", usable: false, reason: "not installed",
+    checked_at: new Date().toISOString(),
+  }];
+  (orch as any).agentDetectionAt = Date.now();
+
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByStates.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByStates = async (states: string[]) => {
+    refreshStarted();
+    await refreshHeld;
+    return originalFetch(states);
+  };
+
+  const tick = orch.tick();
+  await refreshStartedAt;
+  orch.stop();
+  releaseRefresh();
+  await tick;
+
+  assert.equal(orch.snapshot().counts.halted, 0, "a stale tick must not publish a halt after stop");
+  assert.equal((orch as any).claimed.has("ST-1"), false, "a stale tick must not recreate a claim after stop");
 });
 
 test("retries stop at max_retry_attempts and the issue halts until its state changes", async () => {

@@ -89,6 +89,12 @@ const MAX_HISTORY = 40;
 const TERMINAL_GRACE_MS = 120000;
 
 /**
+ * Delivery reads tracker and workspace state after an agent releases its slot. Keep
+ * that work bounded so a completion burst leaves time for the scheduler and console.
+ */
+const MAX_CONCURRENT_FINALIZATIONS = 2;
+
+/**
  * How long an installed-agent discovery result is trusted (extension). Short,
  * because a CLI can be installed while Symphony is running and the operator should
  * not have to restart to be told about it.
@@ -124,6 +130,12 @@ interface RetryEntry {
   due_at_ms: number;
   timer: NodeJS.Timeout;
   error: string | null;
+}
+
+interface FinalizationJob {
+  run: () => Promise<void>;
+  resolve: () => void;
+  reject: (err: unknown) => void;
 }
 
 /**
@@ -220,10 +232,15 @@ export class Orchestrator {
   private running = new Map<string, RunningEntry>();
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
+  /** Due retries remain stream owners while their coalesced tracker refresh is in flight. */
+  private drainingRetries = new Map<string, RetryEntry>();
   private halted = new Map<string, HaltedEntry>();
   private completed = new Set<string>();
   /** Streams whose delivery/cleanup is still in flight — busy, though nothing is running. */
   private finalizing = new Set<string>();
+  private finalizationQueue: FinalizationJob[] = [];
+  private activeFinalizations = 0;
+  private finalizationDrainTimer: NodeJS.Immediate | null = null;
   private defaultAgentOverride: string | null = null; // runtime default set via console/API
   /** Last completed agent discovery (extension). Advisory, refreshed off the hot path. */
   private agentDetection: AgentDetection[] = [];
@@ -239,7 +256,12 @@ export class Orchestrator {
   private codex_totals: CodexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0, by_agent: {} };
 
   private tickTimer: NodeJS.Timeout | null = null;
+  /** Coalesces a same-turn completion burst before it refreshes the tracker. */
+  private retryDrainTimer: NodeJS.Immediate | null = null;
+  private dueRetries = new Set<string>();
   private stopped = false;
+  /** Invalidates async scheduler continuations that began before shutdown. */
+  private lifecycleGeneration = 0;
   private refreshQueued = false;
   private observers = new Set<(change: OrchestratorChange) => void>();
 
@@ -327,6 +349,8 @@ export class Orchestrator {
    *   that matters most: a normal exit schedules a continuation retry, and the issue's
    *   delivery is only recorded when that timer fires. A sibling let in beforehand runs
    *   in a worktree that is about to be measured and cleaned for someone else.
+   * - `drainingRetries` — a due retry has left its timer map but its batched tracker
+   *   refresh has not replied yet. It keeps the same ownership across that async gap.
    * - `halted` — a stopped run can leave half-finished work in the worktree; mixing a
    *   sibling into it would put both on the branch. The hold ends when the operator
    *   changes the halted issue's state, which is the same thing that frees its claim.
@@ -335,6 +359,7 @@ export class Orchestrator {
     const out = new Set<string>(this.finalizing);
     for (const [, e] of this.running) out.add(e.stream);
     for (const [, r] of this.retry_attempts) out.add(r.stream);
+    for (const [, r] of this.drainingRetries) out.add(r.stream);
     for (const [, h] of this.halted) out.add(h.stream);
     return out;
   }
@@ -346,13 +371,38 @@ export class Orchestrator {
   private async windDownStream(identifier: string, issueId: string, stream: string): Promise<void> {
     this.finalizing.add(stream);
     try {
-      await this.finalizeDelivery(identifier, issueId, stream);
-      await this.cleanupStream(stream, issueId);
+      await this.enqueueFinalization(async () => {
+        await this.finalizeDelivery(identifier, issueId, stream);
+        await this.cleanupStream(stream, issueId);
+      });
     } finally {
       this.finalizing.delete(stream);
       // The stream is free now; let a queued sibling go without waiting for the next tick.
       this.scheduleTick(0);
     }
+  }
+
+  /** Run a bounded finalization slice, yielding before the next queued slice starts. */
+  private enqueueFinalization(run: () => Promise<void>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.finalizationQueue.push({ run, resolve, reject });
+      this.scheduleFinalizationDrain();
+    });
+  }
+
+  private scheduleFinalizationDrain(): void {
+    if (this.finalizationDrainTimer) return;
+    this.finalizationDrainTimer = setImmediate(() => {
+      this.finalizationDrainTimer = null;
+      while (this.activeFinalizations < MAX_CONCURRENT_FINALIZATIONS && this.finalizationQueue.length > 0) {
+        const job = this.finalizationQueue.shift()!;
+        this.activeFinalizations++;
+        void job.run().then(job.resolve, job.reject).finally(() => {
+          this.activeFinalizations--;
+          this.scheduleFinalizationDrain();
+        });
+      }
+    });
   }
 
   // ---- config validation (SPEC §6.3) ----
@@ -387,8 +437,12 @@ export class Orchestrator {
   }
 
   stop(): void {
+    if (!this.stopped) this.lifecycleGeneration++;
     this.stopped = true;
     if (this.tickTimer) clearTimeout(this.tickTimer);
+    if (this.retryDrainTimer) clearImmediate(this.retryDrainTimer);
+    this.retryDrainTimer = null;
+    this.dueRetries.clear();
     for (const [, r] of this.retry_attempts) clearTimeout(r.timer);
     for (const [, e] of this.running) e.stopSession?.();
   }
@@ -915,12 +969,14 @@ export class Orchestrator {
   /** Poll-and-dispatch tick (SPEC §8.1, §16.2). */
   async tick(): Promise<void> {
     if (this.stopped) return;
+    const generation = this.lifecycleGeneration;
     this.refreshQueued = false;
     // Fire-and-forget: this tick uses whatever discovery already knows, and the
     // result lands for the next one. Dispatch never waits on a process spawn.
     this.scheduleAgentDetection();
     try {
       await this.reconcile();
+      if (!this.lifecycleIsActive(generation)) return;
 
       const v = this.validateDispatchConfig();
       if (!v.ok) {
@@ -937,6 +993,7 @@ export class Orchestrator {
         this.notify();
         return;
       }
+      if (!this.lifecycleIsActive(generation)) return;
 
       // A halted issue that left the active states (edited out-of-band) no longer
       // needs the operator hold; release its claim.
@@ -960,9 +1017,11 @@ export class Orchestrator {
       // Recomputed as we go: dispatching one member of a stream must block its
       // siblings for the rest of this tick, not just the ones already running.
       const busy = this.busyStreams();
+      let availableSlots = this.availableSlots();
+      const runningByState = this.runningCountsByState();
       for (const issue of this.sortForDispatch(issues)) {
-        if (this.availableSlots() <= 0) break;
-        if (!this.shouldDispatch(issue, busy)) continue;
+        if (availableSlots <= 0) break;
+        if (!this.shouldDispatch(issue, busy, runningByState)) continue;
         // Discovery gate (extension): don't spawn a backend this host cannot run.
         const gate = this.agentGate(issue);
         if (gate.action === "halt") {
@@ -972,6 +1031,9 @@ export class Orchestrator {
         if (gate.action === "park") continue;
         busy.add(this.streamOf(issue));
         this.dispatch(issue, null);
+        availableSlots--;
+        const state = this.normState(issue.state);
+        runningByState.set(state, (runningByState.get(state) ?? 0) + 1);
       }
       this.notify();
     } finally {
@@ -981,15 +1043,14 @@ export class Orchestrator {
 
   // ---- candidate selection (SPEC §8.2) ----
 
-  private shouldDispatch(issue: Issue, busy: Set<string>): boolean {
+  private shouldDispatch(issue: Issue, busy: Set<string>, runningByState: Map<string, number>): boolean {
     if (!issue.id || !issue.identifier || !issue.title || !issue.state) return false;
     if (!this.isActiveState(issue.state) || this.isTerminalState(issue.state)) return false;
     if (!issue.dispatchable) return false;
     if (!this.isRoutable(issue)) return false; // required labels
     if (this.running.has(issue.id)) return false;
     if (this.claimed.has(issue.id)) return false;
-    if (this.availableSlots() <= 0) return false;
-    if (!this.perStateSlotAvailable(issue.state)) return false;
+    if (!this.stateSlotAvailable(issue.state, runningByState)) return false;
     // One workspace and one branch per stream: a sibling follow-up runs next tick,
     // not concurrently (SPEC Appendix B.5). No claim is taken — the issue stays a
     // plain candidate, so whichever member is ready first simply goes first.
@@ -1016,21 +1077,27 @@ export class Orchestrator {
   private availableSlots(): number {
     return Math.max(this.config.max_concurrent_agents - this.running.size, 0);
   }
-  private runningCountByState(state: string): number {
-    const n = this.normState(state);
-    let count = 0;
-    for (const [, e] of this.running) if (this.normState(e.issue.state) === n) count++;
-    return count;
+  private runningCountsByState(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const [, entry] of this.running) {
+      const state = this.normState(entry.issue.state);
+      counts.set(state, (counts.get(state) ?? 0) + 1);
+    }
+    return counts;
   }
-  private perStateSlotAvailable(state: string): boolean {
+  private stateSlotAvailable(state: string, runningByState: Map<string, number>): boolean {
     const n = this.normState(state);
     const limit = this.config.max_concurrent_agents_by_state[n] ?? this.config.max_concurrent_agents;
-    return this.runningCountByState(state) < limit;
+    return (runningByState.get(n) ?? 0) < limit;
   }
 
   // ---- dispatch (SPEC §16.4) ----
 
   private dispatch(issue: Issue, attempt: number | null): void {
+    if (this.stopped) {
+      this.claimed.delete(issue.id);
+      return;
+    }
     const agentKind = this.resolveAgentKind(issue);
     const stream = this.streamOf(issue);
     const entry: RunningEntry = {
@@ -1201,6 +1268,10 @@ export class Orchestrator {
 
   /** SPEC §8.4 backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
   private scheduleRetry(issueId: string, attempt: number, identifier: string, stream: string, error: string | null, continuation: boolean): void {
+    if (this.stopped) {
+      this.claimed.delete(issueId);
+      return;
+    }
     // Failure-retry cap (extension): past the limit, halt instead of rescheduling.
     const cap = this.config.max_retry_attempts;
     if (!continuation && cap > 0 && attempt > cap) {
@@ -1212,7 +1283,7 @@ export class Orchestrator {
       ? 1000
       : Math.min(10000 * Math.pow(2, Math.max(attempt - 1, 0)), this.config.max_retry_backoff_ms);
     const timer = setTimeout(() => {
-      void this.onRetryTimer(issueId);
+      this.onRetryTimer(issueId);
     }, delay);
     this.retry_attempts.set(issueId, {
       issue_id: issueId,
@@ -1431,70 +1502,123 @@ export class Orchestrator {
     return { branch, pushed_at };
   }
 
-  /** SPEC §16.6 on_retry_timer. */
-  private async onRetryTimer(issueId: string): Promise<void> {
-    const retry = this.retry_attempts.get(issueId);
-    if (!retry) return;
-    this.retry_attempts.delete(issueId);
+  /** Queue due retries so a completion burst issues one bounded tracker refresh. */
+  private onRetryTimer(issueId: string): void {
+    if (this.stopped || !this.retry_attempts.has(issueId)) return;
+    this.dueRetries.add(issueId);
+    if (this.retryDrainTimer) return;
+    this.retryDrainTimer = setImmediate(() => {
+      this.retryDrainTimer = null;
+      void this.drainRetries(this.lifecycleGeneration);
+    });
+  }
+
+  /** SPEC §16.6 on_retry_timer, coalesced once per event-loop turn. */
+  private async drainRetries(generation = this.lifecycleGeneration): Promise<void> {
+    const dueIds = [...this.dueRetries];
+    this.dueRetries.clear();
+    const retries: RetryEntry[] = [];
+    for (const issueId of dueIds) {
+      const retry = this.retry_attempts.get(issueId);
+      if (!retry) continue;
+      this.retry_attempts.delete(issueId);
+      this.drainingRetries.set(issueId, retry);
+      retries.push(retry);
+    }
+    if (retries.length === 0) return;
 
     let refreshed: Issue[];
     try {
-      refreshed = await this.adapter.fetchIssuesByIds([issueId]);
+      refreshed = await this.adapter.fetchIssuesByIds(retries.map((retry) => retry.issue_id));
     } catch {
-      this.scheduleRetry(issueId, retry.attempt + 1, retry.identifier, retry.stream, "retry refresh failed", false);
+      if (!this.lifecycleIsActive(generation)) {
+        this.cancelDrainingRetries(retries);
+        return;
+      }
+      for (const retry of retries) {
+        this.drainingRetries.delete(retry.issue_id);
+        this.scheduleRetry(retry.issue_id, retry.attempt + 1, retry.identifier, retry.stream, "retry refresh failed", false);
+      }
+      return;
+    }
+    if (!this.lifecycleIsActive(generation)) {
+      this.cancelDrainingRetries(retries);
       return;
     }
 
-    const issue = refreshed.find((i) => i.id === issueId) ?? null;
-    if (!issue) {
-      this.claimed.delete(issueId);
-      this.notify();
-      return;
+    const refreshedById = new Map(refreshed.map((issue) => [issue.id, issue]));
+    let availableSlots = this.availableSlots();
+    const runningByState = this.runningCountsByState();
+    for (const retry of retries) {
+      const issueId = retry.issue_id;
+      // The async gap has closed for this entry. Removing it before its synchronous
+      // reconciliation lets the retry itself re-enter, while other draining siblings
+      // in the same stream still keep their ownership.
+      this.drainingRetries.delete(issueId);
+      const busy = this.busyStreams();
+      const issue = refreshedById.get(issueId);
+      if (!issue) {
+        this.claimed.delete(issueId);
+        continue;
+      }
+      const stream = this.streamOf(issue);
+      if (this.isTerminalState(issue.state)) {
+        // Record the deliverable (branch/commit/files) before the worktree goes, with the
+        // stream held so a sibling cannot be dispatched into the worktree meanwhile.
+        busy.add(stream);
+        void this.windDownStream(issue.identifier, issue.id, stream);
+        this.claimed.delete(issueId);
+        continue;
+      }
+      if (!this.isActiveState(issue.state) || !this.isRoutable(issue)) {
+        this.claimed.delete(issueId);
+        continue;
+      }
+      if (availableSlots <= 0 || !this.stateSlotAvailable(issue.state, runningByState)) {
+        this.scheduleRetry(issueId, retry.attempt + 1, issue.identifier, stream, "no available orchestrator slots", false);
+        continue;
+      }
+      // This path bypasses shouldDispatch, so it repeats the one-run-per-stream rule
+      // (SPEC Appendix B.5). Waiting on a sibling is not a failure, so it does not
+      // become another backoff attempt: the claim is released and the ordinary poll
+      // loop re-dispatches this issue once the stream is free.
+      if (busy.has(stream)) {
+        this.logger.info("retry deferred; work stream is busy", { issue_id: issueId, issue_identifier: issue.identifier, stream });
+        this.claimed.delete(issueId);
+        continue;
+      }
+      // Same bypass, same reason: a backend that vanished (or was never there) between
+      // the failure and this timer must not be spawned just because the retry path is
+      // not the poll loop. Parking releases the claim so the loop picks it up again.
+      const gate = this.agentGate(issue);
+      if (gate.action === "halt") {
+        this.halt(issueId, issue.identifier, stream, gate.reason, retry.attempt);
+        continue;
+      }
+      if (gate.action === "park") {
+        this.logger.info("retry deferred; no usable agent", { issue_id: issueId, issue_identifier: issue.identifier, reason: gate.reason });
+        this.claimed.delete(issueId);
+        continue;
+      }
+      busy.add(stream);
+      this.dispatch(issue, retry.attempt);
+      availableSlots--;
+      const state = this.normState(issue.state);
+      runningByState.set(state, (runningByState.get(state) ?? 0) + 1);
     }
-    const stream = this.streamOf(issue);
-    if (this.isTerminalState(issue.state)) {
-      // Record the deliverable (branch/commit/files) before the worktree goes, with the
-      // stream held so a sibling cannot be dispatched into the worktree meanwhile.
-      void this.windDownStream(issue.identifier, issue.id, stream);
-      this.claimed.delete(issueId);
-      this.notify();
-      return;
+    this.notify();
+  }
+
+  private lifecycleIsActive(generation: number): boolean {
+    return !this.stopped && generation === this.lifecycleGeneration;
+  }
+
+  /** Release retry ownership when shutdown invalidates an in-flight tracker read. */
+  private cancelDrainingRetries(retries: RetryEntry[]): void {
+    for (const retry of retries) {
+      this.drainingRetries.delete(retry.issue_id);
+      this.claimed.delete(retry.issue_id);
     }
-    if (!this.isActiveState(issue.state) || !this.isRoutable(issue)) {
-      this.claimed.delete(issueId);
-      this.notify();
-      return;
-    }
-    if (this.availableSlots() <= 0 || !this.perStateSlotAvailable(issue.state)) {
-      this.scheduleRetry(issueId, retry.attempt + 1, issue.identifier, stream, "no available orchestrator slots", false);
-      this.notify();
-      return;
-    }
-    // This path bypasses shouldDispatch, so it repeats the one-run-per-stream rule
-    // (SPEC Appendix B.5). Waiting on a sibling is not a failure, so it does not
-    // become another backoff attempt: the claim is released and the ordinary poll
-    // loop re-dispatches this issue once the stream is free.
-    if (this.busyStreams().has(stream)) {
-      this.logger.info("retry deferred; work stream is busy", { issue_id: issueId, issue_identifier: issue.identifier, stream });
-      this.claimed.delete(issueId);
-      this.notify();
-      return;
-    }
-    // Same bypass, same reason: a backend that vanished (or was never there) between
-    // the failure and this timer must not be spawned just because the retry path is
-    // not the poll loop. Parking releases the claim so the loop picks it up again.
-    const gate = this.agentGate(issue);
-    if (gate.action === "halt") {
-      this.halt(issueId, issue.identifier, stream, gate.reason, retry.attempt);
-      return;
-    }
-    if (gate.action === "park") {
-      this.logger.info("retry deferred; no usable agent", { issue_id: issueId, issue_identifier: issue.identifier, reason: gate.reason });
-      this.claimed.delete(issueId);
-      this.notify();
-      return;
-    }
-    this.dispatch(issue, retry.attempt);
     this.notify();
   }
 
