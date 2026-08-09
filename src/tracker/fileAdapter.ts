@@ -73,6 +73,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
   private needsFullRefresh = true;
   private dirtyFiles = new Set<string>();
   private mutationTails = new Map<string, Promise<void>>();
+  private refreshInFlight: Promise<void> | null = null;
 
   constructor(opts: FileAdapterOptions) {
     this.dir = opts.dir;
@@ -137,6 +138,17 @@ export class FileTrackerAdapter implements TrackerAdapter {
    * steady-state single-issue paths.
    */
   private async refreshIndex(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const refresh = this.refreshIndexOnce();
+    this.refreshInFlight = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (this.refreshInFlight === refresh) this.refreshInFlight = null;
+    }
+  }
+
+  private async refreshIndexOnce(): Promise<void> {
     await this.ensureDir();
     if (!this.needsFullRefresh) {
       // Give a synchronous hand edit a chance to reach fs.watch before deciding
@@ -179,15 +191,16 @@ export class FileTrackerAdapter implements TrackerAdapter {
     }
     const existing = this.records.get(file);
     if (existing?.stamp === stamp) return;
-    if (existing) this.removeRecord(existing);
     const raw = await this.readRaw(file);
-    this.addRecord({
+    const next: IndexedRecord = {
       file,
       stamp,
       raw,
       candidateId: raw ? str(raw.id) || str(raw.identifier) : "",
       issue: this.normalize(raw),
-    });
+    };
+    if (existing) this.removeRecord(existing);
+    this.addRecord(next);
   }
 
   private async readRaw(file: string): Promise<Record<string, unknown> | null> {
