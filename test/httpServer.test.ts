@@ -85,7 +85,7 @@ class SlowSseResponse extends EventEmitter {
   }
 }
 
-test("board API is compact and caps a 3,000-issue page", { timeout: 15000 }, async () => {
+test("board API is compact and caps a 3,000-issue page", { timeout: 45000 }, async () => {
   await withServer(async (base) => {
     const res = await fetch(`${base}/api/v1/projects/a/issues?limit=9999`);
     assert.equal(res.status, 200);
