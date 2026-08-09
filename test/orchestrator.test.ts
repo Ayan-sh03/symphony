@@ -678,6 +678,67 @@ test("a retry refresh keeps its work stream busy until the tracker reply arrives
   }
 });
 
+async function stoppedRetryDrain(rejectRefresh: boolean): Promise<{
+  dispatches: number;
+  running: number;
+  retrying: number;
+  draining: number;
+  claimed: boolean;
+}> {
+  const behavior = rejectRefresh ? "shutdown-failure" : "shutdown-success";
+  registerAgentFactory(makeFakeFactory(behavior));
+  const { wfPath, workflow, config } = setupWith(`fake-${behavior}`, [todo("SD-1")]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByIds.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    refreshStarted();
+    await refreshHeld;
+    if (rejectRefresh) throw new Error("held refresh failed");
+    return originalFetch(ids);
+  };
+  let dispatches = 0;
+  (orch as any).dispatch = () => { dispatches++; };
+  const timer = setTimeout(() => {}, 10000);
+  (orch as any).retry_attempts.set("SD-1", {
+    issue_id: "SD-1", identifier: "SD-1", stream: "SD-1", attempt: 1,
+    due_at_ms: Date.now(), timer, error: null,
+  });
+  (orch as any).claimed.add("SD-1");
+  (orch as any).dueRetries.add("SD-1");
+
+  const drain = (orch as any).drainRetries();
+  await refreshStartedAt;
+  orch.stop();
+  releaseRefresh();
+  await drain;
+  clearTimeout(timer);
+  for (const retry of (orch as any).retry_attempts.values()) clearTimeout(retry.timer);
+  return {
+    dispatches,
+    running: orch.snapshot().counts.running,
+    retrying: orch.snapshot().counts.retrying,
+    draining: (orch as any).drainingRetries.size,
+    claimed: (orch as any).claimed.has("SD-1"),
+  };
+}
+
+test("stopping during a successful retry refresh cannot dispatch work after shutdown", async () => {
+  assert.deepEqual(await stoppedRetryDrain(false), {
+    dispatches: 0, running: 0, retrying: 0, draining: 0, claimed: false,
+  });
+});
+
+test("stopping during a failed retry refresh cannot publish a retry after shutdown", async () => {
+  assert.deepEqual(await stoppedRetryDrain(true), {
+    dispatches: 0, running: 0, retrying: 0, draining: 0, claimed: false,
+  });
+});
+
 test("retries stop at max_retry_attempts and the issue halts until its state changes", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
   const { issuesDir, wfPath } = setup("fail");
