@@ -33,9 +33,11 @@ export class AgentDiscoveryCache {
   private availability = new Map<string, CacheEntry<AgentDetection[]>>();
   private availabilityInFlight = new Map<string, Promise<AgentDetection[]>>();
   private availabilityGeneration = new Map<string, number>();
+  private availabilityPublishedGeneration = new Map<string, number>();
   private models = new Map<string, CacheEntry<AgentModel[]>>();
   private modelsInFlight = new Map<string, Promise<AgentModel[]>>();
   private modelsGeneration = new Map<string, number>();
+  private modelsPublishedGeneration = new Map<string, number>();
   private availabilityKey: (config: ServiceConfigValues) => string;
   private modelKey: (kind: string, query: ModelQuery) => string;
   private detectAgentKinds: (config: ServiceConfigValues, logger: Logger) => Promise<AgentDetection[]>;
@@ -52,25 +54,27 @@ export class AgentDiscoveryCache {
 
   async detect(config: ServiceConfigValues, logger: Logger, force = false): Promise<AgentDetection[]> {
     const key = this.availabilityKey(config);
-    return this.get(this.availability, this.availabilityInFlight, this.availabilityGeneration, key, force, AVAILABILITY_TTL_MS, AVAILABILITY_FORCE_MIN_MS, () => this.detectAgentKinds(config, logger));
+    return this.get(this.availability, this.availabilityInFlight, this.availabilityGeneration, this.availabilityPublishedGeneration, key, force, AVAILABILITY_TTL_MS, AVAILABILITY_FORCE_MIN_MS, () => this.detectAgentKinds(config, logger), () => true);
   }
 
   async modelsFor(kind: string, query: ModelQuery, force = false): Promise<AgentModel[]> {
     // A digest makes credential/environment differences separate cache entries
     // without retaining their values in memory as map keys.
     const key = `${kind}:${this.modelKey(kind, query)}:${environmentFingerprint(query.env)}`;
-    return this.get(this.models, this.modelsInFlight, this.modelsGeneration, key, force, MODELS_TTL_MS, MODELS_FORCE_MIN_MS, () => this.listAgentModels(kind, query));
+    return this.get(this.models, this.modelsInFlight, this.modelsGeneration, this.modelsPublishedGeneration, key, force, MODELS_TTL_MS, MODELS_FORCE_MIN_MS, () => this.listAgentModels(kind, query), (models) => models.length > 0);
   }
 
   private get<T>(
     values: Map<string, CacheEntry<T>>,
     inFlight: Map<string, Promise<T>>,
     generations: Map<string, number>,
+    publishedGenerations: Map<string, number>,
     key: string,
     force: boolean,
     ttlMs: number,
     forceMinMs: number,
     probe: () => Promise<T>,
+    shouldPublish: (value: T) => boolean,
   ): Promise<T> {
     const hit = values.get(key);
     const age = hit ? this.now() - hit.at : Infinity;
@@ -84,8 +88,14 @@ export class AgentDiscoveryCache {
     generations.set(key, generation);
     const task = Promise.resolve().then(probe).then((value) => {
       // A forced refresh intentionally starts alongside an older probe. Whichever
-      // generation started last owns publication even if it completes first.
-      if (generations.get(key) === generation) values.set(key, { value, at: this.now() });
+      // successful generation started last owns publication even if it completes
+      // first. Model discovery's [] is a failure sentinel: the caller sees it, but
+      // it neither replaces last-known-good nor blocks an older success from landing.
+      const published = publishedGenerations.get(key) ?? 0;
+      if (shouldPublish(value) && generation > published) {
+        values.set(key, { value, at: this.now() });
+        publishedGenerations.set(key, generation);
+      }
       return value;
     }).finally(() => {
       if (inFlight.get(key) === task) inFlight.delete(key);
