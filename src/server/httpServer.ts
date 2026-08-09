@@ -679,12 +679,11 @@ export class SymphonyHttpServer {
       return Number.isSafeInteger(value) ? value : null;
     };
     const requestedLimit = limitRaw === null ? DEFAULT_BOARD_PAGE_SIZE : integer(limitRaw);
-    const offset = cursorRaw === null ? 0 : integer(cursorRaw);
-    if (requestedLimit === null || requestedLimit < 1 || offset === null) {
-      this.json(res, 400, { error: { code: "bad_request", message: "limit must be a positive integer and cursor must be a non-negative integer" } });
+    if (requestedLimit === null || requestedLimit < 1 || cursorRaw === "") {
+      this.json(res, 400, { error: { code: "bad_request", message: "limit must be a positive integer and cursor must be a non-empty issue key" } });
       return undefined;
     }
-    return { offset, limit: Math.min(requestedLimit, MAX_BOARD_PAGE_SIZE) };
+    return { after: cursorRaw, limit: Math.min(requestedLimit, MAX_BOARD_PAGE_SIZE) };
   }
 
   /**

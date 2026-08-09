@@ -136,6 +136,9 @@ test("conditional board reads detect an external tracker edit immediately", asyn
     const url = `${base}/api/v1/projects/a/issues`;
     const first = await fetch(url);
     const etag = first.headers.get("etag")!;
+    const unchanged = await fetch(url, { headers: { "if-none-match": etag } });
+    assert.equal(unchanged.status, 304);
+    assert.equal(await unchanged.text(), "");
     fs.writeFileSync(path.join(root, "a", "issues", "A-1.json"), JSON.stringify({ identifier: "A-1", title: "edited externally", state: "backlog" }));
 
     const changed = await fetch(url, { headers: { "if-none-match": etag } });

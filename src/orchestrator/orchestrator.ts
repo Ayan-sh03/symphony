@@ -122,9 +122,6 @@ const AGENT_MODELS_FORCE_MIN_MS = 2000;
 /** Halt-reason prefix for "this host cannot run the backend this issue needs". */
 const AGENT_UNAVAILABLE = "agent_unavailable";
 
-/** A board burst (conditional read or adjacent page) should reuse its file scan. */
-const BOARD_SOURCE_CACHE_MS = 1000;
-
 interface RetryEntry {
   issue_id: string;
   identifier: string;
@@ -144,7 +141,6 @@ interface FinalizationJob {
 interface BoardSource {
   all: Issue[];
   divergence: Map<string, { ahead: number; behind: number }>;
-  at: number;
 }
 
 /**
@@ -259,9 +255,6 @@ export class Orchestrator {
   private agentModelCache = new Map<string, { models: AgentModel[]; at: number; fetched_at: string }>();
   private agentModelsInFlight = new Map<string, Promise<AgentModel[]>>();
   private agentDiscoveryCache: AgentDiscoveryCache;
-  private boardSourceCache: BoardSource | null = null;
-  private boardSourceInFlight: Promise<BoardSource> | null = null;
-  private boardRevision = 0;
   /** Last "dispatch parked" reason logged, so a standing condition warns once. */
   private lastParkReason: string | null = null;
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
@@ -301,10 +294,6 @@ export class Orchestrator {
   }
   /** Notify console observers. Tracker/board mutations are dirty unless explicitly live-only. */
   private notify(boardDirty = true): void {
-    if (boardDirty) {
-      this.boardRevision += 1;
-      this.boardSourceCache = null;
-    }
     for (const cb of this.observers) {
       try {
         cb({ board_dirty: boardDirty });
@@ -904,7 +893,16 @@ export class Orchestrator {
       this.config.tracker.terminal_states,
       all.map((i) => i.state),
     );
-    const visible = page ? all.slice(page.offset, page.offset + page.limit) : all;
+    // Paged reads have their own stable key order. The compatibility response keeps
+    // adapter order, while a cursor continues strictly after an immutable issue id.
+    const pageOrder = page ? [...all].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : all;
+    let start = 0;
+    if (page && page.after !== null) {
+      const after = page.after;
+      const found = pageOrder.findIndex((issue) => issue.id > after);
+      start = found < 0 ? pageOrder.length : found;
+    }
+    const visible = page ? pageOrder.slice(start, start + page.limit) : all;
     const issues = visible.map((i) => {
       const run = this.running.get(i.id);
       const halt = this.halted.get(i.id) ?? null;
@@ -963,7 +961,7 @@ export class Orchestrator {
       total_issues: all.length,
       page: {
         limit: page.limit,
-        next_cursor: page.offset + page.limit < all.length ? String(page.offset + page.limit) : null,
+        next_cursor: start + visible.length < pageOrder.length ? visible.at(-1)?.id ?? null : null,
       },
     };
   }
@@ -972,27 +970,12 @@ export class Orchestrator {
   private async boardSource(): Promise<BoardSource> {
     const listAllIssues = this.adapter.listAllIssues;
     if (!listAllIssues) throw new Error("the active tracker does not support a board view");
-    const now = Date.now();
-    if (this.boardSourceCache && now - this.boardSourceCache.at < BOARD_SOURCE_CACHE_MS) return this.boardSourceCache;
-    if (this.boardSourceInFlight) return this.boardSourceInFlight;
-
-    const revision = this.boardRevision;
-    const load = Promise.all([
+    const [all, divergence] = await Promise.all([
       listAllIssues.call(this.adapter),
       // One git process for the whole board, not one per issue.
       this.workspaceManager.branchAheadBehind(),
-    ]).then(([all, divergence]) => {
-      const source: BoardSource = { all, divergence, at: Date.now() };
-      // Never repopulate the cache with a scan that overlapped a runtime change.
-      if (this.boardRevision === revision) this.boardSourceCache = source;
-      return source;
-    });
-    this.boardSourceInFlight = load;
-    try {
-      return await load;
-    } finally {
-      this.boardSourceInFlight = null;
-    }
+    ]);
+    return { all, divergence };
   }
 
   /** Move an issue to a new state, then poll promptly so dispatch reflects it. */
@@ -2231,9 +2214,9 @@ export interface BoardView {
   page?: { limit: number; next_cursor: string | null };
 }
 
-/** Offset page requested by the HTTP board route; null keeps the compatibility response. */
+/** Keyset page requested by the HTTP board route; null keeps the compatibility response. */
 export interface BoardPageOptions {
-  offset: number;
+  after: string | null;
   limit: number;
 }
 
