@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Logger } from "../logger.ts";
 import { Orchestrator } from "../orchestrator/orchestrator.ts";
+import { AgentDiscoveryCache } from "../agent/discoveryCache.ts";
 import { WorkflowWatcher } from "../workflow/watcher.ts";
 import { loadWorkflow } from "../workflow/loader.ts";
 import { buildConfig } from "../config/config.ts";
@@ -42,6 +43,8 @@ export class ProjectManager {
   private logger: Logger;
   /** Manifest to persist runtime additions to; null in single-project mode (no persistence). */
   private manifestPath: string | null;
+  /** One host cache prevents equivalent projects from repeatedly spawning probes. */
+  private agentDiscoveryCache = new AgentDiscoveryCache();
 
   constructor(logger: Logger, manifestPath: string | null) {
     this.logger = logger;
@@ -76,7 +79,7 @@ export class ProjectManager {
     const def = loadWorkflow(workflowPath);
     const config = buildConfig(def, workflowPath);
     const plog = this.logger.child({ project: id });
-    const orchestrator = new Orchestrator({ config, workflow: def, workflowPath, logger: plog });
+    const orchestrator = new Orchestrator({ config, workflow: def, workflowPath, logger: plog, agentDiscoveryCache: this.agentDiscoveryCache });
     const watcher = new WorkflowWatcher({
       path: workflowPath,
       logger: plog,
@@ -89,11 +92,23 @@ export class ProjectManager {
 
   /** Start every project's poll loop + workflow watcher. */
   async startAll(): Promise<void> {
-    for (const p of this.projects.values()) {
-      await p.orchestrator.start();
-      p.watcher.start();
-      this.logger.info("project started", { project: p.id, workflow: p.workflowPath });
-    }
+    const pending = [...this.projects.values()];
+    // Startup has I/O-heavy validation and cleanup. Four concurrent projects keep
+    // large manifests responsive without serializing unrelated backends.
+    const workers = Array.from({ length: Math.min(4, pending.length) }, async () => {
+      for (;;) {
+        const p = pending.shift();
+        if (!p) return;
+        try {
+          await p.orchestrator.start();
+          p.watcher.start();
+          this.logger.info("project started", { project: p.id, workflow: p.workflowPath });
+        } catch (err) {
+          this.logger.error("project failed to start", { project: p.id, workflow: p.workflowPath, error: String(err) });
+        }
+      }
+    });
+    await Promise.all(workers);
   }
 
   get(id: string): Project | null {

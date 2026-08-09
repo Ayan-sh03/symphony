@@ -8,6 +8,7 @@ const logger = {} as never;
 test("shared discovery joins equivalent availability probes and preserves refresh semantics", async () => {
   let calls = 0;
   let release!: () => void;
+  let now = 0;
   const cache = new AgentDiscoveryCache({
     availabilityKey: () => "same-command",
     modelKey: () => "unused",
@@ -17,17 +18,21 @@ test("shared discovery joins equivalent availability probes and preserves refres
       return [{ kind: "codex", registered: true, installed: true, command: "codex", command_field: "codex.command", usable: true, checked_at: "now" }];
     },
     listModels: async () => [],
+    now: () => now,
   });
 
   const first = cache.detect(config, logger);
   const second = cache.detect(config, logger);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 1, "equivalent projects must share their in-flight probe");
   release();
   assert.deepEqual(await first, await second);
   await cache.detect(config, logger);
   assert.equal(calls, 1, "a completed probe is reused until refresh");
 
+  now = 1001;
   const refresh = cache.detect(config, logger, true);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls, 2, "refresh starts a fresh probe after the cache's force floor");
   release();
   await refresh;
@@ -51,8 +56,8 @@ test("shared discovery separates availability commands and model credentials", a
 
   await Promise.all([cache.detect("codex-a" as never, logger), cache.detect("codex-b" as never, logger)]);
   await Promise.all([
-    cache.models("codex", { config: "same-command" as never, logger, env: { TOKEN: "one" } }),
-    cache.models("codex", { config: "same-command" as never, logger, env: { TOKEN: "two" } }),
+    cache.modelsFor("codex", { config: "same-command" as never, logger, env: { TOKEN: "one" } }),
+    cache.modelsFor("codex", { config: "same-command" as never, logger, env: { TOKEN: "two" } }),
   ]);
 
   assert.deepEqual(availabilityCalls, ["codex-a", "codex-b"]);
