@@ -8,6 +8,9 @@ let reconnectDelay = 1000;
 let sseConnected = false;
 let stateRequest = null;
 let projectGeneration = 0;
+// Receipt order is authoritative within a project generation: a fetch commits only
+// if no SSE snapshot arrived since it started; later fetches or SSE may supersede it.
+let stateVersion = 0;
 
 function requestContext() {
   return { pid: store.pid, generation: projectGeneration, base: apiBase() };
@@ -20,14 +23,16 @@ function isCurrent(context) {
 export function fetchState() {
   const context = requestContext();
   if (stateRequest && stateRequest.pid === context.pid && stateRequest.generation === context.generation) return stateRequest.promise;
+  const version = stateVersion;
   const request = fetch(context.base + "/state", { headers: { accept: "application/json" } })
     .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
     .then((j) => {
-      if (!isCurrent(context)) return;
+      if (!isCurrent(context) || stateVersion !== version) return;
+      stateVersion += 1;
       store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender();
     })
     .catch(() => {
-      if (!isCurrent(context)) return;
+      if (!isCurrent(context) || stateVersion !== version) return;
       store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender();
     });
   const entry = { ...context, promise: request };
@@ -47,6 +52,7 @@ export function startLiveUpdates() {
     try {
       const payload = JSON.parse(event.data);
       if (!payload || !payload.snapshot) return;
+      stateVersion += 1;
       store.state = payload.snapshot;
       store.lastOk = Date.now();
       sseConnected = true;
@@ -99,6 +105,7 @@ export function stopLiveUpdates() {
 export function restartLiveUpdates() {
   stopLiveUpdates();
   projectGeneration += 1;
+  stateVersion = 0;
   startLiveUpdates();
 }
 
@@ -119,7 +126,7 @@ export function pollLiveFallback() {
   if (!store.auto || (eventSource && sseConnected)) return Promise.resolve();
   const context = requestContext();
   return fetchState().then(() => {
-    if (!isCurrent(context)) return;
+    if (!isCurrent(context) || (eventSource && sseConnected)) return;
     return Promise.all([fetchBoard(), refreshOpenDetail()]);
   });
 }
