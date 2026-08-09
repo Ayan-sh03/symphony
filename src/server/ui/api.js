@@ -58,6 +58,12 @@ export function startLiveUpdates() {
   };
 }
 
+/** Start the console without racing a direct board fetch against SSE's initial dirty snapshot. */
+export function bootstrapLiveUpdates() {
+  void fetchState();
+  startLiveUpdates();
+}
+
 export function stopLiveUpdates() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;

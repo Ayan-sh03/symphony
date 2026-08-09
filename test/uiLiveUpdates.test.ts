@@ -19,6 +19,7 @@ class FakeEventSource {
 
 test("console bootstrap loads the board once, then healthy SSE only reloads a dirty board", async () => {
   const calls: string[] = [];
+  const boardRequestCount = () => calls.reduce((count, url) => count + Number(url.endsWith("/issues")), 0);
   (globalThis as any).window = { __SYMPHONY__: { projects: [{ id: "p" }], selected: "p", snapshot: null } };
   (globalThis as any).localStorage = { getItem: () => null, setItem: () => {} };
   (globalThis as any).EventSource = FakeEventSource;
@@ -39,7 +40,7 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
 
   source.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls.filter((url) => url.endsWith("/issues")).length, 1, "normal boot must issue one full board request");
+  assert.equal(boardRequestCount(), 1, "normal boot must issue one full board request");
   const appSource = fs.readFileSync(new URL("../src/server/ui/app.js", import.meta.url), "utf8");
   assert.match(appSource, /bootstrapLiveUpdates\(\);/, "the app boot path must use the single-request bootstrap");
   calls.length = 0;
@@ -61,5 +62,16 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   store.route = { name: "detail", id: "P-1" };
   await api.pollLiveFallback();
   assert.deepEqual(calls.sort(), ["/api/v1/projects/p/P-1", "/api/v1/projects/p/issues", "/api/v1/projects/p/state"].sort(), "a disconnected stream falls back to bounded polling");
+  api.stopLiveUpdates();
+
+  calls.length = 0;
+  store.state = null;
+  store.route = { name: "board" };
+  api.bootstrapLiveUpdates();
+  const nullBootSource = FakeEventSource.instances[1]!;
+  nullBootSource.open();
+  nullBootSource.emit("snapshot", { snapshot: { meta: { can_board: true } }, board_dirty: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(boardRequestCount(), 1, "a null inlined snapshot still loads the board once SSE supplies state");
   api.stopLiveUpdates();
 });
