@@ -229,3 +229,118 @@ test("an initial empty model result is not shared for the TTL", async () => {
   assert.deepEqual(await cache.modelsFor("codex", query), [{ id: "recovered" }]);
   assert.equal(calls, 2, "an equivalent project retries instead of inheriting an empty failure sentinel");
 });
+
+test("repeated forced cold availability requests share one hanging probe and clean up after settle", async () => {
+  let calls = 0;
+  let now = 0;
+  const releases: (() => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "same",
+    modelKey: () => "unused",
+    detect: async () => {
+      calls += 1;
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return [];
+    },
+    listModels: async () => [],
+    now: () => now,
+  });
+
+  const cold = Array.from({ length: 5 }, () => cache.detect(config, logger, true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, "forced cold requests must coalesce while the probe is unresolved");
+  releases[0]!();
+  await Promise.all(cold);
+
+  now = 1001;
+  const refreshed = cache.detect(config, logger, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2, "a settled forced probe must be removed so a later refresh can run");
+  releases[1]!();
+  await refreshed;
+});
+
+test("repeated forced cold model requests share one hanging probe", async () => {
+  let calls = 0;
+  const releases: ((models: { id: string }[]) => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "unused",
+    modelKey: () => "same",
+    detect: async () => [],
+    listModels: () => {
+      calls += 1;
+      return new Promise((resolve) => releases.push(resolve));
+    },
+  });
+  const query = { config, logger, env: {} };
+
+  const cold = Array.from({ length: 5 }, () => cache.modelsFor("codex", query, true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, "forced model refreshes must coalesce while cold and unresolved");
+  releases[0]!([{ id: "shared" }]);
+  for (const result of await Promise.all(cold)) assert.deepEqual(result, [{ id: "shared" }]);
+});
+
+test("one forced refresh may overlap a normal probe but repeated forced requests join it", async () => {
+  let calls = 0;
+  let now = 0;
+  const releases: ((value: string) => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "same",
+    modelKey: () => "unused",
+    detect: () => {
+      calls += 1;
+      return new Promise((resolve) => releases.push((value) => resolve([{
+        kind: value,
+        registered: true,
+        installed: true,
+        command: value,
+        command_field: `${value}.command`,
+        usable: true,
+        checked_at: value,
+      }])));
+    },
+    listModels: async () => [],
+    now: () => now,
+  });
+
+  const normal = cache.detect(config, logger);
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 1001;
+  const forcedOne = cache.detect(config, logger, true);
+  const forcedTwo = cache.detect(config, logger, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2, "work is bounded to the old normal probe plus one forced refresh");
+
+  releases[1]!("new");
+  assert.equal((await forcedOne)[0]?.kind, "new");
+  assert.equal((await forcedTwo)[0]?.kind, "new");
+  releases[0]!("old");
+  await normal;
+});
+
+test("a failed forced probe is shared, cleaned up, and retryable", async () => {
+  let calls = 0;
+  const failures: ((error: Error) => void)[] = [];
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "same",
+    modelKey: () => "unused",
+    detect: () => {
+      calls += 1;
+      if (calls > 1) return Promise.resolve([]);
+      return new Promise((_resolve, reject) => failures.push(reject));
+    },
+    listModels: async () => [],
+  });
+
+  const first = cache.detect(config, logger, true);
+  const joined = cache.detect(config, logger, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1, "concurrent forced callers must share the failing probe");
+  failures[0]!(new Error("unavailable"));
+  await assert.rejects(first, /unavailable/);
+  await assert.rejects(joined, /unavailable/);
+
+  await cache.detect(config, logger, true);
+  assert.equal(calls, 2, "failure cleanup must allow a fresh forced retry");
+});
