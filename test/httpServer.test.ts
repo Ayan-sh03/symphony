@@ -30,21 +30,24 @@ workspace:
 Do work.`;
 
 /** Scaffold a project with a single issue, and return its workflow path. */
-function project(root: string, name: string, issueId: string): string {
+function project(root: string, name: string, issueId: string, issueCount = 1): string {
   const dir = path.join(root, name);
   fs.mkdirSync(path.join(dir, "issues"), { recursive: true });
   fs.writeFileSync(path.join(dir, "WORKFLOW.md"), WF);
-  fs.writeFileSync(
-    path.join(dir, "issues", `${issueId}.json`),
-    // backlog on purpose: an active-state issue would dispatch a real agent on tick.
-    JSON.stringify({ identifier: issueId, title: `title ${issueId}`, state: "backlog" }),
-  );
+  for (let n = 1; n <= issueCount; n += 1) {
+    const id = n === 1 ? issueId : `${issueId}-${n}`;
+    fs.writeFileSync(
+      path.join(dir, "issues", `${id}.json`),
+      // backlog on purpose: an active-state issue would dispatch a real agent on tick.
+      JSON.stringify({ identifier: id, title: `title ${id}`, state: "backlog" }),
+    );
+  }
   return path.join(dir, "WORKFLOW.md");
 }
 
-async function withServer(fn: (base: string, mgr: ProjectManager, server: SymphonyHttpServer) => Promise<void>): Promise<void> {
+async function withServer(fn: (base: string, mgr: ProjectManager, server: SymphonyHttpServer) => Promise<void>, issueCount = 1): Promise<void> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-http-"));
-  project(root, "a", "A-1");
+  project(root, "a", "A-1", issueCount);
   project(root, "b", "B-1");
   const mp = path.join(root, "projects.json");
   saveManifest(mp, [
@@ -81,6 +84,37 @@ class SlowSseResponse extends EventEmitter {
     return this.results.shift() ?? true;
   }
 }
+
+test("board API is compact, conditionally readable, and caps a 3,000-issue page", { timeout: 15000 }, async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/api/v1/projects/a/issues?limit=9999`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^application\/json/);
+    const etag = res.headers.get("etag");
+    assert.ok(etag, "a board response has an ETag for conditional reads");
+    const text = await res.text();
+    assert.ok(!text.includes("\n"), "production JSON is compact");
+    const page = JSON.parse(text) as any;
+    assert.equal(page.issues.length, 500, "large responses are capped even when a higher limit is requested");
+    assert.equal(page.total_issues, 3000);
+    assert.deepEqual(page.page, { limit: 500, next_cursor: "500" });
+    assert.ok(text.length < JSON.stringify(page, null, 2).length, "compact serialization is smaller than indented JSON");
+    assert.ok(page.issues.length < page.total_issues, "a large-board caller gets a bounded response instead of latency growing with every issue");
+
+    const unchanged = await fetch(`${base}/api/v1/projects/a/issues?limit=9999`, {
+      headers: { "if-none-match": etag! },
+    });
+    assert.equal(unchanged.status, 304);
+    assert.equal(await unchanged.text(), "");
+
+    const next = await fetch(`${base}/api/v1/projects/a/issues?limit=10&cursor=500`);
+    const nextPage = (await next.json()) as any;
+    assert.equal(next.status, 200);
+    assert.equal(nextPage.issues.length, 10);
+    assert.equal(nextPage.issues[0].identifier, "A-1-501");
+    assert.deepEqual(nextPage.page, { limit: 10, next_cursor: "510" });
+  }, 3000);
+});
 
 test("GET /api/v1/projects lists every project and advertises add support", async () => {
   await withServer(async (base) => {
