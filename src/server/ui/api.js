@@ -66,9 +66,12 @@ export function startLiveUpdates() {
   });
   source.onopen = () => {
     if (eventSource !== source || !isCurrent(context)) return;
-    sseConnected = true;
+    // Headers only prove the transport opened. The server's first snapshot may
+    // still be waiting behind response backpressure, so polling remains active
+    // until a valid snapshot completes the application-level handshake above.
+    sseConnected = false;
     reconnectDelay = 1000;
-    store.conn = "sse";
+    store.conn = "poll";
     rerender();
   };
   source.onerror = () => {
