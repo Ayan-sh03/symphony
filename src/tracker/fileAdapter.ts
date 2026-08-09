@@ -587,14 +587,21 @@ export class FileTrackerAdapter implements TrackerAdapter {
   /** Remove an issue by deleting its file. Unknown id is an error, not a no-op. */
   async deleteIssue(id: string): Promise<void> {
     await this.refreshIndex();
-    const record = this.recordForId(id, false);
-    if (!record) throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
-    try {
-      await fs.promises.unlink(record.file);
-      this.removeRecord(record);
-    } catch (err) {
-      throw new AdapterError("tracker_request", `failed to delete issue ${id}: ${(err as Error).message}`);
-    }
+    const selected = this.recordForId(id, false);
+    if (!selected) throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
+    await this.serializeMutation(selected.file, async () => {
+      await this.refreshIndex();
+      const record = this.records.get(selected.file);
+      if (!record || record.candidateId !== id) {
+        throw new AdapterError("tracker_response", `issue ${id} not found in tracker`);
+      }
+      try {
+        await fs.promises.unlink(record.file);
+        this.removeRecord(record);
+      } catch (err) {
+        throw new AdapterError("tracker_request", `failed to delete issue ${id}: ${(err as Error).message}`);
+      }
+    });
   }
 
   async executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {

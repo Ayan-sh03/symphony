@@ -532,3 +532,39 @@ test("a delete queued behind an in-flight mutation wins and cannot be recreated"
     fsPromises.unlink = originalUnlink;
   }
 });
+
+test("a mutation queued behind an in-flight delete observes the tombstone", async () => {
+  const dir = mkDir({ "a.json": { id: "A", identifier: "A-1", title: "t", state: "todo" } });
+  const file = path.join(dir, "a.json");
+  const a = new FileTrackerAdapter({ dir, logger: silent });
+  await a.fetchIssuesByIds(["A"]);
+
+  const fsPromises = fs.promises as unknown as { unlink: (...args: unknown[]) => Promise<unknown> };
+  const originalUnlink = fsPromises.unlink;
+  let releaseUnlink!: () => void;
+  const released = new Promise<void>((resolve) => { releaseUnlink = resolve; });
+  let markUnlinkStarted!: () => void;
+  const unlinkStarted = new Promise<void>((resolve) => { markUnlinkStarted = resolve; });
+  fsPromises.unlink = async (...args: unknown[]) => {
+    if (String(args[0]) === file) {
+      markUnlinkStarted();
+      await released;
+    }
+    return originalUnlink(...args);
+  };
+
+  try {
+    const deletion = a.deleteIssue("A");
+    await unlinkStarted;
+    const mutation = a.setIssueState("A", "done");
+    releaseUnlink();
+    await deletion;
+    await assert.rejects(mutation, (err) => err instanceof AdapterError && err.category === "tracker_response");
+
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(await a.fetchIssuesByIds(["A"]), []);
+  } finally {
+    releaseUnlink();
+    fsPromises.unlink = originalUnlink;
+  }
+});
