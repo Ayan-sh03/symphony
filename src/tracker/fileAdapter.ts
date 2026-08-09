@@ -244,10 +244,10 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return this.records.get(last ? ordered.at(-1)! : ordered[0]!);
   }
 
-  /** Persist beside the destination, flush, then atomically publish by rename. */
-  private async writeAtomically(file: string, raw: Record<string, unknown>): Promise<string> {
+  /** Persist beside the destination, flush, then atomically publish. */
+  private async writeAtomically(file: string, raw: Record<string, unknown>, exclusive = false): Promise<string> {
     const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`);
-    let renamed = false;
+    let published = false;
     try {
       let mode = 0o666;
       try {
@@ -263,11 +263,20 @@ export class FileTrackerAdapter implements TrackerAdapter {
         await handle.close();
       }
       const stat = await fs.promises.stat(temp);
-      await fs.promises.rename(temp, file);
-      renamed = true;
+      if (exclusive) {
+        // A same-directory hard link publishes the fully flushed inode without
+        // replacing an existing name. Unlike POSIX rename, EEXIST is guaranteed
+        // to leave an externally created target untouched.
+        await fs.promises.link(temp, file);
+        published = true;
+        await fs.promises.unlink(temp).catch(() => {});
+      } else {
+        await fs.promises.rename(temp, file);
+        published = true;
+      }
       return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     } finally {
-      if (!renamed) await fs.promises.unlink(temp).catch(() => {});
+      if (!published) await fs.promises.unlink(temp).catch(() => {});
     }
   }
 
@@ -510,14 +519,10 @@ export class FileTrackerAdapter implements TrackerAdapter {
     if (!identifier) throw new AdapterError("invalid_tracker_config", "identifier is required");
     if (!title) throw new AdapterError("invalid_tracker_config", "title is required");
 
-    await this.refreshIndex();
     // Filename derives from the sanitized identifier so it is filesystem-safe and
     // stable; a colliding id is rejected rather than silently overwritten.
     const fileName = `${workspaceKey(identifier)}.json`;
     const file = path.join(this.dir, fileName);
-    if (this.recordForId(identifier, false)) {
-      throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
-    }
 
     const record: Record<string, unknown> = {
       id: identifier,
@@ -536,21 +541,25 @@ export class FileTrackerAdapter implements TrackerAdapter {
     // Written only when set, so ordinary issues keep the record shape they had.
     if (str(input.follow_up_for)) record.follow_up_for = str(input.follow_up_for);
     if (str(input.stream_identifier)) record.stream_identifier = str(input.stream_identifier);
-    try {
-      const stamp = await this.writeAtomically(file, record);
-      this.addRecord({
-        file,
-        stamp,
-        raw: record,
-        candidateId: identifier,
-        issue: this.normalize(record),
-      });
-    } catch (err) {
-      throw new AdapterError("tracker_request", `failed to write issue ${identifier}: ${(err as Error).message}`);
-    }
     const issue = this.normalize(record);
     if (!issue) throw new AdapterError("tracker_response", "created record failed normalization");
-    return issue;
+    return this.serializeMutation(file, async () => {
+      await this.refreshIndex();
+      if (this.recordForId(identifier, false) || this.records.has(file)) {
+        throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
+      }
+      let stamp: string;
+      try {
+        stamp = await this.writeAtomically(file, record, true);
+      } catch (err) {
+        if (isAlreadyExists(err)) {
+          throw new AdapterError("invalid_tracker_config", `issue ${identifier} already exists`);
+        }
+        throw new AdapterError("tracker_request", `failed to write issue ${identifier}: ${(err as Error).message}`);
+      }
+      this.addRecord({ file, stamp, raw: record, candidateId: identifier, issue });
+      return issue;
+    });
   }
 
   // ---- edit capability (extension) ----
@@ -757,4 +766,8 @@ function normalizeDelivery(v: unknown): IssueDelivery | null {
 }
 function fail(message: string): ToolResult {
   return { success: false, output: { error: message } };
+}
+
+function isAlreadyExists(err: unknown): boolean {
+  return !!err && typeof err === "object" && "code" in err && (err as { code?: unknown }).code === "EEXIST";
 }
