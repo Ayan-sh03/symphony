@@ -35,6 +35,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Issue, BlockerRef, IssueDelivery } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import { expandPath } from "../config/config.ts";
@@ -71,6 +72,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
   private watcher: fs.FSWatcher | null = null;
   private needsFullRefresh = true;
   private dirtyFiles = new Set<string>();
+  private mutationTails = new Map<string, Promise<void>>();
 
   constructor(opts: FileAdapterOptions) {
     this.dir = opts.dir;
@@ -229,21 +231,60 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return this.records.get(last ? ordered.at(-1)! : ordered[0]!);
   }
 
-  private async storeRecord(record: IndexedRecord): Promise<void> {
-    if (!record.raw) return;
+  /** Persist beside the destination, flush, then atomically publish by rename. */
+  private async writeAtomically(file: string, raw: Record<string, unknown>): Promise<string> {
+    const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`);
+    let renamed = false;
     try {
-      await fs.promises.writeFile(record.file, JSON.stringify(record.raw, null, 2) + "\n", "utf8");
-      const stat = await fs.promises.stat(record.file);
-      this.removeRecord(record);
-      this.addRecord({
-        file: record.file,
-        stamp: `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
-        raw: record.raw,
-        candidateId: str(record.raw.id) || str(record.raw.identifier),
-        issue: this.normalize(record.raw),
-      });
-    } catch (err) {
-      throw new AdapterError("tracker_request", `failed to persist issue ${record.candidateId}: ${(err as Error).message}`);
+      let mode = 0o666;
+      try {
+        mode = (await fs.promises.stat(file)).mode & 0o777;
+      } catch {
+        // A new record uses the process umask with the ordinary file default.
+      }
+      await fs.promises.writeFile(temp, JSON.stringify(raw, null, 2) + "\n", { encoding: "utf8", flag: "wx", mode });
+      const handle = await fs.promises.open(temp, "r+");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      const stat = await fs.promises.stat(temp);
+      await fs.promises.rename(temp, file);
+      renamed = true;
+      return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } finally {
+      if (!renamed) await fs.promises.unlink(temp).catch(() => {});
+    }
+  }
+
+  /** Replace the cached record only after its atomic disk commit succeeds. */
+  private async storeRecord(previous: IndexedRecord, raw: Record<string, unknown>): Promise<IndexedRecord> {
+    const stamp = await this.writeAtomically(previous.file, raw);
+    const next: IndexedRecord = {
+      file: previous.file,
+      stamp,
+      raw,
+      candidateId: str(raw.id) || str(raw.identifier),
+      issue: this.normalize(raw),
+    };
+    this.removeRecord(previous);
+    this.addRecord(next);
+    return next;
+  }
+
+  /** Queue writers by destination so every mutation starts from the last commit. */
+  private async serializeMutation<T>(file: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTails.get(file) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.mutationTails.set(file, current);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.mutationTails.get(file) === current) this.mutationTails.delete(file);
     }
   }
 
@@ -483,11 +524,10 @@ export class FileTrackerAdapter implements TrackerAdapter {
     if (str(input.follow_up_for)) record.follow_up_for = str(input.follow_up_for);
     if (str(input.stream_identifier)) record.stream_identifier = str(input.stream_identifier);
     try {
-      await fs.promises.writeFile(file, JSON.stringify(record, null, 2) + "\n", "utf8");
-      const stat = await fs.promises.stat(file);
+      const stamp = await this.writeAtomically(file, record);
       this.addRecord({
         file,
-        stamp: `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`,
+        stamp,
         raw: record,
         candidateId: identifier,
         issue: this.normalize(record),
@@ -581,20 +621,28 @@ export class FileTrackerAdapter implements TrackerAdapter {
     ok: Record<string, unknown>,
   ): Promise<{ result: ToolResult; issue: Issue | null }> {
     await this.refreshIndex();
-    const record = this.recordForId(id, false);
-    if (!record || !record.raw) return { result: fail(`issue ${id} not found in tracker`), issue: null };
-    fn(record.raw);
-    record.raw.updated_at = new Date().toISOString();
-    try {
-      await this.storeRecord(record);
-    } catch (err) {
-      return { result: fail(`failed to persist issue ${id}: ${(err as Error).message}`), issue: null };
-    }
-    const updated = this.recordForId(id, false);
-    return {
-      result: { success: true, output: { issue_id: id, state: record.raw.state, ...ok } },
-      issue: updated?.issue ?? null,
-    };
+    const selected = this.recordForId(id, false);
+    if (!selected || !selected.raw) return { result: fail(`issue ${id} not found in tracker`), issue: null };
+    return this.serializeMutation(selected.file, async () => {
+      await this.refreshIndex();
+      const record = this.records.get(selected.file);
+      if (!record?.raw || record.candidateId !== id) {
+        return { result: fail(`issue ${id} not found in tracker`), issue: null };
+      }
+      const raw = structuredClone(record.raw);
+      fn(raw);
+      raw.updated_at = new Date().toISOString();
+      let updated: IndexedRecord;
+      try {
+        updated = await this.storeRecord(record, raw);
+      } catch (err) {
+        return { result: fail(`failed to persist issue ${id}: ${(err as Error).message}`), issue: null };
+      }
+      return {
+        result: { success: true, output: { issue_id: id, state: raw.state, ...ok } },
+        issue: updated.issue,
+      };
+    });
   }
 }
 

@@ -407,7 +407,7 @@ test("mutations publish complete JSON atomically to concurrent readers", async (
   const writeStarted = new Promise<string>((resolve) => { exposeWrite = resolve; });
   fsPromises.writeFile = async (...args: unknown[]) => {
     const writtenFile = String(args[0]);
-    await originalWriteFile(writtenFile, "", "utf8");
+    if (writtenFile === file) await originalWriteFile(writtenFile, "", "utf8");
     exposeWrite(writtenFile);
     await released;
     return originalWriteFile(...args);

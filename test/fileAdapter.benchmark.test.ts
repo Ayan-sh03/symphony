@@ -35,18 +35,21 @@ async function sample(size: number): Promise<Sample> {
     if (pulse) setImmediate(turn);
   };
   setImmediate(turn);
-  await adapter.fetchIssuesByIds([`I-${size - 1}`]);
+  try {
+    await adapter.fetchIssuesByIds([`I-${size - 1}`]);
 
-  const lookupStart = performance.now();
-  for (let i = 0; i < 30; i++) await adapter.fetchIssuesByIds([`I-${size - 1}`]);
-  const lookupMs = (performance.now() - lookupStart) / 30;
+    const lookupStart = performance.now();
+    for (let i = 0; i < 30; i++) await adapter.fetchIssuesByIds([`I-${size - 1}`]);
+    const lookupMs = (performance.now() - lookupStart) / 30;
 
-  const mutationStart = performance.now();
-  for (let i = 0; i < 10; i++) await adapter.setIssueState(`I-${size - 1}`, i % 2 === 0 ? "done" : "todo");
-  const mutationMs = (performance.now() - mutationStart) / 10;
-  pulse = false;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  return { size, lookupMs, mutationMs, eventLoopTurns };
+    const mutationStart = performance.now();
+    for (let i = 0; i < 10; i++) await adapter.setIssueState(`I-${size - 1}`, i % 2 === 0 ? "done" : "todo");
+    const mutationMs = (performance.now() - mutationStart) / 10;
+    return { size, lookupMs, mutationMs, eventLoopTurns };
+  } finally {
+    pulse = false;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
 
 test("benchmark: steady single-ID work scales sub-linearly and keeps the event loop responsive", async (t) => {
