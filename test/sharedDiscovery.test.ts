@@ -64,6 +64,31 @@ test("shared discovery separates availability commands and model credentials", a
   assert.deepEqual(modelCalls, ["same-command:one", "same-command:two"]);
 });
 
+test("equivalent model discovery joins one in-flight credential-scoped probe", async () => {
+  let calls = 0;
+  let release!: () => void;
+  const cache = new AgentDiscoveryCache({
+    availabilityKey: () => "unused",
+    modelKey: (_kind, query) => String(query.config),
+    detect: async () => [],
+    listModels: async () => {
+      calls += 1;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return [{ id: "vendor/model" }];
+    },
+  });
+  const query = { config: "same-command" as never, logger, env: { TOKEN: "same-credential" } };
+
+  const first = cache.modelsFor("codex", query);
+  const second = cache.modelsFor("codex", query);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  release();
+  assert.deepEqual(await first, await second);
+  await cache.modelsFor("codex", query);
+  assert.equal(calls, 1, "the completed credential-scoped model listing is cached");
+});
+
 test("a failed shared probe is isolated and can be retried", async () => {
   let calls = 0;
   const cache = new AgentDiscoveryCache({
