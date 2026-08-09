@@ -189,7 +189,7 @@ test("GET /events classifies live-only snapshots without invalidating the board"
 test("SSE backpressure retains only the latest snapshot and cleans up its drain listener", async () => {
   await withServer(async (_base, mgr, server) => {
     const orch = mgr.get("a")!.orchestrator;
-    const response = new SlowSseResponse([false, true, false]);
+    const response = new SlowSseResponse([false, true, false, false]);
     const request = new EventEmitter();
     const impl = server as any;
     let version = 0;
@@ -206,6 +206,7 @@ test("SSE backpressure retains only the latest snapshot and cleans up its drain 
       impl.writeSse(orch, hub, client, ": heartbeat\n\n");
       assert.equal(response.writes.length, 1, "a blocked client receives no queued snapshots or heartbeats");
 
+      version = 5;
       response.emit("drain");
       assert.equal(response.writes.length, 2, "drain flushes one coalesced snapshot");
       assert.match(response.writes[1]!, /\"version\":5/, "the flushed snapshot is the newest state");
@@ -216,6 +217,11 @@ test("SSE backpressure retains only the latest snapshot and cleans up its drain 
       impl.writeSseSnapshot(client, orch, false);
       assert.equal(client.backpressured, true, "a later false write blocks the client again");
       assert.equal(response.listenerCount("drain"), 1, "each blocked period owns one listener");
+      version = 7;
+      impl.writeSseSnapshot(client, orch, false);
+      response.emit("drain");
+      assert.equal(client.backpressured, true, "a blocked drain flush can immediately block again");
+      assert.equal(response.listenerCount("drain"), 1, "a reblocked flush still has exactly one listener");
       response.emit("close");
       assert.equal(client.closed, true);
       assert.equal(client.heartbeat, null, "closing clears the heartbeat timer");

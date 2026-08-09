@@ -41,8 +41,16 @@ export interface HttpServerOptions {
 
 interface SseClient {
   res: http.ServerResponse;
+  req: http.IncomingMessage;
+  orch: Orchestrator;
+  hub: SseHub;
   heartbeat: NodeJS.Timeout | null;
   closed: boolean;
+  backpressured: boolean;
+  /** One newest snapshot is enough: it supersedes every earlier state while blocked. */
+  pendingSnapshot: { boardDirty: boolean } | null;
+  closeListener: (() => void) | null;
+  drainListener: (() => void) | null;
 }
 
 interface SseHub {
@@ -346,12 +354,24 @@ export class SymphonyHttpServer {
     });
     res.flushHeaders();
 
-    const client: SseClient = { res, heartbeat: null, closed: false };
+    const client: SseClient = {
+      res,
+      req,
+      orch,
+      hub,
+      heartbeat: null,
+      closed: false,
+      backpressured: false,
+      pendingSnapshot: null,
+      closeListener: null,
+      drainListener: null,
+    };
     hub.clients.add(client);
     const close = () => this.closeSseClient(orch, hub, client);
+    client.closeListener = close;
     req.once("aborted", close);
     res.once("close", close);
-    client.heartbeat = setInterval(() => this.writeSse(client, ": heartbeat\n\n"), SSE_HEARTBEAT_MS);
+    client.heartbeat = setInterval(() => this.writeSse(orch, hub, client, ": heartbeat\n\n"), SSE_HEARTBEAT_MS);
     // The initial snapshot has no board payload, so make the client load it once.
     this.writeSseSnapshot(client, orch, true);
   }
@@ -377,19 +397,59 @@ export class SymphonyHttpServer {
   }
 
   private writeSseSnapshot(client: SseClient, orch: Orchestrator, boardDirty: boolean): void {
-    this.writeSse(client, `event: snapshot\ndata: ${JSON.stringify({ snapshot: orch.snapshot(), board_dirty: boardDirty })}\n\n`);
+    if (client.closed || client.res.destroyed || client.res.writableEnded) return;
+    if (client.backpressured) {
+      // Keep the newest snapshot, but do not lose a board mutation that occurred
+      // before the browser has had a chance to reload its board data.
+      client.pendingSnapshot = { boardDirty: client.pendingSnapshot?.boardDirty === true || boardDirty };
+      return;
+    }
+    this.writeSse(client.orch, client.hub, client, `event: snapshot\ndata: ${JSON.stringify({ snapshot: orch.snapshot(), board_dirty: boardDirty })}\n\n`);
   }
 
-  private writeSse(client: SseClient, payload: string): void {
-    if (client.closed || client.res.destroyed || client.res.writableEnded) return;
-    client.res.write(payload);
+  private writeSse(orch: Orchestrator, hub: SseHub, client: SseClient, payload: string): void {
+    if (client.closed || client.backpressured || client.res.destroyed || client.res.writableEnded) return;
+    try {
+      if (!client.res.write(payload)) this.blockSseClient(orch, hub, client);
+    } catch {
+      // A socket may disappear between writableEnded and write(). Treat that the
+      // same as a close, rather than keeping a timer/listener for a dead client.
+      this.closeSseClient(orch, hub, client);
+    }
+  }
+
+  /** Wait for Node's writable buffer to drain, with exactly one listener per client. */
+  private blockSseClient(orch: Orchestrator, hub: SseHub, client: SseClient): void {
+    if (client.closed || client.backpressured) return;
+    client.backpressured = true;
+    const onDrain = () => {
+      client.drainListener = null;
+      client.backpressured = false;
+      if (client.closed || client.res.destroyed || client.res.writableEnded) return;
+      const pending = client.pendingSnapshot;
+      client.pendingSnapshot = null;
+      if (pending) this.writeSseSnapshot(client, orch, pending.boardDirty);
+    };
+    client.drainListener = onDrain;
+    client.res.once("drain", onDrain);
   }
 
   private closeSseClient(orch: Orchestrator, hub: SseHub, client: SseClient): void {
     if (client.closed) return;
     client.closed = true;
+    client.backpressured = false;
+    client.pendingSnapshot = null;
     if (client.heartbeat) clearInterval(client.heartbeat);
     client.heartbeat = null;
+    if (client.closeListener) {
+      client.req.off("aborted", client.closeListener);
+      client.res.off("close", client.closeListener);
+      client.closeListener = null;
+    }
+    if (client.drainListener) {
+      client.res.off("drain", client.drainListener);
+      client.drainListener = null;
+    }
     hub.clients.delete(client);
     if (hub.clients.size !== 0) return;
     if (hub.notifyTimer) clearTimeout(hub.notifyTimer);
