@@ -593,6 +593,45 @@ test("failing agent schedules a backoff retry", async () => {
   }
 });
 
+test("a retry refresh keeps its work stream busy until the tracker reply arrives", async () => {
+  registerAgentFactory(makeFakeFactory("retry-race"));
+  const { wfPath, workflow, config } = setupWith("fake-retry-race", [
+    todo("RR-1"),
+    todo("RR-1-a", { follow_up_for: "RR-1", stream_identifier: "RR-1" }),
+  ]);
+  const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
+  const adapter = (orch as any).adapter;
+  const originalFetch = adapter.fetchIssuesByIds.bind(adapter);
+  let releaseRefresh!: () => void;
+  const refreshHeld = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  let refreshStarted!: () => void;
+  const refreshStartedAt = new Promise<void>((resolve) => { refreshStarted = resolve; });
+  adapter.fetchIssuesByIds = async (ids: string[]) => {
+    if (ids.length === 1 && ids[0] === "RR-1") {
+      refreshStarted();
+      await refreshHeld;
+    }
+    return originalFetch(ids);
+  };
+  const timer = setTimeout(() => {}, 10000);
+  (orch as any).retry_attempts.set("RR-1", {
+    issue_id: "RR-1", identifier: "RR-1", stream: "RR-1", attempt: 1,
+    due_at_ms: Date.now(), timer, error: null,
+  });
+  (orch as any).claimed.add("RR-1");
+
+  (orch as any).onRetryTimer("RR-1");
+  await refreshStartedAt;
+  try {
+    await orch.tick();
+    assert.equal(orch.snapshot().counts.running, 0, "a sibling must not dispatch while its stream retry is refreshing");
+  } finally {
+    releaseRefresh();
+    clearTimeout(timer);
+    orch.stop();
+  }
+});
+
 test("retries stop at max_retry_attempts and the issue halts until its state changes", async () => {
   registerAgentFactory(makeFakeFactory("fail"));
   const { issuesDir, wfPath } = setup("fail");
