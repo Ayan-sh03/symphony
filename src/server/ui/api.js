@@ -145,7 +145,7 @@ export function fetchBoard() {
     .then(async (r) => {
       if (r.status === 304) return { board: null, etag: null };
       if (!r.ok) return Promise.reject();
-      return { board: await r.json(), etag: r.headers.get("etag") };
+      return { board: await r.json(), etag: r.headers?.get?.("etag") ?? null };
     })
     .then((result) => {
       if (sequence !== boardRequestSequence || !isCurrent(context) || !result.board) return;
