@@ -7,25 +7,43 @@ let reconnectTimer = null;
 let reconnectDelay = 1000;
 let sseConnected = false;
 let stateRequest = null;
+let projectGeneration = 0;
+
+function requestContext() {
+  return { pid: store.pid, generation: projectGeneration, base: apiBase() };
+}
+
+function isCurrent(context) {
+  return context.pid === store.pid && context.generation === projectGeneration;
+}
 
 export function fetchState() {
-  if (stateRequest) return stateRequest;
-  const request = fetch(apiBase() + "/state", { headers: { accept: "application/json" } })
+  const context = requestContext();
+  if (stateRequest && stateRequest.pid === context.pid && stateRequest.generation === context.generation) return stateRequest.promise;
+  const request = fetch(context.base + "/state", { headers: { accept: "application/json" } })
     .then((r) => { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-    .then((j) => { store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender(); })
-    .catch(() => { store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender(); });
-  stateRequest = request;
-  void request.then(() => { if (stateRequest === request) stateRequest = null; });
+    .then((j) => {
+      if (!isCurrent(context)) return;
+      store.state = j; store.lastOk = Date.now(); store.conn = eventSource && sseConnected ? "sse" : "poll"; rerender();
+    })
+    .catch(() => {
+      if (!isCurrent(context)) return;
+      store.conn = Date.now() - store.lastOk > 12000 ? "down" : "stale"; rerender();
+    });
+  const entry = { ...context, promise: request };
+  stateRequest = entry;
+  void request.then(() => { if (stateRequest === entry) stateRequest = null; });
   return request;
 }
 
 /** One EventSource follows the active project; polling is reserved for a failed stream. */
 export function startLiveUpdates() {
   if (!store.auto || eventSource || reconnectTimer) return;
-  const source = new EventSource(apiBase() + "/events");
+  const context = requestContext();
+  const source = new EventSource(context.base + "/events");
   eventSource = source;
   source.addEventListener("snapshot", (event) => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
     try {
       const payload = JSON.parse(event.data);
       if (!payload || !payload.snapshot) return;
@@ -41,14 +59,14 @@ export function startLiveUpdates() {
     }
   });
   source.onopen = () => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
     sseConnected = true;
     reconnectDelay = 1000;
     store.conn = "sse";
     rerender();
   };
   source.onerror = () => {
-    if (eventSource !== source) return;
+    if (eventSource !== source || !isCurrent(context)) return;
     source.close();
     eventSource = null;
     sseConnected = false;
@@ -80,6 +98,7 @@ export function stopLiveUpdates() {
 
 export function restartLiveUpdates() {
   stopLiveUpdates();
+  projectGeneration += 1;
   startLiveUpdates();
 }
 
@@ -98,14 +117,19 @@ export function setAutoRefresh(enabled) {
 /** Poll only while SSE is unavailable; a healthy stream already carries state updates. */
 export function pollLiveFallback() {
   if (!store.auto || (eventSource && sseConnected)) return Promise.resolve();
-  return fetchState().then(() => Promise.all([fetchBoard(), refreshOpenDetail()]));
+  const context = requestContext();
+  return fetchState().then(() => {
+    if (!isCurrent(context)) return;
+    return Promise.all([fetchBoard(), refreshOpenDetail()]);
+  });
 }
 
 export function fetchBoard() {
   if (!store.state || !store.state.meta || !store.state.meta.can_board) return Promise.resolve();
-  return fetch(apiBase() + "/issues", { headers: { accept: "application/json" } })
+  const context = requestContext();
+  return fetch(context.base + "/issues", { headers: { accept: "application/json" } })
     .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((j) => { store.board = j; rerender(); })
+    .then((j) => { if (isCurrent(context)) { store.board = j; rerender(); } })
     .catch(() => {});
 }
 
@@ -117,16 +141,17 @@ function viewingDetail(identifier) {
 }
 
 export function loadDetail(identifier) {
-  return fetch(apiBase() + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
+  const context = requestContext();
+  return fetch(context.base + "/" + encodeURIComponent(identifier), { headers: { accept: "application/json" } })
     .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
     .then((res) => {
-      if (!viewingDetail(identifier)) return;
+      if (!isCurrent(context) || !viewingDetail(identifier)) return;
       if (res.ok) { store.detailData = res.j; store.detailErr = null; }
       else { store.detailData = null; store.detailErr = (res.j.error && res.j.error.message) || "Not found"; }
       rerender();
     })
     .catch(() => {
-      if (!viewingDetail(identifier)) return;
+      if (!isCurrent(context) || !viewingDetail(identifier)) return;
       if (!store.detailData) { store.detailErr = "Failed to load detail."; rerender(); }
     });
 }

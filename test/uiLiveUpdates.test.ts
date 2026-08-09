@@ -113,6 +113,7 @@ test("project switches isolate delayed state, board, detail, and fallback respon
   store.pid = "a";
   store.state = null; store.board = null; store.detailData = null; store.route = { name: "board" };
   api.restartLiveUpdates();
+  const aSource = FakeEventSource.instances.at(-1)!;
   const aState = api.fetchState();
   const aStateAgain = api.fetchState();
   assert.equal(pending.filter((request) => request.url.endsWith("/a/state")).length, 1, "dedupe applies within one project generation");
@@ -120,6 +121,9 @@ test("project switches isolate delayed state, board, detail, and fallback respon
   store.pid = "b";
   store.state = null; store.board = null; store.detailData = null;
   api.restartLiveUpdates();
+  aSource.emit("snapshot", { snapshot: { project: "a", meta: { can_board: true } }, board_dirty: true });
+  assert.equal(store.state, null, "a stale SSE bootstrap snapshot cannot paint the new project");
+  assert.equal(pending.some((request) => request.url.endsWith("/a/issues")), false, "a stale SSE snapshot cannot dirty the old board");
   FakeEventSource.instances.at(-1)!.error();
   assert.equal(pending.filter((request) => request.url.endsWith("/b/state")).length, 1,
     "project B fallback must not reuse project A's state request");
