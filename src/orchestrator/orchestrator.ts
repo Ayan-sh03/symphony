@@ -10,9 +10,10 @@ import type { WorkflowDefinition } from "../domain/types.ts";
 import type { TrackerAdapter, IssuePatch } from "../tracker/types.ts";
 import { WorkspaceManager, isSafeStreamIdentifier } from "../workspace/manager.ts";
 import { createAdapter, validateTracker, SUPPORTED_KINDS as TRACKER_KINDS } from "../tracker/registry.ts";
-import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript, detectAgentKinds, listAgentModels } from "../agent/registry.ts";
+import { isSupportedAgentKind, supportedAgentKinds, readAgentTranscript } from "../agent/registry.ts";
 import type { AgentModel, AgentModelsView } from "../agent/types.ts";
 import { resolveAgentAvailability, type AgentAvailability, type AgentDetection } from "../agent/detection.ts";
+import { AgentDiscoveryCache } from "../agent/discoveryCache.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
 import { buildConfig } from "../config/config.ts";
 import { aggregateCost, costForKind } from "../history/cost.ts";
@@ -192,6 +193,8 @@ export interface OrchestratorDeps {
   workflow: WorkflowDefinition;
   workflowPath: string;
   logger: Logger;
+  /** Host-owned in multi-project mode; private in the single-workflow fallback. */
+  agentDiscoveryCache?: AgentDiscoveryCache;
 }
 
 export interface ValidationResult {
@@ -224,6 +227,7 @@ export class Orchestrator {
   /** Per-kind model listings (extension, Appendix B.7). Never read on the dispatch path. */
   private agentModelCache = new Map<string, { models: AgentModel[]; at: number; fetched_at: string }>();
   private agentModelsInFlight = new Map<string, Promise<AgentModel[]>>();
+  private agentDiscoveryCache: AgentDiscoveryCache;
   /** Last "dispatch parked" reason logged, so a standing condition warns once. */
   private lastParkReason: string | null = null;
   private history = new Map<string, FinishedLog>(); // issue_id -> retained log
@@ -239,6 +243,7 @@ export class Orchestrator {
     this.promptTemplate = deps.workflow.prompt_template;
     this.workflowPath = deps.workflowPath;
     this.logger = deps.logger;
+    this.agentDiscoveryCache = deps.agentDiscoveryCache ?? new AgentDiscoveryCache();
     this.adapter = createAdapter(this.config.tracker.kind, this.config.tracker.provider, this.config.workflowDir, this.logger);
     this.workspaceManager = new WorkspaceManager({
       root: this.config.workspace_root,
@@ -590,7 +595,7 @@ export class Orchestrator {
     if (probed && !force && age < AGENT_DETECTION_TTL_MS) return;
     if (probed && force && age < AGENT_DETECTION_FORCE_MIN_MS) return; // answer is a moment old
     if (!this.agentDetectionInFlight || force) {
-      const probe: Promise<AgentDetection[]> = detectAgentKinds(this.config, this.logger)
+      const probe: Promise<AgentDetection[]> = this.agentDiscoveryCache.detect(this.config, this.logger, force)
         .then((statuses) => {
           const before = this.usableKinds(this.agentDetection);
           this.agentDetection = statuses;
@@ -662,7 +667,7 @@ export class Orchestrator {
       // Discovery must see the same environment dispatch does: opencode scopes its
       // listing to configured credentials, several of which arrive as env vars, so a
       // different env here would advertise models the runs cannot reach.
-      probe = listAgentModels(kind, { config: this.config, logger: this.logger, env: this.buildChildEnv() })
+      probe = this.agentDiscoveryCache.modelsFor(kind, { config: this.config, logger: this.logger, env: this.buildChildEnv() }, force)
         .then((models) => {
           // An empty list is a failed or capability-less probe, not evidence that a
           // backend has no models. Overwriting a good listing with it would empty the

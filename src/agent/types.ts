@@ -149,6 +149,12 @@ export interface AgentFactory {
    */
   detect?(config: ServiceConfigValues, logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection>;
   /**
+   * Stable, non-secret input that affects availability detection. Supplying it lets
+   * multi-project hosts share a host probe; omitting it deliberately keeps custom
+   * backends isolated until they define their own equivalence contract.
+   */
+  availabilityCacheKey?(config: ServiceConfigValues): string;
+  /**
    * Optional capability (extension, SPEC Appendix B.7): enumerate the models this
    * backend can run on this host. Symphony is not the source of truth for model
    * inventory — the CLI is — so every model name in the console originates here.
@@ -160,4 +166,6 @@ export interface AgentFactory {
    * verified failure mode is a hang, not a rejection.
    */
   listModels?(query: ModelQuery): Promise<AgentModel[]>;
+  /** Stable, non-secret configuration that affects this backend's model listing. */
+  modelDiscoveryCacheKey?(query: ModelQuery): string;
 }

@@ -27,8 +27,14 @@ const codexFactory: AgentFactory = {
   detect(config: ServiceConfigValues, _logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection> {
     return detectCommand("codex", config.codex.command, "codex.command", deps);
   },
+  availabilityCacheKey(config: ServiceConfigValues): string {
+    return config.codex.command;
+  },
   listModels(query: ModelQuery): Promise<AgentModel[]> {
     return listCodexModels(query);
+  },
+  modelDiscoveryCacheKey(query: ModelQuery): string {
+    return JSON.stringify({ command: query.config.codex.command, workflowDir: query.config.workflowDir });
   },
 };
 
@@ -44,8 +50,20 @@ const opencodeFactory: AgentFactory = {
   detect(config: ServiceConfigValues, _logger: Logger, deps?: AgentDetectDeps): Promise<AgentDetection> {
     return detectCommand("opencode", config.opencode.command, "opencode.command", deps);
   },
+  availabilityCacheKey(config: ServiceConfigValues): string {
+    return config.opencode.command;
+  },
   listModels(query: ModelQuery): Promise<AgentModel[]> {
     return listOpencodeModels(query);
+  },
+  modelDiscoveryCacheKey(query: ModelQuery): string {
+    // The configured default changes the decorated result even though the CLI
+    // inventory is credential-scoped, so it is part of equivalence too.
+    return JSON.stringify({
+      command: query.config.opencode.command,
+      model: query.config.opencode.model,
+      workflowDir: query.config.workflowDir,
+    });
   },
 };
 
@@ -65,6 +83,22 @@ export function isSupportedAgentKind(kind: string): boolean {
 
 export function supportedAgentKinds(): string[] {
   return [...FACTORIES.keys()];
+}
+
+/** Host-cache key for all registered availability probes. */
+export function agentAvailabilityCacheKey(config: ServiceConfigValues): string {
+  return JSON.stringify([...FACTORIES.values()].map((factory) => ({
+    kind: factory.kind,
+    // Unknown extension backends are intentionally isolated. Reusing them without
+    // knowing which settings affect detection would be less correct than no reuse.
+    key: factory.availabilityCacheKey?.(config) ?? `isolated:${config.workflowDir}`,
+  })));
+}
+
+/** Host-cache key for one backend's non-secret model-discovery configuration. */
+export function agentModelDiscoveryCacheKey(kind: string, query: ModelQuery): string {
+  const factory = FACTORIES.get(kind);
+  return factory?.modelDiscoveryCacheKey?.(query) ?? `isolated:${query.config.workflowDir}`;
 }
 
 /** Create an agent session for the configured kind. */
