@@ -74,4 +74,15 @@ test("console bootstrap loads the board once, then healthy SSE only reloads a di
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(boardRequestCount(), 1, "a null inlined snapshot still loads the board once SSE supplies state");
   api.stopLiveUpdates();
+
+  calls.length = 0;
+  store.state = null;
+  api.bootstrapLiveUpdates();
+  const failedBeforeSnapshot = FakeEventSource.instances[2]!;
+  failedBeforeSnapshot.error();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.sort(), ["/api/v1/projects/p/issues", "/api/v1/projects/p/state"].sort(),
+    "the first null-bootstrap fallback recovers state and board without duplicate requests");
+  api.stopLiveUpdates();
 });
