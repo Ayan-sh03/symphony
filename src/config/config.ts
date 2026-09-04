@@ -68,6 +68,12 @@ export interface OpencodeConfig {
   turn_timeout_ms: number;
 }
 
+/** Provider-neutral runtime selection. `provider` belongs to the selected factory. */
+export interface ExecutionConfig {
+  kind: string;
+  provider: Record<string, unknown>;
+}
+
 export interface ServiceConfigValues {
   workflowDir: string;
   tracker: TrackerConfig;
@@ -89,6 +95,8 @@ export interface ServiceConfigValues {
   hooks: HooksConfig;
   /** Selected agent backend (SPEC §10 generalized). Default "codex". */
   agent_kind: string;
+  /** Selected execution backend. Existing workflows default to host-local execution. */
+  execution: ExecutionConfig;
   max_concurrent_agents: number;
   max_turns: number;
   max_retry_backoff_ms: number;
@@ -279,6 +287,14 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
 
   const agent_pricing = parsePricing(agent.pricing);
 
+  const executionRaw = asObject(cfg.execution);
+  const execution: ExecutionConfig = {
+    kind: typeof executionRaw.kind === "string" && executionRaw.kind.trim() !== ""
+      ? executionRaw.kind.trim()
+      : "local",
+    provider: asObject(executionRaw.provider),
+  };
+
   const codexRaw = asObject(cfg.codex);
   const codex: CodexConfig = {
     command: typeof codexRaw.command === "string" && codexRaw.command.trim() !== "" ? codexRaw.command : "codex app-server",
@@ -311,6 +327,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     workspace_delivery_mode,
     hooks,
     agent_kind,
+    execution,
     max_concurrent_agents,
     max_turns,
     max_retry_backoff_ms,

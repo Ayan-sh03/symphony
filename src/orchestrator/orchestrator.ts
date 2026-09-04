@@ -15,6 +15,7 @@ import type { AgentModel, AgentModelsView } from "../agent/types.ts";
 import { resolveAgentAvailability, type AgentAvailability, type AgentDetection } from "../agent/detection.ts";
 import { AgentDiscoveryCache } from "../agent/discoveryCache.ts";
 import { runAgentAttempt, type WorkerExit } from "../agent/runner.ts";
+import { validateExecutionProvider } from "../execution/registry.ts";
 import { buildConfig } from "../config/config.ts";
 import { aggregateCost, costForKind } from "../history/cost.ts";
 import type { AggregateCost, EstimatedCost, TokenCounts } from "../history/cost.ts";
@@ -420,6 +421,11 @@ export class Orchestrator {
     }
     if (!isSupportedAgentKind(this.config.agent_kind)) {
       return { ok: false, error: `unsupported agent.kind: ${this.config.agent_kind}` };
+    }
+    try {
+      validateExecutionProvider(this.config.execution.kind, this.config.execution.provider);
+    } catch (err) {
+      return { ok: false, error: `execution config invalid: ${(err as Error).message}` };
     }
     if (!this.config.codex.command || this.config.codex.command.trim() === "") {
       return { ok: false, error: "codex.command is empty" };
@@ -1798,6 +1804,7 @@ export class Orchestrator {
       next = buildConfig(def, this.workflowPath);
       validateTracker(next.tracker.kind, next.tracker.provider);
       if (!isSupportedAgentKind(next.agent_kind)) throw new Error(`unsupported agent.kind: ${next.agent_kind}`);
+      validateExecutionProvider(next.execution.kind, next.execution.provider);
     } catch (err) {
       this.logger.error("workflow reload rejected; keeping last good config", { error: String(err) });
       return;
@@ -1823,6 +1830,7 @@ export class Orchestrator {
       poll_interval_ms: next.poll_interval_ms,
       max_concurrent_agents: next.max_concurrent_agents,
       tracker_kind: next.tracker.kind,
+      execution_kind: next.execution.kind,
     });
     this.scheduleTick(0); // apply new cadence promptly
     this.notify();
