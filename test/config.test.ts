@@ -21,7 +21,13 @@ test("applies defaults for missing optional fields", () => {
   assert.equal(c.hooks.timeout_ms, 60000);
   assert.equal(c.codex.command, "codex app-server");
   assert.equal(c.agent_kind, "codex");
+  assert.deepEqual(c.execution, { kind: "local", provider: {} });
   assert.equal(c.codex.turn_timeout_ms, 3600000);
+});
+
+test("execution provider config accepts an explicit kind and provider options", () => {
+  const c = cfg("---\ntracker:\n  kind: file\nexecution:\n  kind: fake\n  provider:\n    region: test\n---\n");
+  assert.deepEqual(c.execution, { kind: "fake", provider: { region: "test" } });
 });
 
 test("$VAR resolves from environment", () => {
