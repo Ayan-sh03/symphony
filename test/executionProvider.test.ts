@@ -12,8 +12,10 @@ import { Logger } from "../src/logger.ts";
 import {
   createExecutionSession,
   executionProviderCapabilities,
+  isSupportedExecutionKind,
   registerExecutionProviderFactory,
   requireExecutionCapabilities,
+  supportedExecutionKinds,
   supportsExecutionCapability,
   validateExecutionProvider,
 } from "../src/execution/registry.ts";
@@ -53,6 +55,8 @@ test("a fake provider is selected through the registry and reports capabilities"
   registerExecutionProviderFactory(factory);
 
   const provider = { region: "test" };
+  assert.equal(isSupportedExecutionKind(factory.kind), true);
+  assert.ok(supportedExecutionKinds().includes(factory.kind));
   validateExecutionProvider(factory.kind, provider);
   assert.deepEqual(validated, provider);
   assert.equal(supportsExecutionCapability(factory.kind, "process"), true);
@@ -100,13 +104,21 @@ test("the local provider preserves shell, stream, and workspace file behavior", 
     assert.equal(result.code, 0);
     assert.equal(await stdout, "local-ok");
     assert.equal(await proc.exit, result, "wait() and exit expose one stable outcome");
+    await proc.kill(); // already settled: termination remains safe and idempotent
   } finally {
     await session.close();
+    await session.close();
+    await assert.rejects(() => session.spawn!("node --version"), /session is closed/);
+    await assert.rejects(() => session.readFile!("anything"), /session is closed/);
     fs.rmSync(workspacePath, { recursive: true, force: true });
   }
 });
 
 test("unknown providers fail validation, capability checks, and construction clearly", async () => {
+  assert.throws(
+    () => registerExecutionProviderFactory({ kind: " ", capabilities: [], create: async () => ({ runtimeId: null, async close() {} }) }),
+    /kind must not be empty/,
+  );
   assert.throws(() => validateExecutionProvider("missing-provider", {}), /unsupported execution.kind/);
   assert.throws(() => requireExecutionCapabilities("missing-provider", ["process"]), /unsupported execution.kind/);
   await assert.rejects(
