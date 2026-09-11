@@ -110,6 +110,33 @@ test("Git worktrees round-trip history, the index, dirty files, deletions, and s
   await git(destination, "fsck", "--strict");
 });
 
+test("Git snapshots normalize clean autocrlf files while preserving dirty working bytes", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  const base = await repo(source);
+  await git(source, "config", "core.autocrlf", "true");
+  // `reset --hard` does not re-smudge files the index already considers
+  // up-to-date, so remove them and re-checkout to get CRLF working bytes.
+  for (const name of ["tracked.txt", "deleted.txt", ".gitignore"]) await fs.rm(path.join(source, name));
+  await git(source, "checkout", "--", ".");
+  assert.deepEqual(await fs.readFile(path.join(source, "tracked.txt")), Buffer.from("base\r\n"));
+  assert.equal(await git(source, "status", "--porcelain"), "");
+
+  await fs.writeFile(path.join(source, "tracked.txt"), Buffer.from("staged\r\n"));
+  await git(source, "add", "tracked.txt");
+  await fs.writeFile(path.join(source, "tracked.txt"), Buffer.from("unstaged\r\n"));
+  await fs.writeFile(path.join(source, "untracked.txt"), Buffer.from("untracked\r\n"));
+  const snapshot = await exportWorkspaceSnapshot(source);
+  const destination = path.join(dir, "imported");
+  await importWorkspaceSnapshot(destination, snapshot, { expectedBaseCommit: base });
+
+  assert.deepEqual(await fs.readFile(path.join(destination, "tracked.txt")), Buffer.from("unstaged\r\n"));
+  assert.deepEqual(await fs.readFile(path.join(destination, "untracked.txt")), Buffer.from("untracked\r\n"));
+  assert.equal(await git(destination, "show", ":tracked.txt"), "staged");
+  assert.equal(await git(destination, "status", "--porcelain"), "MM tracked.txt\n?? untracked.txt");
+  assert.deepEqual(await fs.readFile(path.join(destination, "deleted.txt")), Buffer.from("delete me\n"));
+});
+
 test("staging is independent and imports refuse to overwrite the only local copy", async (t) => {
   const dir = await root(t);
   const local = path.join(dir, "local");
