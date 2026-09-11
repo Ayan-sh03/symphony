@@ -140,7 +140,7 @@ test("imports into empty directories and local execution sessions support snapsh
 });
 
 test("archive paths reject traversal, metadata, Windows aliases, and ambiguous trees", () => {
-  for (const name of ["../escape", "/absolute", "C:/escape", "a\\b", "a//b", "a/./b", "a/../b", ".git/config", "a/.GIT/hooks", "git~1/config", "file:ads", "NUL", "COM1.txt", "LPT9", "trailing.", "trailing ", "a\u0000b"]) {
+  for (const name of ["../escape", "/absolute", "C:/escape", "a\\b", "a//b", "a/./b", "a/../b", ".git/config", "a/.GIT/hooks", "git~1/config", "file:ads", "NUL", "COM1.txt", "LPT9", "trailing.", "trailing ", "a\u0000b", "bad\ud800"] ) {
     assert.throws(() => validateWorkspaceSnapshot(plain([file(name)]), { expectedBaseCommit: null }), /path/i, name);
   }
   for (const entries of [[file("a"), file("a")], [file("A"), file("a")], [file("a"), file("a/b")], [file("A/x"), file("a/y")]]) {
@@ -156,6 +156,7 @@ test("links cannot escape, cycle, alias metadata, or serve as extraction parents
   assert.throws(() => validateWorkspaceSnapshot(plain([link("a", "b"), link("b", "a")]), { expectedBaseCommit: null }), /link|cycle/i);
   assert.throws(() => validateWorkspaceSnapshot(plain([link("a", "file"), file("a/child")]), { expectedBaseCommit: null }), /parent|path|link/i);
   assert.doesNotThrow(() => validateWorkspaceSnapshot(plain([file("file"), link("nested/link", "../file")]), { expectedBaseCommit: null }));
+  assert.throws(() => validateWorkspaceSnapshot(plain([file("file"), link("link", ".git/../file")]), { expectedBaseCommit: null }), /link|path/i);
 });
 
 test("content hashes, sizes, modes, schema, and resource limits fail closed", () => {
@@ -220,4 +221,81 @@ test("safe relative symlinks round-trip and escaping source links are never foll
   assert.equal(await fs.readlink(path.join(destination, "nested", "link")), "../target");
   await fs.symlink("../../outside", path.join(source, "escape"));
   await assert.rejects(exportWorkspaceSnapshot(source), /link|path/i);
+});
+
+test("read-only modes can be staged, verified, and disposed", { skip: process.platform === "win32" }, async (t) => {
+  const dir = await root(t);
+  const staged = await stageWorkspaceSnapshot(plain([
+    { path: "readonly", type: "directory", mode: 0o500 },
+    { ...file("readonly/no-access"), mode: 0o000 },
+  ]), dir, { expectedBaseCommit: null });
+  assert.equal((await fs.stat(path.join(staged.path, "readonly", "no-access"))).mode & 0o777, 0);
+  await staged.dispose();
+  await assert.rejects(fs.stat(staged.path), /ENOENT/);
+});
+
+test("snapshot operations exclude concurrent mutations and close waits for an import", async (t) => {
+  const dir = await root(t);
+  const destination = path.join(dir, "session");
+  await fs.mkdir(destination);
+  const session = await createExecutionSession("local", {}, { workspacePath: destination, env: process.env, logger: silent });
+  const pending = session.importSnapshot!(plain([file()]), { expectedBaseCommit: null });
+  // Attach handlers immediately: no unhandled rejection if an assertion fails.
+  const settled = pending.catch((error) => error);
+  try {
+    await assert.rejects(() => session.writeFile!("racing-write", "no"), /snapshot/);
+    await assert.rejects(() => session.removeFile!("file.txt"), /snapshot/);
+    await assert.rejects(() => session.spawn!("node --version"), /snapshot/);
+    await assert.rejects(() => session.exportSnapshot!(), /snapshot/);
+    await session.close();
+    assert.equal(await settled, undefined);
+    assert.equal(await fs.readFile(path.join(destination, "file.txt"), "utf8"), "content");
+  } finally { await settled; await session.close(); }
+});
+
+test("detached Git HEAD, staged deletion, and binary index changes survive a round-trip", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  const base = await repo(source);
+  await git(source, "checkout", "--detach", "-q");
+  await git(source, "rm", "-q", "deleted.txt");
+  await fs.writeFile(path.join(source, "tracked.txt"), Buffer.from([0, 255, 27]));
+  await git(source, "add", "tracked.txt");
+  const snapshot = await exportWorkspaceSnapshot(source);
+  const dest = path.join(dir, "dest");
+  await importWorkspaceSnapshot(dest, snapshot, { expectedBaseCommit: base });
+  assert.equal(await git(dest, "branch", "--show-current"), "");
+  assert.equal(await git(dest, "diff", "--cached", "--binary"), await git(source, "diff", "--cached", "--binary"));
+  await assert.rejects(exportWorkspaceSnapshot(source, { limits: { maxEntries: 1 } }), /limit/);
+  await assert.rejects(exportWorkspaceSnapshot(source, { limits: { maxFileBytes: 2 } }), /limit/);
+});
+
+test("Git validation checks bundle HEAD and actual ancestry rather than trusting labels", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  const base = await repo(source);
+  const snapshot = await exportWorkspaceSnapshot(source);
+  const wrongHead = structuredClone(snapshot);
+  wrongHead.git!.headCommit = "0".repeat(40);
+  await assert.rejects(stageWorkspaceSnapshot(wrongHead, dir, { expectedBaseCommit: base }), /HEAD/);
+  const wrongBase = structuredClone(snapshot);
+  wrongBase.git!.baseCommit = "0".repeat(40);
+  await assert.rejects(stageWorkspaceSnapshot(wrongBase, dir, { expectedBaseCommit: "0".repeat(40) }), /git|base/);
+  // Historical bytes also count, even if no large file remains in the workspace.
+  await fs.writeFile(path.join(source, "large"), "x".repeat(100_000));
+  await git(source, "add", "large");
+  await git(source, "commit", "-qm", "large historical blob");
+  await git(source, "rm", "large");
+  await git(source, "commit", "-qm", "remove large blob");
+  const history = await exportWorkspaceSnapshot(source);
+  await assert.rejects(stageWorkspaceSnapshot(history, dir, { expectedBaseCommit: history.git!.baseCommit, limits: { maxFileBytes: 4096 } }), /object size|limit/);
+});
+
+test("export rejects intent-to-add instead of silently losing its index state", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  await repo(source);
+  await fs.writeFile(path.join(source, "intent"), "new work");
+  await git(source, "add", "-N", "intent");
+  await assert.rejects(exportWorkspaceSnapshot(source), /intent-to-add/);
 });
