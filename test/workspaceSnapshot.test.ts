@@ -169,6 +169,7 @@ test("content hashes, sizes, modes, schema, and resource limits fail closed", ()
   assert.throws(() => validate(plain([{ ...file(), content: { ...blob("content"), data: "!!!!" } }])), /base64|content/i);
   assert.throws(() => validate(plain([file()]), { maxFileBytes: 2 }), /limit|size/i);
   assert.throws(() => validate(plain([file("a"), file("b")]), { maxEntries: 1 }), /limit/i);
+  assert.throws(() => validate(plain([file("a/b/c")]), { maxEntries: 2 }), /limit/i);
   assert.throws(() => validate(plain([file("a"), file("b")]), { maxTotalBytes: 8 }), /limit/i);
   assert.throws(() => validate(plain([file()]), { maxSnapshotBytes: 8 }), /limit/i);
   assert.throws(() => validate(plain(), { maxEntries: -1 }), /limit/i);
@@ -298,4 +299,54 @@ test("export rejects intent-to-add instead of silently losing its index state", 
   await fs.writeFile(path.join(source, "intent"), "new work");
   await git(source, "add", "-N", "intent");
   await assert.rejects(exportWorkspaceSnapshot(source), /intent-to-add/);
+});
+
+test("Git symlink placeholders export as portable links when core.symlinks is false", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  await repo(source);
+  await git(source, "config", "core.symlinks", "false");
+  await fs.writeFile(path.join(source, "link"), "tracked.txt");
+  const hash = await git(source, "hash-object", "-w", "link");
+  await git(source, "update-index", "--add", "--cacheinfo", `120000,${hash},link`);
+  await git(source, "commit", "-qm", "portable symlink");
+  assert.equal(await git(source, "status", "--porcelain"), "");
+  const snapshot = await exportWorkspaceSnapshot(source);
+  assert.deepEqual(snapshot.entries.find((entry) => entry.path === "link"), { path: "link", type: "symlink", target: "tracked.txt" });
+  if (process.platform !== "win32") {
+    const dest = path.join(dir, "dest");
+    await importWorkspaceSnapshot(dest, snapshot, { expectedBaseCommit: snapshot.git!.baseCommit });
+    assert.equal(await fs.readlink(path.join(dest, "link")), "tracked.txt");
+    assert.equal(await git(dest, "status", "--porcelain"), "");
+  }
+});
+
+test("Git roots with unmerged indexes and submodules fail explicitly", async (t) => {
+  const dir = await root(t);
+  const source = path.join(dir, "repo");
+  const base = await repo(source);
+  await git(source, "update-index", "--add", "--cacheinfo", `160000,${base},submodule`);
+  await assert.rejects(exportWorkspaceSnapshot(source), /submodule/);
+  await git(source, "reset", "--hard", "-q", base);
+  await git(source, "checkout", "-qb", "side");
+  await fs.writeFile(path.join(source, "tracked.txt"), "side\n");
+  await git(source, "commit", "-qam", "side");
+  await git(source, "checkout", "-q", "main");
+  await fs.writeFile(path.join(source, "tracked.txt"), "main\n");
+  await git(source, "commit", "-qam", "main");
+  await assert.rejects(git(source, "merge", "side"));
+  await assert.rejects(exportWorkspaceSnapshot(source), /unmerged/);
+});
+
+test("snapshot transfer refuses live processes and in-flight file writes", async (t) => {
+  const dir = await root(t);
+  const session = await createExecutionSession("local", {}, { workspacePath: dir, env: process.env, logger: silent });
+  try {
+    const write = session.writeFile!("busy", "work");
+    await assert.rejects(() => session.exportSnapshot!(), /quiescent/);
+    await write;
+    const proc = await session.spawn!(process.platform === "win32" ? "ping -n 30 127.0.0.1 > NUL" : "exec sleep 30");
+    await assert.rejects(() => session.exportSnapshot!(), /quiescent/);
+    await proc.kill("SIGKILL");
+  } finally { await session.close(); }
 });
