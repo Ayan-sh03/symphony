@@ -38,7 +38,10 @@ Plain-directory exports include their files and empty directories. Export never
 copies Git metadata, hooks, configuration, remotes, or alternates. An imported
 worktree becomes an independent repository with its own `.git` directory.
 Git's regular-file symlink placeholders (`core.symlinks=false`) export as portable
-symlinks.
+symlinks. Clean tracked text files are stored as their committed bytes, so checkout
+end-of-line smudging (for example `core.autocrlf=true` on Windows) is not carried
+into the snapshot: an import with `core.autocrlf=false` reports no spurious
+modifications. Dirty working bytes and untracked files are preserved verbatim.
 
 ## Export, stage, and import
 
