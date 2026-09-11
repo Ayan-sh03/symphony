@@ -310,3 +310,16 @@ Key rules (see [`README.md`](README.md) → adapter profile, and SPEC §11):
 
 [`src/tracker/fileAdapter.ts`](src/tracker/fileAdapter.ts) is a complete, dependency-free
 reference implementing all of the above.
+
+## 6. Transferring execution workspaces
+
+Execution providers can advertise `workspace-snapshot` and implement
+`ExecutionSession.exportSnapshot(options)` and `importSnapshot(snapshot, options)`.
+Use the versioned `WorkspaceSnapshot` format from `src/workspace/snapshot.ts`;
+never copy a worktree's `.git` pointer to a sandbox. The local provider includes a
+reference implementation. Imports require a caller-supplied expected base commit
+(`null` for plain directories) and an empty destination. For checkpoints into an
+existing workspace, use `stageWorkspaceSnapshot` and retain the verified staging
+directory until the caller's delivery transaction succeeds. See the
+[snapshot contract](docs/workspace-snapshots.md) for the format, limits, supported
+file states, and cleanup ownership.

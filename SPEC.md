@@ -2528,3 +2528,21 @@ default.
   evidence that credentials work — a backend MAY list models while unauthenticated.
 - A `model` an implementation cannot find in the current listing MUST still be shown and
   MUST still dispatch. Absence from a listing is not invalidity.
+
+### B.8 Portable Workspace Snapshots (OPTIONAL)
+
+An execution provider MAY advertise `workspace-snapshot` and transfer a versioned,
+provider-independent workspace manifest. A Git snapshot MUST preserve HEAD and its
+reachable commits, the staged index, working changes, deletions, executable modes,
+and safe non-ignored untracked files. A plain-directory snapshot MUST preserve its
+regular files and directories. Git administrative files MUST NOT be copied.
+
+Import MUST validate paths, links, sizes, hashes, and an independently supplied
+expected base commit. Git imports MUST verify base ancestry and repository integrity.
+Materialization MUST happen in an owned staging directory before publication, and
+invalid snapshots MUST NOT change the destination. Existing local work MUST remain
+intact until a separate checkpoint transaction imports it safely. Unsupported file
+types and Git states MUST fail explicitly instead of silently dropping work.
+
+The version 1 format, supported states, platform behavior, resource limits, and
+staging ownership are specified in [Workspace snapshots](docs/workspace-snapshots.md).

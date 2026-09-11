@@ -45,6 +45,7 @@ npm run typecheck
   Docker, and security
 - [Tracker guide](docs/trackers.md) — file and GitHub tracker setup and behavior
 - [Architecture](docs/architecture.md) — system structure and execution flow
+- [Workspace snapshots](docs/workspace-snapshots.md) — portable transfer format and safe staged imports
 - [Integration guide](INTEGRATION.md) — add an agent backend or tracker adapter
 - [Workflow examples](WORKFLOW.md) — local file tracker and Codex configuration
 - [Service specification](SPEC.md) — complete configuration and behavioral contract
