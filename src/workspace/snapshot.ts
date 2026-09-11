@@ -107,7 +107,7 @@ function bytes(value: unknown, limit: number): Buffer {
 }
 
 /** Validate the whole tree before creating even a single archive-controlled path. */
-function validatePaths(entries: Array<{ path: string; type: string; target?: string }>): void {
+function validatePaths(entries: Array<{ path: string; type: string; target?: string }>, maxEntries: number): void {
   const nodes = new Map<string, { path: string; type: string; target?: string }>();
   const aliases = new Map<string, string>();
   for (const entry of entries) {
@@ -120,6 +120,7 @@ function validatePaths(entries: Array<{ path: string; type: string; target?: str
       const folded = prefix.normalize("NFC").toLowerCase();
       if (aliases.has(folded) && aliases.get(folded) !== prefix) fail(`snapshot path case collision: ${prefix}`);
       aliases.set(folded, prefix);
+      if (aliases.size > maxEntries) fail("snapshot path count including implicit directories exceeds limit");
     }
   }
   for (const entry of entries) {
@@ -164,7 +165,7 @@ export function validateWorkspaceSnapshot(value: unknown, options: SnapshotImpor
     else if (entry.type === "directory") mode(entry.mode);
     else if (entry.type !== "symlink") fail("unsupported snapshot entry type");
   }
-  validatePaths(snapshot.entries);
+  validatePaths(snapshot.entries, limits.maxEntries);
   if (snapshot.kind === "directory") {
     if (snapshot.git !== null || options.expectedBaseCommit !== null) fail("plain snapshot requires a null expected base commit");
   } else {
@@ -251,7 +252,7 @@ async function indexEntries(cwd: string, limits: SnapshotLimits) {
   for (const entry of entries) {
     paths.push({ path: entry.path, type: entry.mode === "120000" ? "symlink" : "file", ...(entry.mode === "120000" ? { target: (await git(cwd, ["cat-file", "blob", entry.oid], 4096)).toString("utf8") } : {}) });
   }
-  validatePaths(paths);
+  validatePaths(paths, limits.maxEntries);
   return entries;
 }
 
@@ -264,6 +265,7 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
   let gitState: SnapshotGit | null = null;
   let selected: Set<string> | null = null;
   let indexModes = new Map<string, string>();
+  let symlinkPlaceholders = false;
   let total = 0;
   if (metadata) {
     if (metadata.isSymbolicLink()) fail("snapshot rejects linked Git metadata");
@@ -275,6 +277,7 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
     await git(root, ["merge-base", "--is-ancestor", base, head], limits.maxTotalBytes);
     const index = await indexEntries(root, limits);
     indexModes = new Map(index.map((entry) => [entry.path, entry.mode]));
+    symlinkPlaceholders = await gitText(root, ["config", "--type=bool", "--default=true", "--get", "core.symlinks"], limits) === "false";
     const files = (await gitText(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], limits)).split("\0").filter(Boolean);
     selected = new Set();
     for (const file of files) {
@@ -317,6 +320,10 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
         const data = await readRegular(location, Math.min(limits.maxFileBytes, limits.maxTotalBytes - total));
         total += data.length;
         if (total > limits.maxTotalBytes) fail("snapshot total size exceeds limit");
+        if (symlinkPlaceholders && indexModes.get(name) === "120000") {
+          entries.push({ path: name, type: "symlink", target: data.toString("utf8") });
+          continue;
+        }
         const fileMode = process.platform === "win32" && indexModes.has(name) ? (indexModes.get(name) === "100755" ? 0o755 : 0o644) : stat.mode & 0o777;
         entries.push({ path: name, type: "file", mode: fileMode, content: content(data) });
       }

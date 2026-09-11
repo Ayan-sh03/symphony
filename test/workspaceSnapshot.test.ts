@@ -345,7 +345,7 @@ test("snapshot transfer refuses live processes and in-flight file writes", async
     const write = session.writeFile!("busy", "work");
     await assert.rejects(() => session.exportSnapshot!(), /quiescent/);
     await write;
-    const proc = await session.spawn!(process.platform === "win32" ? "ping -n 30 127.0.0.1 > NUL" : "exec sleep 30");
+    const proc = await session.spawn!(process.platform === "win32" ? "ping -n 2 127.0.0.1 > NUL" : "exec sleep 1");
     await assert.rejects(() => session.exportSnapshot!(), /quiescent/);
     await proc.kill("SIGKILL");
   } finally { await session.close(); }
