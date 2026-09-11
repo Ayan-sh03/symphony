@@ -77,7 +77,7 @@ function oid(value: unknown): asserts value is string {
   if (typeof value !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) fail("invalid Git commit id");
 }
 function portablePath(value: unknown): asserts value is string {
-  if (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096) fail("invalid snapshot path");
+  if (typeof value !== "string" || !value || Buffer.byteLength(value) > 4096 || Buffer.from(value).toString("utf8") !== value) fail("invalid snapshot path");
   for (const part of value.split("/")) {
     if (!part || part === "." || part === ".." || /[\\\x00-\x1f\x7f:<>"|?*]/.test(part)
       || /[. ]$/.test(part) || Buffer.byteLength(part) > 255
@@ -131,6 +131,9 @@ function validatePaths(entries: Array<{ path: string; type: string; target?: str
     if (entry.type !== "symlink") continue;
     const target = entry.target;
     if (typeof target !== "string" || !target || target.length > 4096 || /[\\\x00-\x1f]/.test(target) || path.posix.isAbsolute(target)) fail(`unsafe snapshot link: ${entry.path}`);
+    // Validate before normalization so `.git/../file` cannot hide a forbidden
+    // component. Only a leading sequence of ../ may traverse toward the root.
+    portablePath(target.replace(/^(?:\.\.\/)+/, ""));
     const resolved = path.posix.join(path.posix.dirname(entry.path), target);
     portablePath(resolved);
     // Only direct relative links to included regular files. Directory links,
@@ -189,6 +192,7 @@ async function git(cwd: string, args: string[], limit: number): Promise<Buffer> 
     });
     return result.stdout;
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") fail("snapshot git output size exceeds limit");
     fail(`snapshot git ${args[0]} failed: ${String(error).slice(0, 2000)}`);
   }
 }
@@ -285,6 +289,8 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
       await git(root, ["bundle", "create", bundleFile, "HEAD"], limits.maxTotalBytes);
       const bundle = await readRegular(bundleFile, limits.maxTotalBytes);
       const patch = await git(root, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", head, "--"], limits.maxFileBytes);
+      const visibleIntent = await git(root, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--ita-visible-in-index", head, "--"], limits.maxFileBytes);
+      if (!patch.equals(visibleIntent)) fail("snapshot does not support intent-to-add index entries; stage or unstage them first");
       const branch = await gitText(root, ["branch", "--show-current"], limits);
       gitState = { headCommit: head, baseCommit: base, branch: branch || null, bundle: content(bundle), indexPatch: content(patch) };
       total = bundle.length + patch.length;
@@ -334,18 +340,14 @@ async function restoreGit(root: string, scratch: string, state: SnapshotGit, lim
   if (heads !== `${state.headCommit} HEAD`) fail("snapshot bundle must contain exactly the declared HEAD");
   // Keep history packed: do not expand an archive's object data into loose files.
   await git(root, ["-c", "fetch.unpackLimit=1", "-c", "fetch.fsckObjects=true", "fetch", "--no-tags", "--no-write-fetch-head", bundle, "HEAD:refs/symphony/snapshot"], limits.maxTotalBytes);
-  const packDir = path.join(root, ".git", "objects", "pack");
   let objectBytes = 0;
-  for (const pack of await fs.readdir(packDir)) {
-    if (!pack.endsWith(".idx")) continue;
-    const report = await gitText(root, ["verify-pack", "-v", path.join(packDir, pack)], limits);
-    for (const line of report.split("\n")) {
-      const match = /^[a-f0-9]+ (blob|tree|commit|tag) (\d+) /.exec(line);
-      if (!match) continue;
-      const size = Number(match[2]);
-      objectBytes += size;
-      if (size > limits.maxFileBytes || objectBytes > limits.maxTotalBytes) fail("Git history object size exceeds snapshot limit");
-    }
+  const report = await gitText(root, ["cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectsize)"], limits);
+  for (const line of report.split("\n")) {
+    const match = /^(blob|tree|commit|tag) (\d+)$/.exec(line);
+    if (!match) fail("invalid Git object size report");
+    const size = Number(match[2]);
+    objectBytes += size;
+    if (!Number.isSafeInteger(size) || size > limits.maxFileBytes || objectBytes > limits.maxTotalBytes) fail("Git history object size exceeds snapshot limit");
   }
   await git(root, ["cat-file", "-e", `${state.headCommit}^{commit}`], limits.maxTotalBytes);
   await git(root, ["merge-base", "--is-ancestor", state.baseCommit, state.headCommit], limits.maxTotalBytes);
@@ -374,7 +376,18 @@ export async function stageWorkspaceSnapshot(value: unknown, stagingParent: stri
   const parent = await safeDirectory(stagingParent);
   const container = await fs.mkdtemp(path.join(parent, ".symphony-snapshot-"));
   const root = path.join(container, "workspace");
-  const dispose = () => fs.rm(container, { recursive: true, force: true });
+  const dispose = async () => {
+    // We own this directory. Restore traversal/write permissions before removal,
+    // without following imported links, even when the snapshot had mode 000 dirs.
+    async function writable(directory: string): Promise<void> {
+      const stat = await lstatMaybe(directory);
+      if (!stat?.isDirectory() || stat.isSymbolicLink()) return;
+      await fs.chmod(directory, 0o700);
+      for (const item of await fs.readdir(directory)) await writable(path.join(directory, item));
+    }
+    if (process.platform !== "win32") await writable(container);
+    await fs.rm(container, { recursive: true, force: true });
+  };
   try {
     await fs.mkdir(root);
     if (snapshot.git) await restoreGit(root, container, snapshot.git, limits);
@@ -387,7 +400,7 @@ export async function stageWorkspaceSnapshot(value: unknown, stagingParent: stri
       if (entry.type !== "file") continue;
       const location = path.join(root, entry.path);
       const data = bytes(entry.content, limits.maxFileBytes);
-      await fs.writeFile(location, data, { flag: "wx", mode: entry.mode });
+      await fs.writeFile(location, data, { flag: "wx", mode: 0o600 });
       if (digest(await fs.readFile(location)) !== entry.content.sha256) fail("staged file hash mismatch");
       if (process.platform !== "win32") await fs.chmod(location, entry.mode);
     }
