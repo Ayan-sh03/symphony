@@ -183,12 +183,17 @@ export function validateWorkspaceSnapshot(value: unknown, options: SnapshotImpor
 }
 
 /** Never inherit GIT_DIR, alternate object stores, global hooks, or external filters. */
-async function git(cwd: string, args: string[], limit: number): Promise<Buffer> {
+async function git(cwd: string, args: string[], limit: number, honorAutocrlf = false): Promise<Buffer> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
   // Git for Windows understands /dev/null, but not Node's \\.\nul spelling.
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0" });
+  // Forcing core.autocrlf=false keeps every explicit Git operation host-independent,
+  // but interpreting existing working bytes must honor the repository's own setting.
+  const config = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+    ...(honorAutocrlf ? [] : ["-c", "core.autocrlf=false"]),
+    "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true"];
   try {
-    const result = await exec("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-C", cwd, ...args], {
+    const result = await exec("git", [...config, "-C", cwd, ...args], {
       env, encoding: "buffer", maxBuffer: limit, timeout: 60_000, windowsHide: true,
     });
     return result.stdout;
@@ -199,6 +204,48 @@ async function git(cwd: string, args: string[], limit: number): Promise<Buffer> 
 }
 async function gitText(cwd: string, args: string[], limits: SnapshotLimits): Promise<string> {
   return (await git(cwd, args, limits.maxTotalBytes)).toString("utf8").trimEnd();
+}
+/**
+ * Tracked text files whose checked-out bytes differ from the committed blob only
+ * by an end-of-line conversion (`i/lf w/crlf`). With `core.autocrlf=true` every
+ * text file is smudged on Windows, so raw working bytes are not the blob bytes.
+ */
+async function smudgedPaths(cwd: string, limits: SnapshotLimits): Promise<Set<string>> {
+  const raw = (await git(cwd, ["ls-files", "--eol", "-z"], limits.maxTotalBytes, true)).toString("utf8");
+  const paths = new Set<string>();
+  for (const entry of raw.split("\0")) {
+    if (!entry) continue;
+    const tab = entry.indexOf("\t");
+    const state = tab < 0 ? null : /^i\/(\S*)\s+w\/(\S*)\s+attr\//.exec(entry.slice(0, tab));
+    if (!state) fail("snapshot could not parse Git end-of-line state");
+    if (state[1] === "lf" && state[2] === "crlf") paths.add(entry.slice(tab + 1));
+  }
+  return paths;
+}
+/**
+ * Tracked paths whose working bytes differ from the index under the repository's
+ * own configuration. `git diff-files` is stat-based and over-reports merely
+ * touched files, so use `git status`, which compares content and honors
+ * core.autocrlf without rewriting the index while GIT_OPTIONAL_LOCKS=0 is set.
+ */
+async function modifiedPaths(cwd: string, limits: SnapshotLimits): Promise<Set<string>> {
+  const raw = (await git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames"], limits.maxTotalBytes, true)).toString("utf8");
+  const paths = new Set<string>();
+  for (const entry of raw.split("\0")) {
+    if (!entry) continue;
+    if (entry.length < 4 || entry[2] !== " ") fail("snapshot could not parse Git status");
+    if (entry[1] !== " ") paths.add(entry.slice(3));
+  }
+  return paths;
+}
+/** Replace CRLF with LF one byte at a time; latin1 keeps arbitrary bytes intact. */
+function stripCrlf(data: Buffer): Buffer {
+  return Buffer.from(data.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+}
+function sameSet(left: Set<string>, right: Set<string>): boolean {
+  if (left.size !== right.size) return false;
+  for (const value of left) if (!right.has(value)) return false;
+  return true;
 }
 async function lstatMaybe(location: string) {
   try { return await fs.lstat(location); }
@@ -266,6 +313,8 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
   let selected: Set<string> | null = null;
   let indexModes = new Map<string, string>();
   let symlinkPlaceholders = false;
+  let smudged = new Set<string>();
+  let modified = new Set<string>();
   let total = 0;
   if (metadata) {
     if (metadata.isSymbolicLink()) fail("snapshot rejects linked Git metadata");
@@ -277,6 +326,8 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
     await git(root, ["merge-base", "--is-ancestor", base, head], limits.maxTotalBytes);
     const index = await indexEntries(root, limits);
     indexModes = new Map(index.map((entry) => [entry.path, entry.mode]));
+    smudged = await smudgedPaths(root, limits);
+    if (smudged.size) modified = await modifiedPaths(root, limits);
     symlinkPlaceholders = await gitText(root, ["config", "--type=bool", "--default=true", "--get", "core.symlinks"], limits) === "false";
     const files = (await gitText(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], limits)).split("\0").filter(Boolean);
     selected = new Set();
@@ -317,7 +368,11 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
         entries.push({ path: name, type: "directory", mode: stat.mode & 0o777 });
         await walk(name);
       } else {
-        const data = await readRegular(location, Math.min(limits.maxFileBytes, limits.maxTotalBytes - total));
+        let data = await readRegular(location, Math.min(limits.maxFileBytes, limits.maxTotalBytes - total));
+        // Store canonical bytes for clean, smudged text files so an import with
+        // core.autocrlf=false does not report every converted file as modified.
+        // Genuinely dirty working bytes are preserved verbatim.
+        if (smudged.has(name) && !modified.has(name)) data = stripCrlf(data);
         total += data.length;
         if (total > limits.maxTotalBytes) fail("snapshot total size exceeds limit");
         if (symlinkPlaceholders && indexModes.get(name) === "120000") {
@@ -334,6 +389,11 @@ export async function exportWorkspaceSnapshot(workspacePath: string, options: Sn
     if (await gitText(root, ["rev-parse", "HEAD"], limits) !== gitState.headCommit) fail("Git HEAD changed during snapshot export");
     const patch = await git(root, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", gitState.headCommit, "--"], limits.maxFileBytes);
     if (digest(patch) !== gitState.indexPatch.sha256) fail("Git index changed during snapshot export");
+    if (smudged.size) {
+      const currentSmudged = await smudgedPaths(root, limits);
+      const currentModified = await modifiedPaths(root, limits);
+      if (!sameSet(currentSmudged, smudged) || !sameSet(currentModified, modified)) fail("Git working tree changed during snapshot export");
+    }
   }
   return validateWorkspaceSnapshot({ version: 1, kind: gitState ? "git" : "directory", git: gitState, entries }, { expectedBaseCommit: gitState?.baseCommit ?? null, limits });
 }
