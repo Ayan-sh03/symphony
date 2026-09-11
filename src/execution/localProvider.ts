@@ -6,6 +6,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnShell } from "../shell.ts";
+import { exportWorkspaceSnapshot, importWorkspaceSnapshot } from "../workspace/snapshot.ts";
+import type { SnapshotExportOptions, SnapshotImportOptions, WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import type {
   ExecutionProviderFactory,
   ExecutionSession,
@@ -62,6 +64,8 @@ class LocalExecutionSession implements ExecutionSession {
   private env: NodeJS.ProcessEnv;
   private processes = new Set<LocalProcessHandle>();
   private closed = false;
+  private snapshotOperation: Promise<unknown> | null = null;
+  private fileOperations = 0;
 
   constructor(opts: ExecutionSessionOptions) {
     this.workspacePath = path.resolve(opts.workspacePath);
@@ -69,7 +73,8 @@ class LocalExecutionSession implements ExecutionSession {
   }
 
   async spawn(command: string, options: ProcessOptions = {}): Promise<ProcessHandle> {
-    if (this.closed) throw new Error("execution session is closed");
+    this.assertOpen();
+    this.assertNoSnapshot();
     const cwd = this.resolveWorkspacePath(options.cwd ?? ".");
     const env = options.env ? { ...this.env, ...options.env } : this.env;
     const { child } = spawnShell(command, cwd, env);
@@ -81,30 +86,62 @@ class LocalExecutionSession implements ExecutionSession {
 
   async readFile(filePath: string): Promise<Uint8Array> {
     this.assertOpen();
-    return fs.readFile(this.resolveWorkspacePath(filePath));
+    return this.withFileOperation(() => fs.readFile(this.resolveWorkspacePath(filePath)));
   }
 
   async writeFile(filePath: string, data: string | Uint8Array): Promise<void> {
     this.assertOpen();
-    const target = this.resolveWorkspacePath(filePath);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, data);
+    await this.withFileOperation(async () => {
+      const target = this.resolveWorkspacePath(filePath);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, data);
+    });
   }
 
   async removeFile(filePath: string, options: RemoveFileOptions = {}): Promise<void> {
     this.assertOpen();
-    await fs.rm(this.resolveWorkspacePath(filePath), {
+    await this.withFileOperation(() => fs.rm(this.resolveWorkspacePath(filePath), {
       recursive: options.recursive ?? false,
       force: options.force ?? false,
-    });
+    }));
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await this.snapshotOperation?.catch(() => {});
     const live = [...this.processes];
     await Promise.all(live.map((handle) => handle.kill("SIGKILL")));
     this.processes.clear();
+  }
+
+  async exportSnapshot(options?: SnapshotExportOptions): Promise<WorkspaceSnapshot> {
+    return this.withSnapshot(() => exportWorkspaceSnapshot(this.workspacePath, options));
+  }
+
+  async importSnapshot(snapshot: unknown, options: SnapshotImportOptions): Promise<void> {
+    await this.withSnapshot(() => importWorkspaceSnapshot(this.workspacePath, snapshot, options));
+  }
+
+  private assertNoSnapshot(): void {
+    if (this.snapshotOperation) throw new Error("execution session has a snapshot in progress");
+  }
+
+  private async withFileOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertNoSnapshot();
+    this.fileOperations++;
+    try { return await operation(); }
+    finally { this.fileOperations--; }
+  }
+
+  private async withSnapshot<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    this.assertNoSnapshot();
+    if (this.processes.size || this.fileOperations) throw new Error("snapshot requires a quiescent execution session");
+    const pending = operation();
+    this.snapshotOperation = pending;
+    try { return await pending; }
+    finally { this.snapshotOperation = null; }
   }
 
   private assertOpen(): void {
@@ -124,7 +161,7 @@ class LocalExecutionSession implements ExecutionSession {
 
 export const localExecutionProvider: ExecutionProviderFactory = {
   kind: "local",
-  capabilities: ["process", "filesystem"],
+  capabilities: ["process", "filesystem", "workspace-snapshot"],
   create(opts) {
     return new LocalExecutionSession(opts);
   },
