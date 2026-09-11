@@ -5,6 +5,7 @@
  */
 import type { Readable, Writable } from "node:stream";
 import type { Logger } from "../logger.ts";
+import type { SnapshotExportOptions, SnapshotImportOptions, WorkspaceSnapshot } from "../workspace/snapshot.ts";
 
 /** Operations a provider can advertise before a runtime is created. */
 export type ExecutionCapability =
@@ -62,6 +63,9 @@ export interface ExecutionSession {
   readFile?(filePath: string): Promise<Uint8Array>;
   writeFile?(filePath: string, data: string | Uint8Array): Promise<void>;
   removeFile?(filePath: string, options?: RemoveFileOptions): Promise<void>;
+  /** Portable transfer, gated by workspace-snapshot. Import requires an empty workspace. */
+  exportSnapshot?(options?: SnapshotExportOptions): Promise<WorkspaceSnapshot>;
+  importSnapshot?(snapshot: unknown, options: SnapshotImportOptions): Promise<void>;
   /** Idempotently stop owned work and release provider resources. */
   close(): Promise<void>;
 }

@@ -6,6 +6,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnShell } from "../shell.ts";
+import { exportWorkspaceSnapshot, importWorkspaceSnapshot } from "../workspace/snapshot.ts";
+import type { SnapshotExportOptions, SnapshotImportOptions, WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import type {
   ExecutionProviderFactory,
   ExecutionSession,
@@ -107,6 +109,18 @@ class LocalExecutionSession implements ExecutionSession {
     this.processes.clear();
   }
 
+  async exportSnapshot(options?: SnapshotExportOptions): Promise<WorkspaceSnapshot> {
+    this.assertOpen();
+    if (this.processes.size) throw new Error("snapshot requires a quiescent execution session");
+    return exportWorkspaceSnapshot(this.workspacePath, options);
+  }
+
+  async importSnapshot(snapshot: unknown, options: SnapshotImportOptions): Promise<void> {
+    this.assertOpen();
+    if (this.processes.size) throw new Error("snapshot requires a quiescent execution session");
+    await importWorkspaceSnapshot(this.workspacePath, snapshot, options);
+  }
+
   private assertOpen(): void {
     if (this.closed) throw new Error("execution session is closed");
   }
@@ -124,7 +138,7 @@ class LocalExecutionSession implements ExecutionSession {
 
 export const localExecutionProvider: ExecutionProviderFactory = {
   kind: "local",
-  capabilities: ["process", "filesystem"],
+  capabilities: ["process", "filesystem", "workspace-snapshot"],
   create(opts) {
     return new LocalExecutionSession(opts);
   },
