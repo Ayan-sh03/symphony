@@ -143,7 +143,7 @@ export async function runAgentAttempt(
       if (turnResult.status !== "completed") {
         throw new Error(`agent turn ${turnResult.status}: ${turnResult.error ?? ""}`);
       }
-      await applyResultFile(execution, issue, deps);
+      await applyResultFile(execution, issue, deps, cancellation.signal);
       if (stopped) throw new Error("session stopped");
       const refreshed = await deps.adapter.fetchIssuesByIds([issue.id]);
       if (stopped) throw new Error("session stopped");
@@ -188,14 +188,16 @@ function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number):
  * not reapplied. This is the credible channel by which the coding agent transitions
  * the tracked issue (SPEC §11.5 "ticket writes ... performed by the coding agent").
  */
-async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps): Promise<void> {
+async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps, signal: AbortSignal): Promise<void> {
   const file = RESULT_FILE;
   let text: string;
   try {
     text = Buffer.from(await execution.readFile!(file)).toString("utf8");
-  } catch {
-    return; // no result file this turn
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // no result this turn
+    throw err;
   }
+  if (signal.aborted) throw new Error("session stopped");
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
