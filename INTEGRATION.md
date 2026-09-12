@@ -20,7 +20,7 @@ Your backend implements [`AgentSession`](src/agent/types.ts):
 export interface AgentSession {
   start(): Promise<AgentSessionIdentity>;              // launch + prepare a thread
   runTurn(input: string, title?: string): Promise<AgentTurnResult>;
-  stop(): void;                                        // idempotent teardown
+  stop(): Promise<void>;                               // awaited, idempotent teardown
   readonly threadId: string | null;
   readonly pid: string | null;                         // null if not a subprocess
 }
@@ -45,14 +45,15 @@ export interface AgentFactory {
 
 | Field | What it is |
 |---|---|
-| `workspacePath` | Absolute per-issue workspace. **Your agent MUST run with this as its cwd.** |
+| `execution` | Runner-owned `ExecutionSession`. Start processes and access runtime files through it. The runner closes it. |
+| `workspacePath` | Absolute workspace path **inside the runtime**, which may differ from the host path. Use it in agent protocol requests. |
 | `issue` | The normalized issue (id, identifier, title, description, labels, …). |
 | `config` | The full typed `ServiceConfigValues`. Read your own section (e.g. `config.codex`, or a section you add). |
 | `logger` | Structured logger. |
 | `onUpdate(u)` | Emit an `AgentUpdate` to the orchestrator (metrics, activity log, stall detection). |
 | `adapter` | Tracker adapter bound to this session — for executing provider-native tools host-side. |
 | `toolSpecs` | Provider-native tool specs advertised for this session. |
-| `env` | Child environment with tracker secrets already stripped. Pass this to your subprocess. |
+| `env` | Child environment with tracker secrets already stripped. The execution session already captures this environment. |
 | `model` | OPTIONAL per-task model id (extension, SPEC Appendix B.7), from `issue.model`. Free text — pass it through and let your CLI validate it. Ignoring it is conformant: the run then uses your backend's default. |
 
 ### What each method must do
@@ -207,7 +208,7 @@ export class MyAgentSession implements AgentSession {
   get pid() { return null; }
 
   async start(): Promise<AgentSessionIdentity> {
-    // launch backend in this.opts.workspacePath, using this.opts.env
+    // launch through this.opts.execution.spawn(command); the runtime owns cwd/env
     this._threadId = "thread-123";
     this.emit("session_started");
     return { threadId: this._threadId };
@@ -220,7 +221,7 @@ export class MyAgentSession implements AgentSession {
     return { status: "completed" };
   }
 
-  stop(): void { /* kill/close backend; idempotent */ }
+  async stop(): Promise<void> { /* await owned process cleanup; idempotent */ }
 
   private emit(event: string, extra: Record<string, unknown> = {}) {
     this.opts.onUpdate({ event, timestamp: new Date().toISOString(), thread_id: this._threadId, ...extra });
@@ -229,7 +230,7 @@ export class MyAgentSession implements AgentSession {
 ```
 
 Use [`src/agent/appServerClient.ts`](src/agent/appServerClient.ts) (the Codex backend) as a
-full reference: subprocess launch via `spawnShell`, JSON-RPC framing, timeouts, approval and
+full reference: process launch via `ExecutionSession.spawn`, JSON-RPC framing, timeouts, approval and
 tool-call handling, token extraction.
 
 ---
@@ -249,10 +250,10 @@ registerAgentFactory({
     async start() { opts.onUpdate({ event: "session_started", timestamp: new Date().toISOString() }); return { threadId: "t1" }; },
     async runTurn() {
       opts.onUpdate({ event: "turn_started", timestamp: new Date().toISOString() });
-      // do work in opts.workspacePath, e.g. write SYMPHONY_RESULT.json
+      await opts.execution.writeFile!("SYMPHONY_RESULT.json", JSON.stringify({ state: "done" }));
       return { status: "completed" };
     },
-    stop() {},
+    async stop() {},
   }),
 });
 ```
@@ -311,7 +312,50 @@ Key rules (see [`README.md`](README.md) → adapter profile, and SPEC §11):
 [`src/tracker/fileAdapter.ts`](src/tracker/fileAdapter.ts) is a complete, dependency-free
 reference implementing all of the above.
 
-## 6. Transferring execution workspaces
+## 6. Execution sessions
+
+An execution provider owns runtime processes and files; an agent owns its CLI protocol.
+Select them independently with `agent.kind` and `execution.kind`. Providers implement
+[`ExecutionSession`](src/execution/types.ts) and register through
+`registerExecutionProviderFactory` in `src/execution/registry.ts`.
+
+For worker execution, advertise `process` and `filesystem` and implement `spawn`,
+`readFile`, `writeFile`, and `removeFile`. The runner checks these requirements before
+starting an agent. Return the absolute **runtime** path as `session.workspacePath`;
+`ExecutionSessionOptions.workspacePath` is the host delivery workspace supplied to the
+provider. File paths and process `cwd` overrides are workspace-relative. A missing file
+must reject with `code: "ENOENT"`; transport and permission failures must remain errors.
+
+`spawn` returns a `ProcessHandle` with Node stdin/stdout/stderr streams, a stable `exit`
+promise, and an awaited, idempotent `kill`. `close` must stop owned work and release runtime
+resources; every concurrent caller must await cleanup. Preserve errors so the runner can
+report an abnormal exit. If creation rejects, the provider is responsible for cleaning up
+any partially created resources.
+
+The worker lifecycle is:
+
+1. Prepare the host workspace and run `after_create` through a local execution session.
+2. Create the selected execution session with the filtered agent environment.
+3. Run `before_run` inside that session, then write `SYMPHONY_ISSUE.json` there.
+4. Start the agent using that same session; read result files there and execute tracker
+   tools on the host. Cancellation during a result read prevents later write-back.
+5. Await agent stop, run `after_run`, then close the execution session on every exit path.
+   A failed `before_run` skips `after_run`. Failed agent termination also skips the hook
+   to prevent it racing a process that may still be alive.
+
+`before_remove` runs in a local session against the host delivery workspace. Creation and
+removal hooks retain the host environment; run hooks use the filtered agent environment.
+Hook timeout/cancellation waits for process termination. Service shutdown waits for worker
+cleanup, including runtimes whose creation finishes after shutdown starts.
+
+Model/installation discovery and historical transcript lookup remain host-side advisory
+operations. Phase 2 does not transfer workspaces or provide transactional remote completion;
+those operations build on the snapshot contract below in Phase 4. E2B is a separate provider.
+
+See [`test/executionSessions.test.ts`](test/executionSessions.test.ts) for an in-memory
+runtime, cancellation/failure cases, and both built-in agents running local protocol stubs.
+
+## 7. Transferring execution workspaces
 
 Execution providers can advertise `workspace-snapshot` and implement
 `ExecutionSession.exportSnapshot(options)` and `importSnapshot(snapshot, options)`.
