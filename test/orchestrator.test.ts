@@ -36,7 +36,7 @@ function makeFakeFactory(behavior: string): AgentFactory {
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -59,7 +59,7 @@ function makeRecordingFactory(kind: string, ran: Record<string, string>): AgentF
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -97,7 +97,7 @@ function makeUsageFactory(behavior: string, input: number, output: number, holdM
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -221,7 +221,7 @@ test("completion bursts coalesce refreshes and yield after bounded finalization 
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   });
@@ -386,7 +386,7 @@ async function fileTrackerBurstMetrics(maxConcurrent: number): Promise<BurstMetr
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   });
@@ -942,7 +942,7 @@ test("stopIssue terminates a running session and holds the issue for the operato
             release = () => resolve({ status: "failed", error: "session stopped" });
           });
         },
-        stop() { release?.(); },
+        async stop() { release?.(); },
       };
     },
   });
@@ -1050,7 +1050,7 @@ test("deleteIssue refuses a running issue; editing one is visible on its detail 
         runTurn() {
           return new Promise((resolve) => { release = () => resolve({ status: "failed", error: "session stopped" }); });
         },
-        stop() { release?.(); },
+        async stop() { release?.(); },
       };
     },
   });
@@ -1116,7 +1116,7 @@ function makeGitFactory(kind: string, opts: { dirty: boolean }): AgentFactory {
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -1335,7 +1335,7 @@ function makeMidTurnFactory(kind: string, seen: { cancelled: boolean }): AgentFa
           if (stopped) { seen.cancelled = true; return { status: "cancelled", error: "session stopped" } as const; }
           return { status: "completed" } as const;
         },
-        stop() { stopped = true; },
+        async stop() { stopped = true; },
       };
     },
   };
@@ -1400,7 +1400,7 @@ function makeConcurrencyFactory(kind: string, holdMs: number) {
             liveOverall -= 1;
           }
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -1576,7 +1576,7 @@ function makeGitConcurrencyFactory(kind: string, holdMs: number) {
             live.set(ws, (live.get(ws) ?? 1) - 1);
           }
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };
@@ -1791,7 +1791,7 @@ function makeOptionCapturingFactory(kind: string, seen: Record<string, AgentSess
           );
           return { status: "completed" } as const;
         },
-        stop() { /* no-op */ },
+        async stop() { /* no-op */ },
       };
     },
   };

@@ -60,7 +60,7 @@ class LocalProcessHandle implements ProcessHandle {
 class LocalExecutionSession implements ExecutionSession {
   readonly runtimeId = null;
 
-  private workspacePath: string;
+  readonly workspacePath: string;
   private env: NodeJS.ProcessEnv;
   private processes = new Set<LocalProcessHandle>();
   private closed = false;

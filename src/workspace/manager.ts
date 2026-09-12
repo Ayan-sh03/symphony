@@ -25,7 +25,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Logger } from "../logger.ts";
 import type { HooksConfig } from "../config/config.ts";
-import { runScript } from "../shell.ts";
+import { createExecutionSession } from "../execution/registry.ts";
+import { runExecutionHook } from "../execution/hooks.ts";
+import type { ExecutionSession } from "../execution/types.ts";
 import type { Workspace } from "../domain/types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -327,17 +329,17 @@ export class WorkspaceManager {
   }
 
   /** `before_run`: fatal to the attempt on failure/timeout (SPEC §9.4). */
-  async runBeforeRun(wsPath: string): Promise<boolean> {
+  async runBeforeRun(wsPath: string, execution?: ExecutionSession): Promise<boolean> {
     if (!this.opts.hooks.before_run) return true;
-    const res = await this.runHook("before_run", this.opts.hooks.before_run, wsPath);
+    const res = await this.runHook("before_run", this.opts.hooks.before_run, wsPath, execution);
     return res.ok;
   }
 
   /** `after_run`: logged and ignored on failure/timeout (SPEC §9.4). */
-  async runAfterRun(wsPath: string): Promise<void> {
+  async runAfterRun(wsPath: string, execution?: ExecutionSession): Promise<void> {
     if (!this.opts.hooks.after_run) return;
-    if (!fs.existsSync(wsPath)) return;
-    await this.runHook("after_run", this.opts.hooks.after_run, wsPath);
+    if (!execution && !fs.existsSync(wsPath)) return;
+    await this.runHook("after_run", this.opts.hooks.after_run, wsPath, execution);
   }
 
   /**
@@ -870,9 +872,20 @@ export class WorkspaceManager {
     return (await this.gitIn(repo, ["update-ref", "--stdin", "-z"], payload, true)) !== null;
   }
 
-  private async runHook(name: string, script: string, cwd: string) {
+  private async runHook(name: string, script: string, cwd: string, execution?: ExecutionSession) {
     this.opts.logger.info("hook start", { hook: name, cwd });
-    const res = await runScript(script, cwd, this.opts.hooks.timeout_ms);
+    // Creation/removal prepare the host delivery workspace; run hooks share the agent runtime.
+    const session = execution ?? await createExecutionSession("local", {}, {
+      workspacePath: cwd, env: process.env, logger: this.opts.logger,
+    });
+    let res;
+    try {
+      res = await runExecutionHook(session, script, this.opts.hooks.timeout_ms);
+    } catch (err) {
+      res = { ok: false, code: null, timedOut: false, stdout: "", stderr: String(err) };
+    } finally {
+      if (!execution) await session.close();
+    }
     if (res.timedOut) {
       this.opts.logger.warn("hook timed out", { hook: name, cwd, timeout_ms: this.opts.hooks.timeout_ms });
     } else if (!res.ok) {

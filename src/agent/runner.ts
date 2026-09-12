@@ -6,8 +6,8 @@
  *
  * Agent-backend-neutral: it depends only on the {@link AgentSession} interface.
  */
-import fs from "node:fs";
-import path from "node:path";
+import { createExecutionSession, requireExecutionCapabilities } from "../execution/registry.ts";
+import type { ExecutionSession } from "../execution/types.ts";
 import type { Issue, AgentUpdate } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
@@ -49,7 +49,7 @@ export interface RunnerDeps {
    * Hand the orchestrator a stop handle so reconciliation/stall detection can
    * terminate this live session (SPEC §8.5). Called once, after the session exists.
    */
-  onSessionReady: (stop: () => void) => void;
+  onSessionReady: (stop: () => Promise<void>) => void;
 }
 
 /** Name of the self-tracking write-back file the agent produces (policy contract). */
@@ -78,107 +78,97 @@ export async function runAgentAttempt(
   const wsPath = workspace.path;
   const branch = deps.workspaceManager.deliveryBranchFor(deps.stream);
 
-  // 2. before_run hook (fatal to attempt)
-  const beforeOk = await deps.workspaceManager.runBeforeRun(wsPath);
-  if (!beforeOk) {
-    return { kind: "abnormal", reason: "before_run hook error" };
-  }
-
-  // Write the current issue snapshot into the workspace for agent context.
+  let execution: ExecutionSession;
   try {
-    fs.writeFileSync(path.join(wsPath, "SYMPHONY_ISSUE.json"), JSON.stringify(issue, null, 2) + "\n", "utf8");
-  } catch {
-    /* non-fatal */
-  }
-
-  // 3. Start agent session (fatal on failure)
-  const toolSpecs = deps.adapter.agentToolSpecs();
-  let session: AgentSession;
-  try {
-    session = createAgentSession(deps.agentKind, {
-      workspacePath: wsPath,
-      issue,
-      config: deps.config,
-      logger: deps.logger,
-      onUpdate: (u) => deps.onUpdate(issue.id, u),
-      adapter: deps.adapter,
-      toolSpecs,
-      env: deps.childEnv,
-      // Per-task model (extension, Appendix B.7). Straight through from the issue —
-      // no resolution step, no map lookup: the backend owns what the string means.
-      ...(issue.model ? { model: issue.model } : {}),
+    requireExecutionCapabilities(deps.config.execution.kind, ["process", "filesystem"]);
+    execution = await createExecutionSession(deps.config.execution.kind, deps.config.execution.provider, {
+      workspacePath: wsPath, env: deps.childEnv, logger: deps.logger,
     });
   } catch (err) {
-    await deps.workspaceManager.runAfterRun(wsPath);
-    return { kind: "abnormal", reason: `agent init error: ${(err as Error).message}` };
+    return { kind: "abnormal", reason: `execution startup error: ${String(err)}` };
   }
-  deps.onSessionReady(() => session.stop());
 
+  let session: AgentSession | undefined;
+  let stopped = false;
+  let stopping: Promise<void> | undefined;
+  let afterRun = false;
+  let outcome: WorkerExit = { kind: "normal" };
+  // One stop operation shared by cancellation and final cleanup. Keep rejection
+  // observed here; final cleanup reports it in the worker outcome.
+  const stop = (): Promise<void> => {
+    stopped = true;
+    stopping ??= Promise.resolve().then(() => session?.stop());
+    void stopping.catch(() => {});
+    return stopping;
+  };
   try {
+    for (const method of ["spawn", "readFile", "writeFile", "removeFile"] as const) {
+      if (typeof execution[method] !== "function") throw new Error(`execution session lacks ${method}`);
+    }
+    if (!execution.workspacePath) throw new Error("execution session lacks workspacePath");
+    deps.onSessionReady(stop);
+    if (stopped) throw new Error("session stopped");
+    if (!await deps.workspaceManager.runBeforeRun(wsPath, execution)) throw new Error("before_run hook error");
+    afterRun = true;
+    if (stopped) throw new Error("session stopped");
+
+    // Scratch paths are relative to the runtime, never interpreted on the host.
+    try {
+      await execution.writeFile!("SYMPHONY_ISSUE.json", JSON.stringify(issue, null, 2) + "\n");
+    } catch (err) {
+      deps.logger.warn("failed to write issue context", { issue_id: issue.id, error: String(err) });
+    }
+    if (stopped) throw new Error("session stopped");
+    session = createAgentSession(deps.agentKind, {
+      execution, workspacePath: execution.workspacePath, issue, config: deps.config,
+      logger: deps.logger, onUpdate: (u) => deps.onUpdate(issue.id, u),
+      adapter: deps.adapter, toolSpecs: deps.adapter.agentToolSpecs(), env: deps.childEnv,
+      ...(issue.model ? { model: issue.model } : {}),
+    });
     await session.start();
-  } catch (err) {
-    session.stop();
-    await deps.workspaceManager.runAfterRun(wsPath);
-    return { kind: "abnormal", reason: `agent session startup error: ${(err as Error).message}` };
-  }
-
-  const maxTurns = deps.config.max_turns;
-  let turnNumber = 1;
-
-  try {
+    if (stopped) throw new Error("session stopped");
+    const maxTurns = deps.config.max_turns;
+    let turnNumber = 1;
     while (true) {
-      // Build prompt: full render on the first turn, continuation guidance after.
-      let prompt: string;
-      try {
-        prompt = turnNumber === 1
-          ? renderPrompt(deps.promptTemplate, issue, attempt, branch)
-          : continuationPrompt(issue, turnNumber, maxTurns);
-      } catch (err) {
-        const reason = err instanceof PromptError ? `${err.errorClass}: ${err.message}` : `prompt error: ${String(err)}`;
-        session.stop();
-        await deps.workspaceManager.runAfterRun(wsPath);
-        return { kind: "abnormal", reason };
-      }
-
-      const summary = `${issue.identifier}: ${issue.title}`;
-      const turnResult = await session.runTurn(prompt, summary);
+      const prompt = turnNumber === 1
+        ? renderPrompt(deps.promptTemplate, issue, attempt, branch)
+        : continuationPrompt(issue, turnNumber, maxTurns);
+      const turnResult = await session.runTurn(prompt, `${issue.identifier}: ${issue.title}`);
       log("turn finished", { turn: turnNumber, status: turnResult.status });
-
+      if (stopped) throw new Error("session stopped");
       if (turnResult.status !== "completed") {
-        session.stop();
-        await deps.workspaceManager.runAfterRun(wsPath);
-        return { kind: "abnormal", reason: `agent turn ${turnResult.status}: ${turnResult.error ?? ""}` };
+        throw new Error(`agent turn ${turnResult.status}: ${turnResult.error ?? ""}`);
       }
-
-      // Apply the agent's self-tracking write-back before re-checking state.
-      await applyResultFile(wsPath, issue, deps);
-
-      // Re-check tracker state for continuation (SPEC §7.1, §16.5).
-      let refreshed: Issue[];
-      try {
-        refreshed = await deps.adapter.fetchIssuesByIds([issue.id]);
-      } catch (err) {
-        session.stop();
-        await deps.workspaceManager.runAfterRun(wsPath);
-        return { kind: "abnormal", reason: `issue state refresh error: ${(err as Error).message}` };
-      }
-
-      if (refreshed.length === 0) break; // issue gone
+      await applyResultFile(execution, issue, deps);
+      if (stopped) throw new Error("session stopped");
+      const refreshed = await deps.adapter.fetchIssuesByIds([issue.id]);
+      if (stopped) throw new Error("session stopped");
+      if (refreshed.length === 0) break;
       issue = refreshed[0]!;
-
       if (!deps.isActiveState(issue.state) || !deps.isRoutable(issue)) break;
       if (turnNumber >= maxTurns) break;
-      turnNumber += 1;
+      turnNumber++;
     }
   } catch (err) {
-    session.stop();
-    await deps.workspaceManager.runAfterRun(wsPath);
-    return { kind: "abnormal", reason: `worker error: ${(err as Error).message}` };
+    const reason = err instanceof PromptError ? `${err.errorClass}: ${err.message}` : String(err);
+    outcome = { kind: "abnormal", reason };
+  } finally {
+    const cleanupError = (phase: string, err: unknown) => {
+      deps.logger.warn(`${phase} failed`, { issue_id: issue.id, error: String(err) });
+      outcome = { kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
+    };
+    let agentStopped = true;
+    try { await stop(); }
+    catch (err) { agentStopped = false; cleanupError("agent stop", err); }
+    // A hook must not race a process whose termination failed.
+    if (afterRun && agentStopped) {
+      try { await deps.workspaceManager.runAfterRun(wsPath, execution); }
+      catch (err) { deps.logger.warn("after_run failed", { issue_id: issue.id, error: String(err) }); }
+    }
+    try { await execution.close(); }
+    catch (err) { cleanupError("execution close", err); }
   }
-
-  session.stop();
-  await deps.workspaceManager.runAfterRun(wsPath);
-  return { kind: "normal" };
+  return outcome;
 }
 
 function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number): string {
@@ -194,11 +184,11 @@ function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number):
  * not reapplied. This is the credible channel by which the coding agent transitions
  * the tracked issue (SPEC §11.5 "ticket writes ... performed by the coding agent").
  */
-async function applyResultFile(wsPath: string, issue: Issue, deps: RunnerDeps): Promise<void> {
-  const file = path.join(wsPath, RESULT_FILE);
+async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps): Promise<void> {
+  const file = RESULT_FILE;
   let text: string;
   try {
-    text = fs.readFileSync(file, "utf8");
+    text = Buffer.from(await execution.readFile!(file)).toString("utf8");
   } catch {
     return; // no result file this turn
   }
@@ -207,7 +197,7 @@ async function applyResultFile(wsPath: string, issue: Issue, deps: RunnerDeps): 
     parsed = JSON.parse(text);
   } catch {
     deps.logger.warn("invalid result file ignored", { issue_id: issue.id, issue_identifier: issue.identifier });
-    try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+    try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
     return;
   }
   try {
@@ -220,5 +210,5 @@ async function applyResultFile(wsPath: string, issue: Issue, deps: RunnerDeps): 
   } catch (err) {
     deps.logger.warn("failed to apply agent result", { issue_id: issue.id, error: String(err) });
   }
-  try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+  try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
 }

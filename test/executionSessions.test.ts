@@ -68,7 +68,7 @@ test("Codex uses execution transport, runtime cwd, and awaits termination", asyn
   const killed = deferred<void>();
   p.handle.kill = async () => { await killed.promise; p.done.resolve({ code: null, signal: "SIGKILL" }); };
   let command = "";
-  const execution = { runtimeId: "remote", async spawn(c: string) { command = c; return p.handle; }, async close() {} };
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async spawn(c: string) { command = c; return p.handle; }, async close() {} };
   const client = new CodexAppServerClient(options(execution));
   try {
     assert.deepEqual(await client.start(), { threadId: "remote-thread" });
@@ -87,7 +87,7 @@ test("OpenCode uses execution transport, stdin, and continuation session", async
   const commands: string[] = [];
   const inputs: string[] = [];
   const execution = {
-    runtimeId: "remote", async close() {},
+    runtimeId: "remote", workspacePath: "/runtime/work", async close() {},
     async spawn(command: string) {
       commands.push(command);
       const p = processHandle((text) => {
@@ -113,7 +113,7 @@ test("stopping while an asynchronous spawn is pending kills the late process", a
   for (const Client of [CodexAppServerClient, OpencodeSession]) {
     const pending = deferred<ProcessHandle>();
     const p = processHandle();
-    const execution = { runtimeId: "remote", spawn: () => pending.promise, async close() {} };
+    const execution = { runtimeId: "remote", workspacePath: "/runtime/work", spawn: () => pending.promise, async close() {} };
     const client = new Client(options(execution));
     const work = (Client === CodexAppServerClient ? client.start() : client.runTurn("work")).catch(() => null);
     const stop = client.stop();
@@ -193,7 +193,7 @@ test("run hooks execute inside the provided runtime even without a host director
   const c = config(); c.hooks.before_run = "prepare"; c.hooks.after_run = "finish";
   const manager = new WorkspaceManager({ root: "/no-host-workspace", hooks: c.hooks, logger });
   const commands: string[] = [];
-  const execution = { runtimeId: "remote", async close() {}, async spawn(command: string) {
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn(command: string) {
     commands.push(command); const p = processHandle(); p.done.resolve({ code: 0, signal: null }); return p.handle;
   } };
   assert.equal(await (manager.runBeforeRun as Function)("/no-host-workspace", execution), true);
