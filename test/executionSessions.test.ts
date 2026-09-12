@@ -10,7 +10,7 @@ import { Logger } from "../src/logger.ts";
 import { CodexAppServerClient } from "../src/agent/appServerClient.ts";
 import { OpencodeSession } from "../src/agent/opencodeSession.ts";
 import { registerAgentFactory } from "../src/agent/registry.ts";
-import { registerExecutionProviderFactory } from "../src/execution/registry.ts";
+import { createExecutionSession, registerExecutionProviderFactory } from "../src/execution/registry.ts";
 import { runAgentAttempt, type RunnerDeps } from "../src/agent/runner.ts";
 import { WorkspaceManager } from "../src/workspace/manager.ts";
 import type { AgentSessionOptions } from "../src/agent/types.ts";
@@ -260,11 +260,15 @@ test("orchestrator shutdown waits for a late runtime and prevents agent startup"
   registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem"], create() {
     creating.resolve(); return created.promise;
   } });
-  fs.mkdirSync(path.join(f.root, "issues"));
-  fs.writeFileSync(path.join(f.root, "issues", "T-28.json"), JSON.stringify(issue));
   const workflow = parseWorkflow(`---\ntracker:\n  kind: file\n  active_states: [todo]\n  terminal_states: [done]\n  provider:\n    dir: ./issues\nworkspace:\n  root: ./ws\nagent:\n  kind: ${f.deps.agentKind}\n---\nWork`);
   const c = buildConfig(workflow, path.join(f.root, "WORKFLOW.md")); c.execution = f.deps.config.execution;
   const orch = new Orchestrator({ config: c, workflow, workflowPath: path.join(f.root, "WORKFLOW.md"), logger });
+  // Shutdown timing is independent of filesystem watcher lifetime.
+  (orch as unknown as { adapter: TrackerAdapter }).adapter = {
+    ...f.deps.adapter, kind: "file", secretEnvironmentNames: () => [],
+    async fetchIssuesByStates(states) { return states.includes("todo") ? [issue] : []; },
+    async fetchIssuesByIds() { return [issue]; },
+  };
   try {
     await orch.start(); await creating.promise;
     let settled = false;
@@ -275,4 +279,142 @@ test("orchestrator shutdown waits for a late runtime and prevents agent startup"
     assert.ok(!f.events.includes("agent"));
     assert.equal(f.events.at(-1), "close");
   } finally { created.resolve(f.execution); await orch.stop(); }
+});
+
+for (const kind of ["codex", "opencode"]) {
+  test(`${kind} completes a worker through real local processes, hooks, and files`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-local-agent-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const script = path.join(root, "agent.cjs");
+    fs.writeFileSync(script, `
+      const fs = require('node:fs');
+      const mode = process.argv[2];
+      if (mode === 'before' || mode === 'after') {
+        fs.appendFileSync('hooks.txt', mode + '\\n');
+      } else {
+        const issue = JSON.parse(fs.readFileSync('SYMPHONY_ISSUE.json', 'utf8'));
+        if (issue.id !== 'T-28' || process.env.SYMPHONY_TEST_VALUE !== 'present') process.exit(2);
+        const done = () => fs.writeFileSync('SYMPHONY_RESULT.json', JSON.stringify({ state: 'done', comment: mode }));
+        const send = (v) => process.stdout.write(JSON.stringify(v) + '\\n');
+        if (mode === 'codex') {
+          require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+            const r = JSON.parse(line);
+            send({ id: r.id, result: r.method === 'thread/start' ? { thread: { id: 'local-thread' } } : {} });
+            if (r.method === 'turn/start') {
+              done();
+              send({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+              setTimeout(() => process.exit(0), 20);
+            }
+          });
+        } else {
+          process.stdin.resume();
+          process.stdin.on('end', () => {
+            done(); send({ type: 'text', sessionID: 'local-thread', part: { text: 'done' } });
+          });
+        }
+      }
+    `);
+    const command = `"${process.execPath}" "${script}"`;
+    const c = config(); c.codex.command = `${command} codex`; c.opencode.command = `${command} opencode`;
+    c.hooks.before_run = `${command} before`; c.hooks.after_run = `${command} after`;
+    c.codex.read_timeout_ms = 5000;
+    const manager = new WorkspaceManager({ root: path.join(root, "ws"), hooks: c.hooks, logger });
+    let applied: unknown;
+    const adapter = { agentToolSpecs: () => [], async fetchIssuesByIds() { return []; }, async executeAgentTool(_tool: string, result: unknown) {
+      applied = result; return { success: true, output: {} };
+    } } as unknown as TrackerAdapter;
+    const result = await runAgentAttempt(issue, null, {
+      config: c, agentKind: kind, stream: issue.id, isFollowUp: false, promptTemplate: "work",
+      adapter, workspaceManager: manager, logger, childEnv: { ...process.env, SYMPHONY_TEST_VALUE: "present" },
+      isActiveState: () => true, isTerminalState: () => false, isRoutable: () => true, onUpdate() {}, onSessionReady() {},
+    });
+    assert.deepEqual(result, { kind: "normal" });
+    assert.deepEqual(applied, { state: "done", comment: kind });
+    assert.equal(fs.readFileSync(path.join(manager.workspacePathFor(issue.id), "hooks.txt"), "utf8"), "before\nafter\n");
+    assert.equal(fs.existsSync(path.join(manager.workspacePathFor(issue.id), "SYMPHONY_RESULT.json")), false);
+  });
+}
+
+test("agent spawn and transport failures settle without leaking pending turns", async () => {
+  for (const Client of [CodexAppServerClient, OpencodeSession]) {
+    const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn(): Promise<ProcessHandle> { throw new Error("transport down"); } };
+    const client = new Client(options(execution));
+    if (Client === CodexAppServerClient) await assert.rejects(client.start(), /transport down/);
+    else assert.match((await client.runTurn("work")).error!, /transport down/);
+    await client.stop(); await client.stop();
+  }
+  const p = processHandle();
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn() { return p.handle; } };
+  const client = new OpencodeSession(options(execution));
+  const turn = client.runTurn("work");
+  p.done.resolve({ code: null, signal: null, error: "disconnected" });
+  assert.match((await turn).error!, /disconnected/);
+  await client.stop();
+});
+
+test("OpenCode timeout waits for kill and permits a clean continuation", async () => {
+  let count = 0;
+  const killed = deferred<void>();
+  const killing = deferred<void>();
+  const p = processHandle();
+  p.handle.kill = async () => { killing.resolve(); await killed.promise; p.done.resolve({ code: null, signal: "SIGKILL" }); };
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn() {
+    if (count++ === 0) return p.handle;
+    const next = processHandle(); next.done.resolve({ code: 0, signal: null }); return next.handle;
+  } };
+  const opts = options(execution); opts.config.opencode.turn_timeout_ms = 5;
+  const client = new OpencodeSession(opts);
+  let settled = false;
+  const turn = client.runTurn("work").then((result) => { settled = true; return result; });
+  await killing.promise; assert.equal(settled, false);
+  killed.resolve(); assert.equal((await turn).status, "timeout");
+  assert.equal((await client.runTurn("retry")).status, "completed");
+  await client.stop();
+});
+
+test("hook timeouts await kill and output stays bounded", async () => {
+  const p = processHandle();
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn() { return p.handle; } };
+  const run = runExecutionHook(execution, "slow", 5);
+  await Promise.resolve();
+  p.stdout.write("x".repeat(100_000)); p.stderr.write("y".repeat(100_000));
+  const result = await run;
+  assert.equal(result.timedOut, true); assert.equal(p.kills, 1);
+  assert.equal(result.stdout.length, 64 * 1024); assert.equal(result.stderr.length, 64 * 1024);
+});
+
+test("runner reports a runtime read failure instead of treating it as a missing result", async (t) => {
+  const f = runnerFixture(t);
+  f.execution.readFile = async () => { throw new Error("runtime disconnected"); };
+  const result = await runAgentAttempt(issue, null, f.deps);
+  assert.equal(result.kind, "abnormal");
+  assert.match(result.reason!, /runtime disconnected/);
+  assert.ok(!f.events.includes("tracker"));
+  assert.equal(f.events.at(-1), "close");
+});
+
+test("cancellation while reading a result prevents tracker write-back", async (t) => {
+  const f = runnerFixture(t);
+  let stop!: () => Promise<void>;
+  f.deps.onSessionReady = (s) => { stop = s; };
+  f.execution.readFile = async () => { await stop(); return Buffer.from('{"state":"done"}'); };
+  assert.equal((await runAgentAttempt(issue, null, f.deps)).kind, "abnormal");
+  assert.ok(!f.events.includes("tracker"));
+  assert.ok(f.files.has("SYMPHONY_RESULT.json"));
+});
+
+test("concurrent local close calls both await process cleanup", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-close-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const execution = await createExecutionSession("local", {}, { workspacePath: root, env: process.env, logger });
+  const p = await execution.spawn!(`"${process.execPath}" -e "setTimeout(()=>{},100)"`);
+  const release = deferred<void>();
+  const kill = p.kill.bind(p);
+  p.kill = async (signal) => { await release.promise; await kill(signal); };
+  const first = execution.close();
+  let settled = false;
+  const second = execution.close().then(() => { settled = true; });
+  await Promise.resolve();
+  try { assert.equal(settled, false); }
+  finally { release.resolve(); await first; await second; }
 });
