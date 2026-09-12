@@ -17,6 +17,8 @@ import type { AgentSessionOptions } from "../src/agent/types.ts";
 import type { ExecutionSession, ProcessExit, ProcessHandle } from "../src/execution/types.ts";
 import type { Issue } from "../src/domain/types.ts";
 import type { TrackerAdapter } from "../src/tracker/types.ts";
+import { runExecutionHook } from "../src/execution/hooks.ts";
+import { Orchestrator } from "../src/orchestrator/orchestrator.ts";
 
 const logger = new Logger([{ name: "null", write() {} }], "error");
 const issue: Issue = {
@@ -169,7 +171,7 @@ function runnerFixture(t: { after: (fn: () => void) => void }, failure = "") {
     isActiveState: () => true, isTerminalState: () => false, isRoutable: () => true,
     onUpdate() {}, onSessionReady() {},
   };
-  return { events, files, deps, execution };
+  return { events, files, deps, execution, root };
 }
 
 test("runner uses runtime files and awaits stop, after_run, and close", async (t) => {
@@ -199,4 +201,78 @@ test("run hooks execute inside the provided runtime even without a host director
   assert.equal(await (manager.runBeforeRun as Function)("/no-host-workspace", execution), true);
   await (manager.runAfterRun as Function)("/no-host-workspace", execution);
   assert.deepEqual(commands, ["prepare", "finish"]);
+});
+
+test("cancelling a hook waits for its process to terminate", async () => {
+  const abort = new AbortController();
+  const p = processHandle();
+  const killed = deferred<void>();
+  const killing = deferred<void>();
+  p.handle.kill = async () => { killing.resolve(); await killed.promise; p.done.resolve({ code: null, signal: "SIGKILL" }); };
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn() { return p.handle; } };
+  let settled = false;
+  const run = (runExecutionHook as Function)(execution, "long hook", 100, abort.signal).then(() => { settled = true; });
+  abort.abort();
+  await killing.promise;
+  assert.equal(settled, false);
+  killed.resolve(); await run;
+  // Cancellation must trigger promptly, not only when the hook timeout fires.
+  assert.ok(abort.signal.aborted);
+});
+
+test("an already cancelled hook never starts a process", async () => {
+  const abort = new AbortController(); abort.abort();
+  let spawned = false;
+  const execution = { runtimeId: "remote", workspacePath: "/runtime/work", async close() {}, async spawn() {
+    spawned = true; const p = processHandle(); p.done.resolve({ code: 0, signal: null }); return p.handle;
+  } };
+  const result = await (runExecutionHook as Function)(execution, "prepare", 100, abort.signal);
+  assert.equal(spawned, false);
+  assert.equal(result.ok, false);
+});
+
+test("runner cancellation during before_run terminates the hook and skips the agent", async (t) => {
+  const f = runnerFixture(t);
+  const p = processHandle();
+  const started = deferred<void>();
+  Object.assign(f.execution, { spawn: async () => { started.resolve(); return p.handle; } });
+  const c = config(); c.hooks.before_run = "long hook"; c.hooks.timeout_ms = 500;
+  const manager = new WorkspaceManager({ root: path.join(os.tmpdir(), `sym-cancel-${counter++}`), hooks: c.hooks, logger });
+  // Keep fixture-owned workspace creation and use the real hook implementation.
+  f.deps.workspaceManager.runBeforeRun = manager.runBeforeRun.bind(manager);
+  let stop!: () => Promise<void>;
+  f.deps.onSessionReady = (s) => { stop = s; };
+  const run = runAgentAttempt(issue, null, f.deps);
+  await started.promise; await stop();
+  // Let cancellation microtasks settle without advancing a hook timeout.
+  await new Promise((r) => setImmediate(r));
+  assert.equal(p.kills, 1);
+  const result = await run;
+  assert.equal(result.kind, "abnormal");
+  assert.ok(!f.events.includes("agent"));
+  assert.equal(f.events.at(-1), "close");
+});
+
+test("orchestrator shutdown waits for a late runtime and prevents agent startup", async (t) => {
+  const f = runnerFixture(t);
+  const creating = deferred<void>();
+  const created = deferred<ExecutionSession>();
+  registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem"], create() {
+    creating.resolve(); return created.promise;
+  } });
+  fs.mkdirSync(path.join(f.root, "issues"));
+  fs.writeFileSync(path.join(f.root, "issues", "T-28.json"), JSON.stringify(issue));
+  const workflow = parseWorkflow(`---\ntracker:\n  kind: file\n  active_states: [todo]\n  terminal_states: [done]\n  provider:\n    dir: ./issues\nworkspace:\n  root: ./ws\nagent:\n  kind: ${f.deps.agentKind}\n---\nWork`);
+  const c = buildConfig(workflow, path.join(f.root, "WORKFLOW.md")); c.execution = f.deps.config.execution;
+  const orch = new Orchestrator({ config: c, workflow, workflowPath: path.join(f.root, "WORKFLOW.md"), logger });
+  try {
+    await orch.start(); await creating.promise;
+    let settled = false;
+    const shutdown = Promise.resolve(orch.stop()).then(() => { settled = true; });
+    await Promise.resolve();
+    assert.equal(settled, false, "shutdown must await the worker cleanup");
+    created.resolve(f.execution); await shutdown;
+    assert.ok(!f.events.includes("agent"));
+    assert.equal(f.events.at(-1), "close");
+  } finally { created.resolve(f.execution); await orch.stop(); }
 });
