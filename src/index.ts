@@ -115,14 +115,23 @@ async function main(): Promise<void> {
     }
   }
 
-  const shutdown = (signal: string) => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info("shutting down", { signal });
     httpServer?.close();
-    manager.stopAll();
+    await manager.stopAll();
     process.exit(0);
   };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  const onSignal = (signal: string) => {
+    void shutdown(signal).catch((err) => {
+      logger.error("shutdown failed", { error: String(err) });
+      process.exitCode = 1;
+    });
+  };
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
 }
 
 main().catch((err) => {

@@ -92,11 +92,13 @@ export async function runAgentAttempt(
   let stopped = false;
   let stopping: Promise<void> | undefined;
   let afterRun = false;
+  const cancellation = new AbortController();
   let outcome: WorkerExit = { kind: "normal" };
   // One stop operation shared by cancellation and final cleanup. Keep rejection
   // observed here; final cleanup reports it in the worker outcome.
   const stop = (): Promise<void> => {
     stopped = true;
+    cancellation.abort();
     stopping ??= Promise.resolve().then(() => session?.stop());
     void stopping.catch(() => {});
     return stopping;
@@ -108,7 +110,9 @@ export async function runAgentAttempt(
     if (!execution.workspacePath) throw new Error("execution session lacks workspacePath");
     deps.onSessionReady(stop);
     if (stopped) throw new Error("session stopped");
-    if (!await deps.workspaceManager.runBeforeRun(wsPath, execution)) throw new Error("before_run hook error");
+    if (!await deps.workspaceManager.runBeforeRun(wsPath, execution, cancellation.signal)) {
+      throw new Error(stopped ? "session stopped" : "before_run hook error");
+    }
     afterRun = true;
     if (stopped) throw new Error("session stopped");
 

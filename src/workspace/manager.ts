@@ -329,9 +329,9 @@ export class WorkspaceManager {
   }
 
   /** `before_run`: fatal to the attempt on failure/timeout (SPEC §9.4). */
-  async runBeforeRun(wsPath: string, execution?: ExecutionSession): Promise<boolean> {
+  async runBeforeRun(wsPath: string, execution?: ExecutionSession, signal?: AbortSignal): Promise<boolean> {
     if (!this.opts.hooks.before_run) return true;
-    const res = await this.runHook("before_run", this.opts.hooks.before_run, wsPath, execution);
+    const res = await this.runHook("before_run", this.opts.hooks.before_run, wsPath, execution, signal);
     return res.ok;
   }
 
@@ -872,7 +872,7 @@ export class WorkspaceManager {
     return (await this.gitIn(repo, ["update-ref", "--stdin", "-z"], payload, true)) !== null;
   }
 
-  private async runHook(name: string, script: string, cwd: string, execution?: ExecutionSession) {
+  private async runHook(name: string, script: string, cwd: string, execution?: ExecutionSession, signal?: AbortSignal) {
     this.opts.logger.info("hook start", { hook: name, cwd });
     // Creation/removal prepare the host delivery workspace; run hooks share the agent runtime.
     const session = execution ?? await createExecutionSession("local", {}, {
@@ -880,7 +880,7 @@ export class WorkspaceManager {
     });
     let res;
     try {
-      res = await runExecutionHook(session, script, this.opts.hooks.timeout_ms);
+      res = await runExecutionHook(session, script, this.opts.hooks.timeout_ms, signal);
     } catch (err) {
       res = { ok: false, code: null, timedOut: false, stdout: "", stderr: String(err) };
     } finally {

@@ -161,7 +161,7 @@ export class ProjectManager {
     } catch (err) {
       // Roll back a half-registered project so the manager stays consistent.
       project.watcher.stop();
-      project.orchestrator.stop();
+      await project.orchestrator.stop();
       this.projects.delete(id);
       throw err;
     }
@@ -175,11 +175,13 @@ export class ProjectManager {
     return { id, name, workflow: workflowPath, running: snap.counts.running, retrying: snap.counts.retrying };
   }
 
-  stopAll(): void {
+  async stopAll(): Promise<void> {
+    const stopped: Promise<void>[] = [];
     for (const p of this.projects.values()) {
       p.watcher.stop();
-      p.orchestrator.stop();
+      stopped.push(p.orchestrator.stop());
     }
+    await Promise.all(stopped);
   }
 }
 
