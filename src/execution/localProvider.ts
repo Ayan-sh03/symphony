@@ -60,10 +60,11 @@ class LocalProcessHandle implements ProcessHandle {
 class LocalExecutionSession implements ExecutionSession {
   readonly runtimeId = null;
 
-  private workspacePath: string;
+  readonly workspacePath: string;
   private env: NodeJS.ProcessEnv;
   private processes = new Set<LocalProcessHandle>();
   private closed = false;
+  private closing: Promise<void> | null = null;
   private snapshotOperation: Promise<unknown> | null = null;
   private fileOperations = 0;
 
@@ -106,13 +107,16 @@ class LocalExecutionSession implements ExecutionSession {
     }));
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     this.closed = true;
-    await this.snapshotOperation?.catch(() => {});
-    const live = [...this.processes];
-    await Promise.all(live.map((handle) => handle.kill("SIGKILL")));
-    this.processes.clear();
+    this.closing = (async () => {
+      await this.snapshotOperation?.catch(() => {});
+      const live = [...this.processes];
+      await Promise.all(live.map((handle) => handle.kill("SIGKILL")));
+      this.processes.clear();
+    })();
+    return this.closing;
   }
 
   async exportSnapshot(options?: SnapshotExportOptions): Promise<WorkspaceSnapshot> {

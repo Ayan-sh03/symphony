@@ -39,7 +39,7 @@ test("a fake provider is selected through the registry and reports capabilities"
   let validated: Record<string, unknown> | null = null;
   let received: ExecutionSessionOptions | null = null;
   const fakeSession = {
-    runtimeId: "fake-runtime",
+    runtimeId: "fake-runtime", workspacePath: "/fake",
     async spawn(): Promise<ProcessHandle> { throw new Error("not used"); },
     async close() { /* no-op */ },
   } satisfies ExecutionSession;
@@ -116,7 +116,7 @@ test("the local provider preserves shell, stream, and workspace file behavior", 
 
 test("unknown providers fail validation, capability checks, and construction clearly", async () => {
   assert.throws(
-    () => registerExecutionProviderFactory({ kind: " ", capabilities: [], create: async () => ({ runtimeId: null, async close() {} }) }),
+    () => registerExecutionProviderFactory({ kind: " ", capabilities: [], create: async () => ({ runtimeId: null, workspacePath: "/fake", async close() {} }) }),
     /kind must not be empty/,
   );
   assert.throws(() => validateExecutionProvider("missing-provider", {}), /unsupported execution.kind/);

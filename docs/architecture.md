@@ -10,7 +10,8 @@ flowchart TD
     O --> T["Tracker adapter<br/>file or GitHub"]
     O --> A["Agent session<br/>Codex or OpenCode"]
     O --> S["HTTP console and API"]
-    A --> X["Isolated issue workspace"]
+    A --> E["Execution session<br/>processes and files"]
+    E --> X["Isolated issue workspace"]
 ```
 
 | Layer | Location | Responsibility |
@@ -18,7 +19,7 @@ flowchart TD
 | Policy | `WORKFLOW.md` | Tracker, workspace, agent, polling, and Liquid prompt |
 | Configuration | `src/config`, `src/workflow` | Validation, defaults, path resolution, hot reload |
 | Coordination | `src/orchestrator` | Dispatch, concurrency, continuation, retries, reconciliation |
-| Execution | `src/workspace`, `src/agent` | Workspaces, worktrees, and coding-agent sessions |
+| Execution | `src/workspace`, `src/agent`, `src/execution` | Host workspaces, agent protocols, and runtime processes/files |
 | Integration | `src/tracker` | Issue normalization and host-side tracker tools |
 | Observability | `src/history`, `src/server` | Activity history, costs, console, and HTTP API |
 | Multi-project host | `src/project` | Independent orchestrators loaded from a project manifest |
@@ -27,13 +28,17 @@ flowchart TD
 
 1. The tracker returns normalized, dispatchable issues in an active state.
 2. The orchestrator reserves capacity and prepares an isolated workspace.
-3. Symphony renders the workflow prompt and starts the configured agent in that
-   workspace.
+3. The runner creates the selected execution session, runs `before_run`, writes issue
+   context, and starts the configured agent through that session. Protocol paths refer to
+   the runtime workspace; host delivery paths remain with the workspace manager.
 4. Agent updates feed the activity log, usage counters, and stall detection.
 5. Host-side tracker tools apply comments and state changes without exposing tracker
    credentials to the agent.
 6. Symphony re-reads the issue after a turn and either continues, retries, or finalizes
    the run.
+7. The runner awaits agent termination, runs `after_run`, and closes the execution session.
+   Shutdown waits for this cleanup, and cancellation also covers pending runtime creation
+   and `before_run` hooks.
 
 Repository-backed projects use git worktrees and preserve their delivery branches.
 Scratch projects use ordinary per-issue directories. Follow-up issues share the original

@@ -52,7 +52,7 @@ interface RunningEntry {
   started_at: string;
   started_ms: number;
   last_event_ms: number | null;
-  stopSession: (() => void) | null;
+  stopSession: (() => Promise<void>) | null;
   /**
    * Set once the run is being wound down. `grace_until_ms` (terminal-state
    * termination only) lets the live turn settle on its own instead of being
@@ -447,7 +447,7 @@ export class Orchestrator {
     this.scheduleTick(0);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (!this.stopped) this.lifecycleGeneration++;
     this.stopped = true;
     if (this.tickTimer) clearTimeout(this.tickTimer);
@@ -455,7 +455,15 @@ export class Orchestrator {
     this.retryDrainTimer = null;
     this.dueRetries.clear();
     for (const [, r] of this.retry_attempts) clearTimeout(r.timer);
-    for (const [, e] of this.running) e.stopSession?.();
+    const workers = [...this.running.values()];
+    for (const e of workers) this.requestSessionStop(e);
+    await Promise.all(workers.map((e) => e.workerDone));
+  }
+
+  private requestSessionStop(entry: RunningEntry): void {
+    void entry.stopSession?.().catch((err) => {
+      this.logger.warn("agent stop failed", { issue_identifier: entry.identifier, error: String(err) });
+    });
   }
 
   private scheduleTick(delayMs: number): void {
@@ -1182,6 +1190,10 @@ export class Orchestrator {
           onSessionReady: (stop) => {
             const e = this.running.get(issue.id);
             if (e) e.stopSession = stop;
+            // Workspace/runtime creation may finish after shutdown or operator Stop.
+            if (this.stopped || !e || e.terminating?.cleanupWorkspace === false) {
+              void stop().catch((err) => this.logger.warn("agent stop failed", { issue_id: issue.id, error: String(err) }));
+            }
           },
         });
       } catch (err) {
@@ -1707,7 +1719,7 @@ export class Orchestrator {
         this.logger.warn("stall detected; terminating worker", { issue_id: id, issue_identifier: entry.identifier, elapsed_ms: now - since });
         // Stall → terminate + retry (not reconciliation release).
         entry.terminating = null;
-        entry.stopSession?.();
+        this.requestSessionStop(entry);
       }
     }
   }
@@ -1736,7 +1748,7 @@ export class Orchestrator {
       cleanup: cleanupWorkspace,
       grace: cleanupWorkspace ? TERMINAL_GRACE_MS : 0,
     });
-    if (!cleanupWorkspace) entry.stopSession?.();
+    if (!cleanupWorkspace) this.requestSessionStop(entry);
   }
 
   /** Stop a terminal-state run whose turn outstayed the grace window. */
@@ -1745,7 +1757,7 @@ export class Orchestrator {
     if (until === null || Date.now() <= until) return;
     entry.terminating!.grace_until_ms = null;
     this.logger.warn("terminal-state grace expired; stopping session", { issue_id: issueId, issue_identifier: entry.identifier });
-    entry.stopSession?.();
+    this.requestSessionStop(entry);
   }
 
   private addRuntimeSeconds(entry: RunningEntry): void {

@@ -57,6 +57,8 @@ export interface RemoveFileOptions {
  * can implement only what they advertise; callers must check before using them.
  */
 export interface ExecutionSession {
+  /** Absolute workspace path inside this runtime (may differ from the host path). */
+  readonly workspacePath: string;
   /** Persistent provider runtime id, or null for an ephemeral/local session. */
   readonly runtimeId: string | null;
   spawn?(command: string, options?: ProcessOptions): Promise<ProcessHandle>;

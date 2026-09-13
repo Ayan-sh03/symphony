@@ -3,7 +3,7 @@
  * long-lived JSON-RPC protocol like the Codex app-server; instead each Symphony turn
  * maps to exactly one `opencode run --format json` invocation that runs to completion
  * and streams newline-delimited JSON events on stdout. Symphony-specific
- * responsibilities mirror the Codex client: launch (via {@link spawnShell}) in the
+ * responsibilities mirror the Codex client: launch through an execution session in the
  * per-issue workspace, run the first turn with the rendered prompt and continuation
  * turns on the same opencode session, surface structured {@link AgentUpdate}s, and
  * enforce a per-turn timeout.
@@ -17,8 +17,7 @@
  *    approvalPolicy="never"); there are no approval round-trips to service.
  *  - The turn ends when the process exits: exit 0 → completed, non-zero → failed.
  */
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { spawnShell } from "../shell.ts";
+import type { ProcessHandle } from "../execution/types.ts";
 import type { OpencodeConfig } from "../config/config.ts";
 import type { AgentUpdate } from "../domain/types.ts";
 import type {
@@ -122,7 +121,10 @@ export function mapOpencodeEvent(evt: Record<string, unknown>, tokens: OcTokenSt
 
 /** opencode backend implementing the generic {@link AgentSession}. */
 export class OpencodeSession implements AgentSession {
-  private child: ChildProcessWithoutNullStreams | null = null;
+  private child: ProcessHandle | null = null;
+  private spawning: Promise<ProcessHandle> | null = null;
+  private stopping: Promise<void> | null = null;
+  private killing: Promise<void> | null = null;
   private buf = "";
   private _threadId: string | null = null;
   private _pid: string | null = null;
@@ -174,12 +176,21 @@ export class OpencodeSession implements AgentSession {
    */
   async runTurn(input: string, title?: string): Promise<AgentTurnResult> {
     if (this.stopped) return { status: "failed", error: "session stopped" };
-    if (this.activeTurn) return { status: "failed", error: "turn already in progress" };
+    if (this.activeTurn || this.spawning || this.killing) return { status: "failed", error: "turn already in progress" };
 
     const command = this.buildCommand(title);
-    const { child } = spawnShell(command, this.opts.workspacePath, this.opts.env);
+    if (!this.opts.execution.spawn) return { status: "failed", error: "execution session lacks process capability" };
+    let child: ProcessHandle;
+    try {
+      this.spawning = this.opts.execution.spawn(command);
+      child = await this.spawning;
+    } catch (err) {
+      return { status: "failed", error: String(err) };
+    } finally { this.spawning = null; }
     this.child = child;
-    this._pid = child.pid !== undefined ? String(child.pid) : null;
+    if (this.stopped) { await this.stop(); return { status: "cancelled", error: "session stopped" }; }
+    this._pid = child.pid;
+    this.buf = "";
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (d: string) => this.onData(d));
@@ -188,10 +199,16 @@ export class OpencodeSession implements AgentSession {
       const t = d.trim();
       if (t) this.opts.logger.debug("opencode stderr", { pid: this._pid, text: t.slice(0, 500) });
     });
-    child.on("exit", (code) => this.onExit(code));
-    child.on("error", (err) => this.onExit(null, err));
+    void child.exit.then(({ code, error }) => {
+      if (this.child === child) this.onExit(code, error ? new Error(error) : undefined);
+    });
+    child.stdin.on("error", (err) => {
+      if (this.child !== child) return;
+      this.settleTurn({ status: "failed", error: String(err) });
+      this.killChild();
+    });
 
-    return new Promise<AgentTurnResult>((resolve) => {
+    const result = await new Promise<AgentTurnResult>((resolve) => {
       const timer = setTimeout(() => {
         this.emit("turn_failed", { message: "turn_timeout" });
         this.killChild();
@@ -211,15 +228,24 @@ export class OpencodeSession implements AgentSession {
         this.settleTurn({ status: "failed", error: String(err) });
       }
     });
+    try { await this.killing; }
+    finally { this.killing = null; }
+    return result;
   }
 
   /** Kill any in-flight `opencode run` and settle its turn (SPEC §10.3). Idempotent. */
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
-    this.killChild();
     if (this.activeTurn && !this.activeTurn.settled) {
       this.settleTurn({ status: "cancelled", error: "session stopped" });
     }
+    this.stopping = (async () => {
+      const child = this.child ?? await this.spawning?.catch(() => null);
+      if (this.killing) await this.killing;
+      else await child?.kill("SIGKILL");
+    })();
+    return this.stopping;
   }
 
   // ---- internals ----
@@ -297,12 +323,10 @@ export class OpencodeSession implements AgentSession {
 
   private killChild(): void {
     const c = this.child;
-    if (c && c.exitCode === null) {
-      try {
-        c.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
+    if (c && !this.killing) {
+      this.killing = c.kill("SIGKILL");
+      // runTurn/stop await the original promise and report termination failures.
+      void this.killing.catch(() => {});
     }
   }
 

@@ -10,6 +10,7 @@ import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { ToolSpec, TrackerAdapter } from "../tracker/types.ts";
 import type { AgentDetection, AgentDetectDeps } from "./detection.ts";
+import type { ExecutionSession } from "../execution/types.ts";
 
 export type { AgentDetection, AgentDetectDeps };
 
@@ -39,7 +40,7 @@ export interface AgentSession {
    */
   runTurn(input: string, summary?: string): Promise<AgentTurnResult>;
   /** Stop the backend at the end of a worker run. Idempotent. */
-  stop(): void;
+  stop(): Promise<void>;
   /** Backend thread id, once known. */
   readonly threadId: string | null;
   /** Backend process id, if the backend is a subprocess. */
@@ -48,6 +49,9 @@ export interface AgentSession {
 
 /** Everything an agent backend needs to run one worker attempt. */
 export interface AgentSessionOptions {
+  /** Runner-owned runtime. Agents stop their processes; only the runner closes it. */
+  execution: ExecutionSession;
+  /** Absolute path inside the execution runtime. */
   workspacePath: string;
   issue: Issue;
   config: ServiceConfigValues;

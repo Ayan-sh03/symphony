@@ -9,8 +9,7 @@
  * "never" with a danger-full-access sandbox, so no approval round-trips occur.
  * Approval and dynamic-tool server requests are still handled defensively.
  */
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { spawnShell } from "../shell.ts";
+import type { ProcessHandle } from "../execution/types.ts";
 import type { CodexConfig } from "../config/config.ts";
 import type { AgentUpdate } from "../domain/types.ts";
 import type {
@@ -30,7 +29,9 @@ const MAX_LINE = 10 * 1024 * 1024; // 10 MB safe buffering (SPEC §10.1)
 
 /** Codex app-server backend implementing the generic {@link AgentSession}. */
 export class CodexAppServerClient implements AgentSession {
-  private child: ChildProcessWithoutNullStreams | null = null;
+  private child: ProcessHandle | null = null;
+  private spawning: Promise<ProcessHandle> | null = null;
+  private stopping: Promise<void> | null = null;
   private buf = "";
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -65,9 +66,13 @@ export class CodexAppServerClient implements AgentSession {
 
   /** Launch subprocess, initialize, and start a thread. */
   async start(): Promise<AgentSessionIdentity> {
-    const { child } = spawnShell(this.codex.command, this.opts.workspacePath, this.opts.env);
+    if (this.stopped) throw new Error("session stopped");
+    if (!this.opts.execution.spawn) throw new Error("execution session lacks process capability");
+    this.spawning = this.opts.execution.spawn(this.codex.command);
+    const child = await this.spawning;
     this.child = child;
-    this._pid = child.pid !== undefined ? String(child.pid) : null;
+    if (this.stopped) { await this.stop(); throw new Error("session stopped"); }
+    this._pid = child.pid;
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (d: string) => this.onData(d));
@@ -77,8 +82,8 @@ export class CodexAppServerClient implements AgentSession {
       const t = d.trim();
       if (t) this.opts.logger.debug("codex stderr", { pid: this._pid, text: t.slice(0, 500) });
     });
-    child.on("exit", (code) => this.onExit(code));
-    child.on("error", (err) => this.onExit(null, err));
+    void child.exit.then(({ code, error }) => this.onExit(code, error ? new Error(error) : undefined));
+    child.stdin.on("error", (err) => this.onExit(null, err));
 
     try {
       await this.request("initialize", {
@@ -158,7 +163,8 @@ export class CodexAppServerClient implements AgentSession {
   }
 
   /** Stop the app-server subprocess at the end of a worker run (SPEC §10.3). */
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
     if (this.activeTurn && !this.activeTurn.settled) {
       this.settleTurn({ status: "cancelled", error: "session stopped" });
@@ -168,13 +174,11 @@ export class CodexAppServerClient implements AgentSession {
       p.reject(new Error("session stopped"));
     }
     this.pending.clear();
-    if (this.child && this.child.exitCode === null) {
-      try {
-        this.child.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
-    }
+    this.stopping = (async () => {
+      const child = this.child ?? await this.spawning?.catch(() => null);
+      await child?.kill("SIGKILL");
+    })();
+    return this.stopping;
   }
 
   // ---- internals ----
