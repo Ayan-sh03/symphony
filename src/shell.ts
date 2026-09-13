@@ -8,6 +8,7 @@
  * `bash -lc` breaks their launcher shims. `codex.command` still runs verbatim.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { terminateProcessTree } from "./execution/processTree.ts";
 
 export interface ShellSpawn {
   child: ChildProcessWithoutNullStreams;
@@ -38,9 +39,11 @@ export function spawnShell(
     describe = `cmd /c ${command}`;
   } else {
     const shell = "/bin/bash";
+    // Own process group so a stop can reach the whole tree, not just `bash` (#39).
     child = spawn(shell, ["-lc", command], {
       cwd,
       env,
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
     describe = `bash -lc ${command}`;
@@ -78,8 +81,11 @@ export function runScript(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
-      resolve({ ok: false, code: null, timedOut: true, stdout, stderr });
+      // Terminate the whole tree and only then resolve, so a hook that timed out
+      // cannot leave agent-launched children running behind it (#39).
+      void terminateProcessTree(child.pid ?? null, "SIGKILL").finally(() => {
+        resolve({ ok: false, code: null, timedOut: true, stdout, stderr });
+      });
     }, timeoutMs);
     child.on("error", (err) => {
       if (settled) return;

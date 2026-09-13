@@ -18,6 +18,7 @@
  *   `WORKFLOW.md`, which is what `opencodeSession.buildCommand` actually passes as `-m`.
  */
 import { spawnShell } from "../shell.ts";
+import { terminateProcessTree } from "../execution/processTree.ts";
 import type { AgentModel, ModelQuery } from "./types.ts";
 
 /** Wall-clock budget. The verified listing takes ~2.8 s; this bounds a hung CLI. */
@@ -52,8 +53,10 @@ function runModelsCommand(query: ModelQuery): Promise<string> {
     };
     const timer = setTimeout(() => {
       finish(() => {
-        child.kill("SIGKILL"); // a hang must not leak a process
-        reject(new Error(`opencode model discovery timed out after ${DISCOVERY_TIMEOUT_MS}ms`));
+        // A hang must not leak the CLI's descendants, not just the shell wrapper.
+        void terminateProcessTree(child.pid ?? null, "SIGKILL").finally(() => {
+          reject(new Error(`opencode model discovery timed out after ${DISCOVERY_TIMEOUT_MS}ms`));
+        });
       });
     }, DISCOVERY_TIMEOUT_MS);
 
