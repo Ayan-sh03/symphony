@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { runScript } from "../src/shell.ts";
 import { buildConfig } from "../src/config/config.ts";
 import { parseWorkflow } from "../src/workflow/loader.ts";
 import { Logger } from "../src/logger.ts";
@@ -417,4 +419,156 @@ test("concurrent local close calls both await process cleanup", async (t) => {
   await Promise.resolve();
   try { assert.equal(settled, false); }
   finally { release.resolve(); await first; await second; }
+});
+
+// ---- issue #39: a stop must terminate the whole owned tree, not just the shell wrapper ----
+
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function waitForFile(file: string, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${file}`);
+}
+
+/** Force-kill a surviving test process so a failed assertion cannot leak one. */
+async function forceKillTree(pid: number): Promise<void> {
+  if (!alive(pid)) return;
+  if (process.platform === "win32") {
+    await new Promise<void>((resolve) => {
+      const c = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      c.once("exit", () => resolve());
+      c.once("error", () => resolve());
+    });
+  } else {
+    try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+  }
+}
+
+/**
+ * Write a script whose process spawns a long-lived grandchild that records its pid
+ * and heartbeats. Running it through `spawnShell` yields shell → script → grandchild,
+ * so a wrapper-only kill leaves the grandchild observable as a live writer.
+ */
+function writeTreeScript(dir: string): string {
+  const script = path.join(dir, "tree.cjs");
+  fs.writeFileSync(script, [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const { spawn } = require('node:child_process');",
+    "const dir = process.argv[2];",
+    "fs.writeFileSync(path.join(dir, 'parent.pid'), String(process.pid));",
+    "const code = \"const fs=require('node:fs');const p=require('node:path');\" +",
+    "  \"const dir=process.argv[1];fs.writeFileSync(p.join(dir,'child.pid'),String(process.pid));\" +",
+    "  \"setInterval(()=>fs.appendFileSync(p.join(dir,'heartbeat.txt'),'x'),25);\";",
+    "spawn(process.execPath, ['-e', code, dir], { stdio: 'ignore' });",
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  return script;
+}
+
+function treeFile(dir: string, name: string): number {
+  return Number(fs.readFileSync(path.join(dir, name), "utf8"));
+}
+
+/** Start a shell → script → grandchild tree and resolve once it is heartbeating. */
+async function startTree(execution: ExecutionSession, root: string, script: string): Promise<number> {
+  await execution.spawn!(`"${process.execPath}" "${script}" "${root}"`);
+  await waitForFile(path.join(root, "child.pid"));
+  await waitForFile(path.join(root, "heartbeat.txt"));
+  await new Promise((r) => setTimeout(r, 80)); // let the heartbeat grow
+  return treeFile(root, "child.pid");
+}
+
+test("stopping a local process terminates descendants, not just the shell wrapper (#39)", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-tree-kill-"));
+  const execution = await createExecutionSession("local", {}, { workspacePath: root, env: process.env, logger });
+  let childPid = 0;
+  try {
+    const script = writeTreeScript(root);
+    const handle = await execution.spawn!(`"${process.execPath}" "${script}" "${root}"`);
+    await waitForFile(path.join(root, "child.pid"));
+    childPid = treeFile(root, "child.pid");
+    await waitForFile(path.join(root, "heartbeat.txt"));
+    await new Promise((r) => setTimeout(r, 80));
+
+    await handle.kill("SIGKILL");
+
+    assert.equal(alive(childPid), false, "kill() must terminate the descendant process");
+    // Snapshot after kill returns: the child may still write while taskkill walks the
+    // tree, but once the awaited kill resolves no further heartbeat may appear.
+    const settled = fs.statSync(path.join(root, "heartbeat.txt")).size;
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(
+      fs.statSync(path.join(root, "heartbeat.txt")).size, settled,
+      "the descendant must stop heartbeating once kill() has returned",
+    );
+  } finally {
+    await execution.close();
+    await forceKillTree(childPid);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local execution close terminates descendant processes (#39)", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-tree-close-"));
+  const execution = await createExecutionSession("local", {}, { workspacePath: root, env: process.env, logger });
+  let childPid = 0;
+  try {
+    const script = writeTreeScript(root);
+    childPid = await startTree(execution, root, script);
+
+    await execution.close();
+
+    assert.equal(alive(childPid), false, "close() must terminate the descendant process");
+    const settled = fs.statSync(path.join(root, "heartbeat.txt")).size;
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(fs.statSync(path.join(root, "heartbeat.txt")).size, settled, "descendant must stop heartbeating");
+  } finally {
+    await forceKillTree(childPid);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent kill calls share one tree termination and all await it (#39)", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-tree-idem-"));
+  const execution = await createExecutionSession("local", {}, { workspacePath: root, env: process.env, logger });
+  let childPid = 0;
+  try {
+    const script = writeTreeScript(root);
+    const handle = await execution.spawn!(`"${process.execPath}" "${script}" "${root}"`);
+    await waitForFile(path.join(root, "child.pid"));
+    childPid = treeFile(root, "child.pid");
+    await waitForFile(path.join(root, "heartbeat.txt"));
+
+    await Promise.all([handle.kill("SIGKILL"), handle.kill("SIGKILL"), handle.kill("SIGKILL")]);
+
+    assert.equal(alive(childPid), false, "all concurrent kills must observe the descendant as terminated");
+  } finally {
+    await execution.close();
+    await forceKillTree(childPid);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out hook script does not leak its descendant processes (#39)", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sym-tree-timeout-"));
+  let childPid = 0;
+  try {
+    const script = writeTreeScript(root);
+    const result = await runScript(`"${process.execPath}" "${script}" "${root}"`, root, 3000, process.env);
+
+    assert.equal(result.timedOut, true);
+    await waitForFile(path.join(root, "child.pid"));
+    childPid = treeFile(root, "child.pid");
+    assert.equal(alive(childPid), false, "a timed-out script must not leave its descendants running");
+  } finally {
+    await forceKillTree(childPid);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

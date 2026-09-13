@@ -24,6 +24,7 @@
  */
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnShell } from "../shell.ts";
+import { terminateProcessTree } from "../execution/processTree.ts";
 import type { AgentModel, ModelQuery } from "./types.ts";
 
 /** Wall-clock budget for the whole probe: spawn, initialize, config/read, model/list. */
@@ -167,7 +168,7 @@ class Probe {
     this.disposed = true;
     if (this.deadline) clearTimeout(this.deadline);
     this.failAll(new Error("model discovery finished"));
-    this.child?.kill();
+    void terminateProcessTree(this.child?.pid ?? null, "SIGKILL");
     this.child = null;
   }
 }

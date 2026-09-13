@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnShell } from "../shell.ts";
+import { terminateProcessTree } from "./processTree.ts";
 import { exportWorkspaceSnapshot, importWorkspaceSnapshot } from "../workspace/snapshot.ts";
 import type { SnapshotExportOptions, SnapshotImportOptions, WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import type {
@@ -26,6 +27,7 @@ class LocalProcessHandle implements ProcessHandle {
   readonly exit: Promise<ProcessExit>;
 
   private child: ChildProcessWithoutNullStreams;
+  private killing: Promise<void> | null = null;
 
   constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child;
@@ -49,11 +51,21 @@ class LocalProcessHandle implements ProcessHandle {
     return this.exit;
   }
 
-  async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      this.child.kill(signal);
-    }
-    await this.exit;
+  kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
+    if (this.killing) return this.killing;
+    this.killing = (async () => {
+      if (this.child.exitCode === null && this.child.signalCode === null) {
+        // The direct child is a shell wrapper; killing it alone orphans the agent and
+        // its tools. Terminate the whole tree first, while the wrapper still anchors it.
+        await terminateProcessTree(this.child.pid ?? null, signal);
+        if (this.child.exitCode === null && this.child.signalCode === null) {
+          try { this.child.kill(signal); } catch { /* already gone */ }
+        }
+      }
+      // Awaited cleanup must not return until the process has actually exited (#39).
+      await this.exit;
+    })();
+    return this.killing;
   }
 }
 
