@@ -179,3 +179,33 @@ for (const execution of ["local", "remote"]) {
     assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "finished work\n");
   });
 }
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+test("Stop during checkpoint export preserves work without applying its completion, including on retry", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  const exporting = deferred();
+  const release = deferred();
+  let stop!: () => Promise<void>;
+  f.deps.onSessionReady = (s) => { stop = s; };
+  r.behavior.configure = (session) => {
+    const exportSnapshot = session.exportSnapshot!.bind(session);
+    session.exportSnapshot = async (options) => {
+      exporting.resolve(); await release.promise;
+      return exportSnapshot(options);
+    };
+  };
+  const run = f.run();
+  await exporting.promise;
+  await stop(); release.resolve();
+  assert.equal((await run).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  f.behavior.turn = async () => { throw new Error("retry deliberately interrupted"); };
+  await f.run();
+  assert.equal(await f.state(), "todo", "cancelled completion must not be replayed");
+});
