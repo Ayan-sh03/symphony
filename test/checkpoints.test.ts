@@ -340,3 +340,16 @@ test("a tracker retry rechecks imported work before marking it complete", async 
   assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "operator replacement");
   assert.equal(f.turns, 1);
 });
+
+test("an operator can stop a pending tracker replay before it changes issue state", async (t) => {
+  const f = await fixture(t);
+  await remote(f);
+  const apply = f.adapter.executeAgentTool.bind(f.adapter);
+  f.adapter.executeAgentTool = async () => ({ success: false, output: "offline" });
+  assert.equal((await f.run()).kind, "abnormal");
+  f.adapter.executeAgentTool = apply;
+  f.deps.onSessionReady = (stop) => { void stop(); };
+  assert.equal((await f.run()).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.equal(f.turns, 1);
+});
