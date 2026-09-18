@@ -14,6 +14,7 @@ import type { ServiceConfigValues } from "../config/config.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import type { WorkspaceManager } from "../workspace/manager.ts";
 import { RetainedRuntimeError } from "../workspace/checkpoint.ts";
+import type { WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import { renderPrompt, PromptError } from "../prompt/render.ts";
 import { createAgentSession } from "./registry.ts";
 import type { AgentSession } from "./types.ts";
@@ -50,7 +51,8 @@ export interface RunnerDeps {
   onUpdate: (issueId: string, u: AgentUpdate) => void;
   /**
    * Hand the orchestrator a stop handle so reconciliation/stall detection can
-   * terminate this live session (SPEC §8.5). Called once, after the session exists.
+   * cancel this attempt (SPEC §8.5), including recovery and runtime creation.
+   * Called once, before workspace preparation.
    */
   onSessionReady: (stop: () => Promise<void>) => void;
 }
@@ -103,17 +105,18 @@ export async function runAgentAttempt(
     requireExecutionCapabilities(deps.config.execution.kind, remote ? ["process", "filesystem", "workspace-snapshot"] : ["process", "filesystem"]);
   } catch (err) { return { kind: "abnormal", reason: `execution startup error: ${String(err)}` }; }
   const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
-  let initial;
+  let initial: WorkspaceSnapshot | undefined;
   try {
-      const pending = await checkpoint.recover(issue.id);
-      if (stopped) throw new Error("session stopped");
-      if (pending !== null) {
-        await applyResult(pending, issue, deps);
-        await checkpoint.acknowledge();
-        return { kind: "normal" };
-      }
+    const pending = await checkpoint.recover(issue.id);
+    if (stopped) throw new Error("session stopped");
+    if (pending !== null) {
+      await applyResult(pending, issue, deps);
       await checkpoint.acknowledge();
-      if (remote) initial = await checkpoint.snapshot();
+      return { kind: "normal" };
+    }
+    await checkpoint.acknowledge();
+    if (remote) initial = await checkpoint.snapshot();
+    if (stopped) throw new Error("session stopped");
   } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}`, ...(err instanceof RetainedRuntimeError ? { retryable: false as const } : {}) }; }
   checkpoint.saved = false;
 
