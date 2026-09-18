@@ -35,7 +35,7 @@ interface PendingSnapshot extends PendingResult {
 }
 type PendingCheckpoint = PendingSnapshot | (PendingResult & { expected: null; snapshot: null; imported: true });
 
-export class RetainedRuntimeError extends Error {}
+export class CheckpointRecoveryError extends Error {}
 
 function equivalent(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
   const facts = (s: WorkspaceSnapshot) => JSON.stringify({
@@ -54,6 +54,7 @@ export class WorkspaceCheckpoint {
   readonly directory: string;
   /** True only after a verified snapshot has been written durably on the host. */
   saved = false;
+  private retainStaging = false;
   constructor(workspacePath: string, directory: string) {
     this.workspacePath = workspacePath;
     this.directory = directory;
@@ -80,7 +81,7 @@ export class WorkspaceCheckpoint {
       await this.publish(pending, staged);
     } finally {
       try { if (signal?.aborted && this.saved) await this.discardResult(); }
-      finally { await staged.dispose(); }
+      finally { if (!this.retainStaging) await staged.dispose(); }
     }
   }
 
@@ -92,8 +93,12 @@ export class WorkspaceCheckpoint {
   /** Replay import before retrying the tracker, never before starting another agent. */
   async recover(issueId: string): Promise<string | null> {
     try {
+      const reason = await fs.readFile(path.join(this.directory, "recovery-required.txt"), "utf8");
+      throw new CheckpointRecoveryError(reason);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
       const retained = JSON.parse(await fs.readFile(path.join(this.directory, "runtime.json"), "utf8"));
-      throw new RetainedRuntimeError(`recover runtime ${retained.runtimeId ?? "(no provider id)"} (${retained.provider}); see ${this.directory}`);
+      throw new CheckpointRecoveryError(`recover runtime ${retained.runtimeId ?? "(no provider id)"} (${retained.provider}); see ${this.directory}`);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     let pending: PendingCheckpoint;
     try { pending = JSON.parse(await fs.readFile(this.pendingPath, "utf8")); }
@@ -106,7 +111,7 @@ export class WorkspaceCheckpoint {
     } else if (!pending.imported) {
       const staged = await stageWorkspaceSnapshot(pending.snapshot, this.directory, { expectedBaseCommit: pending.expected.git?.baseCommit ?? null });
       try { await this.publish(pending, staged); }
-      finally { await staged.dispose(); }
+      finally { if (!this.retainStaging) await staged.dispose(); }
     }
     return pending.result;
   }
@@ -227,16 +232,23 @@ export class WorkspaceCheckpoint {
       await this.write({ ...pending, imported: true });
     } catch (error) {
       // Preserve the original directory and journal if rollback itself fails.
-      if (advanced) await git(this.workspacePath, "update-ref", branch, before.headCommit, after.headCommit);
-      if (moved) {
-        const source = published ? this.workspacePath : staged.path;
-        for (const name of kept.reverse()) {
-          await fs.mkdir(path.dirname(path.join(backup, name)), { recursive: true });
-          await fs.rename(path.join(source, name), path.join(backup, name));
+      try {
+        if (advanced) await git(this.workspacePath, "update-ref", branch, before.headCommit, after.headCommit);
+        if (moved) {
+          const source = published ? this.workspacePath : staged.path;
+          for (const name of kept.reverse()) {
+            await fs.mkdir(path.dirname(path.join(backup, name)), { recursive: true });
+            await fs.rename(path.join(source, name), path.join(backup, name));
+          }
+          if (published) await fs.rename(this.workspacePath, staged.path);
+          await fs.rename(backup, this.workspacePath);
+          await fs.writeFile(index, oldIndex);
         }
-        if (published) await fs.rename(this.workspacePath, staged.path);
-        await fs.rename(backup, this.workspacePath);
-        await fs.writeFile(index, oldIndex);
+      } catch (rollback) {
+        this.retainStaging = true;
+        const reason = `checkpoint rollback failed: ${String(rollback)}; recover ${backup}, ${staged.path}, and ${this.workspacePath}; original failure: ${String(error)}`;
+        await fs.writeFile(path.join(this.directory, "recovery-required.txt"), reason);
+        throw new CheckpointRecoveryError(reason);
       }
       throw error;
     } finally { await fs.rm(`${index}.lock`, { force: true }); }

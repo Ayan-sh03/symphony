@@ -13,7 +13,7 @@ import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import type { WorkspaceManager } from "../workspace/manager.ts";
-import { RetainedRuntimeError } from "../workspace/checkpoint.ts";
+import { CheckpointRecoveryError } from "../workspace/checkpoint.ts";
 import type { WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import { renderPrompt, PromptError } from "../prompt/render.ts";
 import { createAgentSession } from "./registry.ts";
@@ -117,7 +117,7 @@ export async function runAgentAttempt(
     await checkpoint.acknowledge();
     if (remote) initial = await checkpoint.snapshot();
     if (stopped) throw new Error("session stopped");
-  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}`, ...(err instanceof RetainedRuntimeError ? { retryable: false as const } : {}) }; }
+  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}`, ...(err instanceof CheckpointRecoveryError ? { retryable: false as const } : {}) }; }
   checkpoint.saved = false;
 
   let execution: ExecutionSession;
@@ -200,7 +200,8 @@ export async function runAgentAttempt(
   } finally {
     const cleanupError = (phase: string, err: unknown) => {
       deps.logger.warn(`${phase} failed`, { issue_id: issue.id, error: String(err) });
-      outcome = { kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
+      outcome = { ...outcome, kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
+      if (err instanceof CheckpointRecoveryError) outcome.retryable = false;
     };
     let agentStopped = true;
     try { await stopAgent(); }
