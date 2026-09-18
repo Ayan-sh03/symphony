@@ -13,6 +13,7 @@ import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import type { WorkspaceManager } from "../workspace/manager.ts";
+import { RetainedRuntimeError } from "../workspace/checkpoint.ts";
 import { renderPrompt, PromptError } from "../prompt/render.ts";
 import { createAgentSession } from "./registry.ts";
 import type { AgentSession } from "./types.ts";
@@ -20,6 +21,8 @@ import type { AgentSession } from "./types.ts";
 export interface WorkerExit {
   kind: "normal" | "abnormal";
   reason?: string;
+  /** The runtime holds the only work copy and needs operator recovery. */
+  retryable?: false;
 }
 
 export interface RunnerDeps {
@@ -89,7 +92,8 @@ export async function runAgentAttempt(
       }
       await checkpoint.acknowledge();
       if (remote) initial = await checkpoint.snapshot();
-  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}` }; }
+  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}`, ...(err instanceof RetainedRuntimeError ? { retryable: false as const } : {}) }; }
+  checkpoint.saved = false;
 
   let execution: ExecutionSession;
   try {
@@ -211,7 +215,10 @@ export async function runAgentAttempt(
       try { await execution.close(); }
       catch (err) { cleanupError("execution close", err); }
     } else {
+      try { await checkpoint.retainRuntime(deps.config.execution.kind, execution.runtimeId); }
+      catch (err) { cleanupError("runtime recovery record", err); }
       cleanupError("runtime preserved", `checkpoint unavailable; recover runtime ${execution.runtimeId}`);
+      outcome.retryable = false;
     }
   }
   return outcome;

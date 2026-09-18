@@ -32,6 +32,8 @@ interface PendingCheckpoint {
   imported: boolean;
 }
 
+export class RetainedRuntimeError extends Error {}
+
 function equivalent(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
   const facts = (s: WorkspaceSnapshot) => JSON.stringify({
     kind: s.kind, head: s.git?.headCommit, index: s.git?.indexPatch.sha256,
@@ -84,6 +86,10 @@ export class WorkspaceCheckpoint {
 
   /** Replay import before retrying the tracker, never before starting another agent. */
   async recover(issueId: string): Promise<string | null> {
+    try {
+      const retained = JSON.parse(await fs.readFile(path.join(this.directory, "runtime.json"), "utf8"));
+      throw new RetainedRuntimeError(`recover runtime ${retained.runtimeId ?? "(no provider id)"} (${retained.provider}); see ${this.directory}`);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     let pending: PendingCheckpoint;
     try { pending = JSON.parse(await fs.readFile(this.pendingPath, "utf8")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
@@ -103,8 +109,15 @@ export class WorkspaceCheckpoint {
   }
 
   async hasPending(): Promise<boolean> {
+    try { await fs.stat(path.join(this.directory, "runtime.json")); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     try { await fs.stat(this.pendingPath); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  }
+
+  async retainRuntime(provider: string, runtimeId: string | null): Promise<void> {
+    await fs.mkdir(this.directory, { recursive: true });
+    await fs.writeFile(path.join(this.directory, "runtime.json"), JSON.stringify({ provider, runtimeId }), { flag: "wx", mode: 0o600 });
   }
 
   private async write(pending: PendingCheckpoint): Promise<void> {
