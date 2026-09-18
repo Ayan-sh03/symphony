@@ -177,7 +177,7 @@ function runnerFixture(t: { after: (fn: () => void) => void }, failure = "") {
 test("runner uses runtime files and awaits stop, after_run, and close", async (t) => {
   const f = runnerFixture(t);
   assert.deepEqual(await runAgentAttempt(issue, null, f.deps), { kind: "normal" });
-  assert.deepEqual(f.events, ["create", "before", "write:SYMPHONY_ISSUE.json", "agent", "start", "turn", "read:SYMPHONY_RESULT.json", "tracker", "remove:SYMPHONY_RESULT.json", "stop", "after", "close"]);
+  assert.deepEqual(f.events, ["create", "remove:SYMPHONY_RESULT.json", "before", "write:SYMPHONY_ISSUE.json", "agent", "start", "turn", "read:SYMPHONY_RESULT.json", "tracker", "remove:SYMPHONY_RESULT.json", "stop", "after", "close"]);
   assert.equal(JSON.parse(f.files.get("SYMPHONY_ISSUE.json")!).id, issue.id);
 });
 

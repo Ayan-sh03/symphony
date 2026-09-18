@@ -144,6 +144,9 @@ export async function runAgentAttempt(
       await execution.importSnapshot!(initial, { expectedBaseCommit: initial.git?.baseCommit ?? null });
       if (stopped) throw new Error("session stopped");
     }
+    // Only the host journal can carry a successful turn's result across attempts.
+    await execution.removeFile!(RESULT_FILE, { force: true });
+    if (stopped) throw new Error("session stopped");
     runtimeMayHaveWork = true;
     if (!await deps.workspaceManager.runBeforeRun(wsPath, execution, cancellation.signal)) {
       throw new Error(stopped ? "session stopped" : "before_run hook error");
@@ -261,7 +264,7 @@ async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: 
   if (signal.aborted) throw new Error("session stopped");
   await applyResult(text, issue, deps);
   await checkpoint.acknowledge();
-  try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
+  await execution.removeFile!(file, { force: true });
 }
 
 /** Remote agents queue their handoff; tracker credentials and mutations stay on the host. */
