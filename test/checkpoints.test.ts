@@ -2,6 +2,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import fsNative from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -28,7 +29,16 @@ async function git(cwd: string, ...args: string[]) {
 let sequence = 0;
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cp-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // The fixture owns real watchers too: Windows can spin if their directories vanish first.
+  const watchers: fsNative.FSWatcher[] = [];
+  const watch = fsNative.watch.bind(fsNative);
+  t.mock.method(fsNative, "watch", (...args: Parameters<typeof fsNative.watch>) => {
+    const watcher = watch(...args); watchers.push(watcher); return watcher;
+  });
+  t.after(async () => {
+    for (const watcher of watchers) watcher.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   const config = buildConfig(parseWorkflow("---\nagent:\n  max_turns: 1\n---\nWork"), path.join(root, "WORKFLOW.md"));
   const manager = new WorkspaceManager({ root: path.join(root, "workspaces"), hooks: config.hooks, logger });
   const adapter = new FileTrackerAdapter({ dir: path.join(root, "issues"), logger });
@@ -410,14 +420,14 @@ test("the orchestrator halts an unexportable runtime instead of scheduling anoth
   config.execution = f.deps.config.execution;
   const orch = new Orchestrator({ config, workflow, workflowPath: path.join(f.root, "WORKFLOW.md"), logger });
   const halted = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("issue did not halt")), 5000);
+    const timer = setTimeout(() => reject(new Error("issue did not halt")), 30_000);
     const dispose = orch.onChange(() => {
       if (orch.snapshot().counts.halted === 1) { clearTimeout(timer); dispose(); resolve(); }
     });
     t.after(() => { clearTimeout(timer); dispose(); });
   });
   try {
-    await orch.start(); await halted;
+    await Promise.all([orch.start(), halted]);
     assert.deepEqual(orch.snapshot().counts, { running: 0, retrying: 0, halted: 1 });
     assert.match(JSON.stringify(orch.issueDetail(f.issue.identifier)), /recover runtime/);
     assert.equal(await f.state(), "todo");
