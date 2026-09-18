@@ -17,6 +17,8 @@ import type { AgentSessionOptions } from "../src/agent/types.ts";
 import { createExecutionSession, registerExecutionProviderFactory } from "../src/execution/registry.ts";
 import type { ExecutionSession } from "../src/execution/types.ts";
 import { importWorkspaceSnapshot } from "../src/workspace/snapshot.ts";
+import { Orchestrator } from "../src/orchestrator/orchestrator.ts";
+import { WorkspaceCheckpoint } from "../src/workspace/checkpoint.ts";
 
 const logger = new Logger([{ name: "null", write() {} }], "error");
 const exec = promisify(execFile);
@@ -352,4 +354,84 @@ test("an operator can stop a pending tracker replay before it changes issue stat
   assert.equal((await f.run()).kind, "abnormal");
   assert.equal(await f.state(), "todo");
   assert.equal(f.turns, 1);
+});
+
+test("a corrupt export cannot complete or destroy the runtime's only copy", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  r.behavior.configure = (session) => {
+    const original = session.exportSnapshot!.bind(session);
+    session.exportSnapshot = async (opts) => {
+      const snapshot = await original(opts);
+      const work = snapshot.entries.find((e) => e.path === "work.txt");
+      assert.ok(work?.type === "file");
+      work.content.data = Buffer.from("corrupt transport").toString("base64");
+      return snapshot;
+    };
+  };
+  assert.equal((await f.run()).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  await assert.rejects(fs.stat(path.join(f.workspace, "work.txt")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "finished work\n");
+});
+
+test("a failed host journal write retains the runtime instead of trusting an unsaved export", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  const turn = f.behavior.turn;
+  f.behavior.turn = async (opts) => {
+    await turn(opts);
+    await fs.mkdir(path.join(f.manager.checkpointFor(f.issue.identifier).directory, "pending.json"), { recursive: true });
+  };
+  assert.equal((await f.run()).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "finished work\n");
+});
+
+test("after_run output reaches the host before remote completion", async (t) => {
+  const f = await fixture(t);
+  await remote(f);
+  f.deps.config.hooks.after_run = `"${process.execPath}" -e "require('fs').writeFileSync('hook.txt','hook output')"`;
+  const apply = f.adapter.executeAgentTool.bind(f.adapter);
+  f.adapter.executeAgentTool = async (...args) => {
+    assert.equal(await fs.readFile(path.join(f.workspace, "hook.txt"), "utf8"), "hook output");
+    return apply(...args);
+  };
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  assert.equal(await f.state(), "done");
+});
+
+test("the orchestrator halts an unexportable runtime instead of scheduling another paid attempt", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  r.behavior.configure = (session) => { session.exportSnapshot = async () => { throw new Error("disconnected"); }; };
+  const workflow = parseWorkflow(`---\ntracker:\n  kind: file\n  provider:\n    dir: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nworkspace:\n  root: ./workspaces\nagent:\n  kind: ${f.deps.agentKind}\n---\nWork`);
+  const config = buildConfig(workflow, path.join(f.root, "WORKFLOW.md"));
+  config.execution = f.deps.config.execution;
+  const orch = new Orchestrator({ config, workflow, workflowPath: path.join(f.root, "WORKFLOW.md"), logger });
+  const halted = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("issue did not halt")), 5000);
+    const dispose = orch.onChange(() => {
+      if (orch.snapshot().counts.halted === 1) { clearTimeout(timer); dispose(); resolve(); }
+    });
+    t.after(() => { clearTimeout(timer); dispose(); });
+  });
+  try {
+    await orch.start(); await halted;
+    assert.deepEqual(orch.snapshot().counts, { running: 0, retrying: 0, halted: 1 });
+    assert.match(JSON.stringify(orch.issueDetail(f.issue.identifier)), /recover runtime/);
+    assert.equal(await f.state(), "todo");
+    assert.equal(r.runtimes.length, 1);
+    assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "finished work\n");
+  } finally { await orch.stop(); }
+});
+
+test("Git checkpoints support long storage paths on Windows", async (t) => {
+  const f = await fixture(t);
+  await repository(f);
+  const checkpoint = new WorkspaceCheckpoint(f.workspace, path.join(f.root, "nested-project-".repeat(10)));
+  const snapshot = await checkpoint.snapshot();
+  await checkpoint.commit(f.issue.id, snapshot, snapshot, '{"state":"done"}');
+  assert.equal(await checkpoint.recover(f.issue.id), '{"state":"done"}');
+  assert.equal(await git(f.workspace, "show", "HEAD:tracked.txt"), "base");
 });
