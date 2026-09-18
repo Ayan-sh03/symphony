@@ -6,7 +6,7 @@
  *
  * Agent-backend-neutral: it depends only on the {@link AgentSession} interface.
  */
-import { createExecutionSession, requireExecutionCapabilities } from "../execution/registry.ts";
+import { createExecutionSession, requireExecutionCapabilities, supportsExecutionCapability } from "../execution/registry.ts";
 import type { ExecutionSession } from "../execution/types.ts";
 import type { Issue, AgentUpdate } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
@@ -80,7 +80,11 @@ export async function runAgentAttempt(
   }
   const wsPath = workspace.path;
   const branch = deps.workspaceManager.deliveryBranchFor(deps.stream);
-  const remote = deps.config.execution.kind !== "local";
+  let remote: boolean;
+  try {
+    remote = !supportsExecutionCapability(deps.config.execution.kind, "host-workspace");
+    requireExecutionCapabilities(deps.config.execution.kind, remote ? ["process", "filesystem", "workspace-snapshot"] : ["process", "filesystem"]);
+  } catch (err) { return { kind: "abnormal", reason: `execution startup error: ${String(err)}` }; }
   const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
   let initial;
   try {
@@ -97,8 +101,6 @@ export async function runAgentAttempt(
 
   let execution: ExecutionSession;
   try {
-    requireExecutionCapabilities(deps.config.execution.kind, ["process", "filesystem"]);
-    if (remote) requireExecutionCapabilities(deps.config.execution.kind, ["workspace-snapshot"]);
     execution = await createExecutionSession(deps.config.execution.kind, deps.config.execution.provider, {
       workspacePath: wsPath, env: deps.childEnv, logger: deps.logger,
     });
