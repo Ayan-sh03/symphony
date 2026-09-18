@@ -161,3 +161,21 @@ test("Git checkpoint retains the delivery worktree, commits, index, dirty bytes,
   assert.match(await git(repo, "worktree", "list", "--porcelain"), /branch refs\/heads\/issue\/T-32/);
   assert.equal(await git(repo, "show", "main:tracked.txt"), "base");
 });
+
+for (const execution of ["local", "remote"]) {
+  test(`${execution} tracker retry uses the saved result without rerunning the agent`, async (t) => {
+    const f = await fixture(t);
+    if (execution === "remote") await remote(f);
+    const apply = f.adapter.executeAgentTool.bind(f.adapter);
+    f.adapter.executeAgentTool = async () => { throw new Error("tracker disconnected"); };
+    assert.equal((await f.run()).kind, "abnormal");
+    assert.equal(await f.state(), "todo");
+    // An agent rerun would destroy the checkpoint; recovery must finish its handoff first.
+    f.behavior.turn = async () => { throw new Error("must not rerun completed work"); };
+    f.adapter.executeAgentTool = apply;
+    assert.deepEqual(await f.run(), { kind: "normal" });
+    assert.equal(await f.state(), "done");
+    assert.equal(f.turns, 1);
+    assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "finished work\n");
+  });
+}
