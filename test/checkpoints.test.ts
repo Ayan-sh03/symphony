@@ -226,3 +226,19 @@ test("remote tracker tools cannot complete an issue ahead of a verified checkpoi
   assert.equal(await f.state(), "todo");
   assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "only remote copy");
 });
+
+test("failed export retains the runtime, blocks replacement attempts, and prevents workspace cleanup", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  r.behavior.configure = (session) => { session.exportSnapshot = async () => { throw new Error("export disconnected"); }; };
+  const outcome = await f.run();
+  assert.equal(outcome.kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "finished work\n");
+  await f.manager.cleanupForIssue(f.issue.identifier);
+  assert.ok((await fs.stat(f.workspace)).isDirectory());
+  const retry = await f.run();
+  assert.equal(retry.kind, "abnormal");
+  assert.match(retry.reason!, /recover runtime/);
+  assert.equal(r.runtimes.length, 1, "do not create abandoned runtimes on automatic or manual retries");
+});
