@@ -16,6 +16,7 @@ import { FileTrackerAdapter } from "../src/tracker/fileAdapter.ts";
 import type { AgentSessionOptions } from "../src/agent/types.ts";
 import { createExecutionSession, registerExecutionProviderFactory } from "../src/execution/registry.ts";
 import type { ExecutionSession } from "../src/execution/types.ts";
+import { importWorkspaceSnapshot } from "../src/workspace/snapshot.ts";
 
 const logger = new Logger([{ name: "null", write() {} }], "error");
 const exec = promisify(execFile);
@@ -241,4 +242,31 @@ test("failed export retains the runtime, blocks replacement attempts, and preven
   assert.equal(retry.kind, "abnormal");
   assert.match(retry.reason!, /recover runtime/);
   assert.equal(r.runtimes.length, 1, "do not create abandoned runtimes on automatic or manual retries");
+});
+
+test("failed turns preserve recoverable work while the next attempt starts from the last successful checkpoint", async (t) => {
+  const f = await fixture(t);
+  await remote(f);
+  f.behavior.turn = async (opts) => { await opts.execution.writeFile!("work.txt", "checkpoint one"); };
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  f.behavior.turn = async (opts) => {
+    assert.equal(Buffer.from(await opts.execution.readFile!("work.txt")).toString(), "checkpoint one");
+    await opts.execution.writeFile!("work.txt", "unfinished but valuable");
+    await opts.execution.writeFile!(RESULT_FILE, '{"state":"done"}');
+    throw new Error("agent failed before completing its turn");
+  };
+  const failed = await f.run();
+  assert.equal(failed.kind, "abnormal");
+  const directory = f.manager.checkpointFor(f.issue.identifier).directory;
+  const recovery = (await fs.readdir(directory)).find((name) => name.startsWith("recovery-"));
+  assert.ok(recovery, "the failed turn's unique work must remain recoverable");
+  const recovered = path.join(f.root, "recovered");
+  await importWorkspaceSnapshot(recovered, JSON.parse(await fs.readFile(path.join(directory, recovery), "utf8")), { expectedBaseCommit: null });
+  assert.equal(await fs.readFile(path.join(recovered, "work.txt"), "utf8"), "unfinished but valuable");
+  f.behavior.turn = async (opts) => {
+    assert.equal(Buffer.from(await opts.execution.readFile!("work.txt")).toString(), "checkpoint one");
+    await assert.rejects(opts.execution.readFile!(RESULT_FILE), { code: "ENOENT" });
+  };
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  assert.equal(await f.state(), "todo");
 });
