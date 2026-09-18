@@ -435,3 +435,27 @@ test("Git checkpoints support long storage paths on Windows", async (t) => {
   assert.equal(await checkpoint.recover(f.issue.id), '{"state":"done"}');
   assert.equal(await git(f.workspace, "show", "HEAD:tracked.txt"), "base");
 });
+
+test("a failed publication and rollback retain ignored host files in staging for recovery", async (t) => {
+  const f = await fixture(t);
+  await repository(f);
+  await remote(f);
+  await fs.writeFile(path.join(f.workspace, ".env"), "irreplaceable host secret");
+  const rename = fs.rename.bind(fs);
+  let retained = "";
+  t.mock.method(fs, "rename", async (from: string, to: string) => {
+    // A destination lock followed by a rollback lock: both are real filesystem failure modes.
+    if (String(from).includes(".symphony-snapshot-") && String(from).endsWith(`${path.sep}workspace`) && to === f.workspace) {
+      retained = String(from);
+      throw Object.assign(new Error("publish destination busy"), { code: "EBUSY" });
+    }
+    if (String(from).endsWith(`${path.sep}.env`) && String(to).includes(`${path.sep}previous${path.sep}`)) {
+      throw Object.assign(new Error("rollback destination busy"), { code: "EBUSY" });
+    }
+    return rename(from, to);
+  });
+  assert.equal((await f.run()).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.ok(retained);
+  assert.equal(await fs.readFile(path.join(retained, ".env"), "utf8"), "irreplaceable host secret");
+});
