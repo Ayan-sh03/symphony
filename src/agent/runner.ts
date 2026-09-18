@@ -206,15 +206,8 @@ async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: 
     try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
     return;
   }
-  try {
-    const res = await deps.adapter.executeAgentTool("set_issue_result", parsed, { issue });
-    deps.logger.info("applied agent result", {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      success: res.success,
-    });
-  } catch (err) {
-    deps.logger.warn("failed to apply agent result", { issue_id: issue.id, error: String(err) });
-  }
+  const res = await deps.adapter.executeAgentTool("set_issue_result", parsed, { issue });
+  if (!res.success) throw new Error(`failed to apply agent result: ${JSON.stringify(res.output)}`);
+  deps.logger.info("applied agent result", { issue_id: issue.id, issue_identifier: issue.identifier });
   try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
 }
