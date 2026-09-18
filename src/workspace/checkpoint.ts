@@ -120,6 +120,20 @@ export class WorkspaceCheckpoint {
     await fs.writeFile(path.join(this.directory, "runtime.json"), JSON.stringify({ provider, runtimeId }), { flag: "wx", mode: 0o600 });
   }
 
+  /** Failed/cancelled turns are recoverable artifacts, never the next attempt's baseline. */
+  async preserve(snapshot: WorkspaceSnapshot, expectedBaseCommit: string | null): Promise<string> {
+    await fs.mkdir(this.directory, { recursive: true });
+    const staged = await stageWorkspaceSnapshot(snapshot, this.directory, { expectedBaseCommit });
+    try {
+      const location = path.join(this.directory, `recovery-${randomUUID()}.json`);
+      const handle = await fs.open(location, "wx", 0o600);
+      try { await handle.writeFile(JSON.stringify(snapshot)); await handle.sync(); }
+      finally { await handle.close(); }
+      this.saved = true;
+      return location;
+    } finally { await staged.dispose(); }
+  }
+
   private async write(pending: PendingCheckpoint): Promise<void> {
     const temp = path.join(this.directory, `${randomUUID()}.tmp`);
     const handle = await fs.open(temp, "wx", 0o600);

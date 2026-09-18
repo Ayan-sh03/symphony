@@ -111,6 +111,7 @@ export async function runAgentAttempt(
   let stopping: Promise<void> | undefined;
   let afterRun = false;
   let turnCompleted = false;
+  let runtimeMayHaveWork = false;
   let result: string | null = null;
   const cancellation = new AbortController();
   let outcome: WorkerExit = { kind: "normal" };
@@ -137,6 +138,7 @@ export async function runAgentAttempt(
       await execution.importSnapshot!(initial, { expectedBaseCommit: initial.git?.baseCommit ?? null });
       if (stopped) throw new Error("session stopped");
     }
+    runtimeMayHaveWork = true;
     if (!await deps.workspaceManager.runBeforeRun(wsPath, execution, cancellation.signal)) {
       throw new Error(stopped ? "session stopped" : "before_run hook error");
     }
@@ -202,16 +204,21 @@ export async function runAgentAttempt(
       try { await deps.workspaceManager.runAfterRun(wsPath, execution); }
       catch (err) { deps.logger.warn("after_run failed", { issue_id: issue.id, error: String(err) }); }
     }
-    if (remote && turnCompleted && agentStopped) {
+    if (remote && runtimeMayHaveWork && agentStopped) {
       try {
         const snapshot = await execution.exportSnapshot!(initial!.git ? { baseCommit: initial!.git.baseCommit } : {});
-        await checkpoint.commit(issue.id, initial!, snapshot, result, cancellation.signal);
-        if (stopped) throw new Error("session stopped");
-        if (result !== null) await applyResult(result, issue, deps);
-        await checkpoint.acknowledge();
+        if (turnCompleted) {
+          await checkpoint.commit(issue.id, initial!, snapshot, result, cancellation.signal);
+          if (stopped) throw new Error("session stopped");
+          if (result !== null) await applyResult(result, issue, deps);
+          await checkpoint.acknowledge();
+        } else {
+          const location = await checkpoint.preserve(snapshot, initial!.git?.baseCommit ?? null);
+          deps.logger.warn("unfinished work saved for recovery", { issue_id: issue.id, path: location });
+        }
       } catch (err) { cleanupError("checkpoint", err); }
     }
-    if (!remote || !turnCompleted || checkpoint.saved) {
+    if (!remote || !runtimeMayHaveWork || checkpoint.saved) {
       try { await execution.close(); }
       catch (err) { cleanupError("execution close", err); }
     } else {
