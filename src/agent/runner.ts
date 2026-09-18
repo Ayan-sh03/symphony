@@ -77,10 +77,26 @@ export async function runAgentAttempt(
   }
   const wsPath = workspace.path;
   const branch = deps.workspaceManager.deliveryBranchFor(deps.stream);
+  const remote = deps.config.execution.kind !== "local";
+  const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
+  let initial;
+  if (remote) {
+    try {
+      const pending = await checkpoint.recover(issue.id);
+      if (pending !== null) {
+        await applyResult(pending, issue, deps);
+        await checkpoint.acknowledge();
+        return { kind: "normal" };
+      }
+      await checkpoint.acknowledge();
+      initial = await checkpoint.snapshot();
+    } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}` }; }
+  }
 
   let execution: ExecutionSession;
   try {
     requireExecutionCapabilities(deps.config.execution.kind, ["process", "filesystem"]);
+    if (remote) requireExecutionCapabilities(deps.config.execution.kind, ["workspace-snapshot"]);
     execution = await createExecutionSession(deps.config.execution.kind, deps.config.execution.provider, {
       workspacePath: wsPath, env: deps.childEnv, logger: deps.logger,
     });
@@ -92,6 +108,8 @@ export async function runAgentAttempt(
   let stopped = false;
   let stopping: Promise<void> | undefined;
   let afterRun = false;
+  let turnCompleted = false;
+  let result: string | null = null;
   const cancellation = new AbortController();
   let outcome: WorkerExit = { kind: "normal" };
   // One stop operation shared by cancellation and final cleanup. Keep rejection
@@ -110,6 +128,10 @@ export async function runAgentAttempt(
     if (!execution.workspacePath) throw new Error("execution session lacks workspacePath");
     deps.onSessionReady(stop);
     if (stopped) throw new Error("session stopped");
+    if (initial) {
+      await execution.importSnapshot!(initial, { expectedBaseCommit: initial.git?.baseCommit ?? null });
+      if (stopped) throw new Error("session stopped");
+    }
     if (!await deps.workspaceManager.runBeforeRun(wsPath, execution, cancellation.signal)) {
       throw new Error(stopped ? "session stopped" : "before_run hook error");
     }
@@ -143,6 +165,11 @@ export async function runAgentAttempt(
       if (turnResult.status !== "completed") {
         throw new Error(`agent turn ${turnResult.status}: ${turnResult.error ?? ""}`);
       }
+      if (remote) {
+        result = await readResultFile(execution);
+        turnCompleted = true;
+        break; // Checkpoint only after all runtime writers have stopped.
+      }
       await applyResultFile(execution, issue, deps, cancellation.signal);
       if (stopped) throw new Error("session stopped");
       const refreshed = await deps.adapter.fetchIssuesByIds([issue.id]);
@@ -161,6 +188,7 @@ export async function runAgentAttempt(
       deps.logger.warn(`${phase} failed`, { issue_id: issue.id, error: String(err) });
       outcome = { kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
     };
+    const cancelled = stopped;
     let agentStopped = true;
     try { await stop(); }
     catch (err) { agentStopped = false; cleanupError("agent stop", err); }
@@ -169,8 +197,20 @@ export async function runAgentAttempt(
       try { await deps.workspaceManager.runAfterRun(wsPath, execution); }
       catch (err) { deps.logger.warn("after_run failed", { issue_id: issue.id, error: String(err) }); }
     }
-    try { await execution.close(); }
-    catch (err) { cleanupError("execution close", err); }
+    if (remote && turnCompleted && agentStopped && !cancelled) {
+      try {
+        const snapshot = await execution.exportSnapshot!(initial!.git ? { baseCommit: initial!.git.baseCommit } : {});
+        await checkpoint.commit(issue.id, initial!, snapshot, result);
+        if (result !== null) await applyResult(result, issue, deps);
+        await checkpoint.acknowledge();
+      } catch (err) { cleanupError("checkpoint", err); }
+    }
+    if (!remote || !turnCompleted || checkpoint.saved) {
+      try { await execution.close(); }
+      catch (err) { cleanupError("execution close", err); }
+    } else {
+      cleanupError("runtime preserved", `checkpoint unavailable; recover runtime ${execution.runtimeId}`);
+    }
   }
   return outcome;
 }
@@ -190,24 +230,31 @@ function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number):
  */
 async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps, signal: AbortSignal): Promise<void> {
   const file = RESULT_FILE;
-  let text: string;
+  const text = await readResultFile(execution);
+  if (text === null) return;
+  if (signal.aborted) throw new Error("session stopped");
+  await applyResult(text, issue, deps);
+  try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
+}
+
+async function readResultFile(execution: ExecutionSession): Promise<string | null> {
   try {
-    text = Buffer.from(await execution.readFile!(file)).toString("utf8");
+    return Buffer.from(await execution.readFile!(RESULT_FILE)).toString("utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // no result this turn
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  if (signal.aborted) throw new Error("session stopped");
+}
+
+async function applyResult(text: string, issue: Issue, deps: RunnerDeps): Promise<void> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     deps.logger.warn("invalid result file ignored", { issue_id: issue.id, issue_identifier: issue.identifier });
-    try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
     return;
   }
   const res = await deps.adapter.executeAgentTool("set_issue_result", parsed, { issue });
   if (!res.success) throw new Error(`failed to apply agent result: ${JSON.stringify(res.output)}`);
   deps.logger.info("applied agent result", { issue_id: issue.id, issue_identifier: issue.identifier });
-  try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
 }
