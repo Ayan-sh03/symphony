@@ -71,6 +71,23 @@ export async function runAgentAttempt(
   const log = (msg: string, extra: Record<string, unknown> = {}) =>
     deps.logger.info(msg, { issue_id: issue.id, issue_identifier: issue.identifier, ...extra });
 
+  let session: AgentSession | undefined;
+  let stopped = false;
+  let stopping: Promise<void> | undefined;
+  const cancellation = new AbortController();
+  const stopAgent = (): Promise<void> => {
+    stopping ??= Promise.resolve().then(() => session?.stop());
+    void stopping.catch(() => {});
+    return stopping;
+  };
+  const stop = (): Promise<void> => {
+    stopped = true;
+    cancellation.abort();
+    return stopAgent();
+  };
+  deps.onSessionReady(stop);
+  if (stopped) return { kind: "abnormal", reason: "session stopped" };
+
   // 1. Workspace (the stream's, which for a follow-up is the parent's worktree)
   let workspace;
   try {
@@ -89,6 +106,7 @@ export async function runAgentAttempt(
   let initial;
   try {
       const pending = await checkpoint.recover(issue.id);
+      if (stopped) throw new Error("session stopped");
       if (pending !== null) {
         await applyResult(pending, issue, deps);
         await checkpoint.acknowledge();
@@ -108,33 +126,16 @@ export async function runAgentAttempt(
     return { kind: "abnormal", reason: `execution startup error: ${String(err)}` };
   }
 
-  let session: AgentSession | undefined;
-  let stopped = false;
-  let stopping: Promise<void> | undefined;
   let afterRun = false;
   let turnCompleted = false;
   let runtimeMayHaveWork = false;
   let result: string | null = null;
-  const cancellation = new AbortController();
   let outcome: WorkerExit = { kind: "normal" };
-  // One stop operation shared by cancellation and final cleanup. Keep rejection
-  // observed here; final cleanup reports it in the worker outcome.
-  const stopAgent = (): Promise<void> => {
-    stopping ??= Promise.resolve().then(() => session?.stop());
-    void stopping.catch(() => {});
-    return stopping;
-  };
-  const stop = (): Promise<void> => {
-    stopped = true;
-    cancellation.abort();
-    return stopAgent();
-  };
   try {
     for (const method of ["spawn", "readFile", "writeFile", "removeFile"] as const) {
       if (typeof execution[method] !== "function") throw new Error(`execution session lacks ${method}`);
     }
     if (!execution.workspacePath) throw new Error("execution session lacks workspacePath");
-    deps.onSessionReady(stop);
     if (stopped) throw new Error("session stopped");
     if (initial) {
       await execution.importSnapshot!(initial, { expectedBaseCommit: initial.git?.baseCommit ?? null });
