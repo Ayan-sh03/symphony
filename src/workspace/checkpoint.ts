@@ -36,7 +36,7 @@ export class RetainedRuntimeError extends Error {}
 
 function equivalent(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
   const facts = (s: WorkspaceSnapshot) => JSON.stringify({
-    kind: s.kind, head: s.git?.headCommit, index: s.git?.indexPatch.sha256,
+    kind: s.kind, head: s.git?.headCommit, branch: s.git?.branch, index: s.git?.indexPatch.sha256,
     entries: checkpointFiles(s).entries.map((e) => process.platform === "win32" && e.type === "directory"
       ? { ...e, mode: 0 } : e).sort((x, y) => x.path.localeCompare(y.path)),
   });
@@ -95,7 +95,10 @@ export class WorkspaceCheckpoint {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
     if (pending.version !== 1 || pending.issueId !== issueId) throw new Error("checkpoint belongs to another issue or has an unsupported version");
     this.saved = true;
-    if (!pending.imported) {
+    if (pending.imported && pending.snapshot) {
+      const current = await exportWorkspaceSnapshot(this.workspacePath, pending.expected?.git ? { baseCommit: pending.expected.git.baseCommit } : {});
+      if (!equivalent(current, pending.snapshot)) throw new Error("imported checkpoint no longer matches host workspace; result remains pending");
+    } else if (!pending.imported) {
       const staged = await stageWorkspaceSnapshot(pending.snapshot, this.directory, { expectedBaseCommit: pending.expected!.git?.baseCommit ?? null });
       try { await this.publish(pending, staged); }
       finally { await staged.dispose(); }
