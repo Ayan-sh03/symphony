@@ -209,3 +209,20 @@ test("Stop during checkpoint export preserves work without applying its completi
   await f.run();
   assert.equal(await f.state(), "todo", "cancelled completion must not be replayed");
 });
+
+test("remote tracker tools cannot complete an issue ahead of a verified checkpoint", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  r.behavior.configure = (session) => { session.exportSnapshot = async () => { throw new Error("export disconnected"); }; };
+  f.behavior.turn = async (opts) => {
+    await opts.execution.writeFile!("work.txt", "only remote copy");
+    const write = await opts.adapter.executeAgentTool("update_issue_state", { state: "done" }, { issue: f.issue });
+    assert.equal(write.success, false, "direct mutations must be refused while work is remote");
+    const queued = await opts.adapter.executeAgentTool("set_issue_result", { state: "done", comment: "complete" }, { issue: f.issue });
+    assert.equal(queued.success, true);
+    assert.equal(await f.state(), "todo");
+  };
+  assert.equal((await f.run()).kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.equal(await fs.readFile(path.join(r.runtimes[0]!, "work.txt"), "utf8"), "only remote copy");
+});
