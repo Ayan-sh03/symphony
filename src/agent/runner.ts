@@ -80,8 +80,7 @@ export async function runAgentAttempt(
   const remote = deps.config.execution.kind !== "local";
   const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
   let initial;
-  if (remote) {
-    try {
+  try {
       const pending = await checkpoint.recover(issue.id);
       if (pending !== null) {
         await applyResult(pending, issue, deps);
@@ -89,9 +88,8 @@ export async function runAgentAttempt(
         return { kind: "normal" };
       }
       await checkpoint.acknowledge();
-      initial = await checkpoint.snapshot();
-    } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}` }; }
-  }
+      if (remote) initial = await checkpoint.snapshot();
+  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}` }; }
 
   let execution: ExecutionSession;
   try {
@@ -233,7 +231,11 @@ async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: 
   const text = await readResultFile(execution);
   if (text === null) return;
   if (signal.aborted) throw new Error("session stopped");
+  const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
+  await checkpoint.saveResult(issue.id, text);
+  if (signal.aborted) throw new Error("session stopped");
   await applyResult(text, issue, deps);
+  await checkpoint.acknowledge();
   try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
 }
 

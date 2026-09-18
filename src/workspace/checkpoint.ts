@@ -26,8 +26,8 @@ export function checkpointFiles(snapshot: WorkspaceSnapshot): WorkspaceSnapshot 
 interface PendingCheckpoint {
   version: 1;
   issueId: string;
-  expected: WorkspaceSnapshot;
-  snapshot: WorkspaceSnapshot;
+  expected: WorkspaceSnapshot | null;
+  snapshot: WorkspaceSnapshot | null;
   result: string | null;
   imported: boolean;
 }
@@ -57,6 +57,11 @@ export class WorkspaceCheckpoint {
     return checkpointFiles(await exportWorkspaceSnapshot(this.workspacePath));
   }
 
+  async saveResult(issueId: string, result: string): Promise<void> {
+    await fs.mkdir(this.directory, { recursive: true });
+    await this.write({ version: 1, issueId, expected: null, snapshot: null, result, imported: true });
+  }
+
   async commit(issueId: string, expected: WorkspaceSnapshot, snapshot: WorkspaceSnapshot, result: string | null): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true });
     snapshot = checkpointFiles(snapshot);
@@ -77,7 +82,7 @@ export class WorkspaceCheckpoint {
     if (pending.version !== 1 || pending.issueId !== issueId) throw new Error("checkpoint belongs to another issue or has an unsupported version");
     this.saved = true;
     if (!pending.imported) {
-      const staged = await stageWorkspaceSnapshot(pending.snapshot, this.directory, { expectedBaseCommit: pending.expected.git?.baseCommit ?? null });
+      const staged = await stageWorkspaceSnapshot(pending.snapshot, this.directory, { expectedBaseCommit: pending.expected!.git?.baseCommit ?? null });
       try { await this.publish(pending, staged); }
       finally { await staged.dispose(); }
     }
@@ -105,12 +110,12 @@ export class WorkspaceCheckpoint {
 
   private async publish(pending: PendingCheckpoint, staged: StagedWorkspaceSnapshot): Promise<void> {
     const current = checkpointFiles(await exportWorkspaceSnapshot(this.workspacePath,
-      pending.expected.git ? { baseCommit: pending.expected.git.baseCommit } : {}));
-    if (equivalent(current, pending.snapshot)) {
+      pending.expected!.git ? { baseCommit: pending.expected!.git.baseCommit } : {}));
+    if (equivalent(current, pending.snapshot!)) {
       await this.write({ ...pending, imported: true });
       return;
     }
-    if (!equivalent(current, pending.expected)) throw new Error("host workspace changed since dispatch; checkpoint retained for recovery");
+    if (!equivalent(current, pending.expected!)) throw new Error("host workspace changed since dispatch; checkpoint retained for recovery");
     if (current.git) {
       await this.publishGit(pending, staged);
       return;
@@ -124,14 +129,14 @@ export class WorkspaceCheckpoint {
       throw error;
     }
     const imported = await this.snapshot();
-    if (!equivalent(imported, pending.snapshot)) throw new Error("checkpoint verification failed; previous workspace retained");
+    if (!equivalent(imported, pending.snapshot!)) throw new Error("checkpoint verification failed; previous workspace retained");
     await this.write({ ...pending, imported: true });
     await fs.rm(backup, { recursive: true, force: true });
   }
 
   private async publishGit(pending: PendingCheckpoint, staged: StagedWorkspaceSnapshot): Promise<void> {
-    const before = pending.expected.git!;
-    const after = pending.snapshot.git!;
+    const before = pending.expected!.git!;
+    const after = pending.snapshot!.git!;
     const branch = await git(this.workspacePath, "symbolic-ref", "HEAD");
     if (branch !== `refs/heads/${before.branch}`) throw new Error("host delivery branch changed since dispatch");
     // Include staged-but-uncommitted blobs, which fetching HEAD alone would lose.
@@ -145,7 +150,7 @@ export class WorkspaceCheckpoint {
     const ignored = (await git(this.workspacePath, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"))
       .split("\0").filter(Boolean).map((p) => p.replace(/\/$/, "")).filter((p) => !SCRATCH.has(p));
     for (const name of ignored) {
-      if (pending.snapshot.entries.some((e) => e.path === name || e.path.startsWith(`${name}/`) || name.startsWith(`${e.path}/`) && e.type !== "directory")) {
+      if (pending.snapshot!.entries.some((e) => e.path === name || e.path.startsWith(`${name}/`) || name.startsWith(`${e.path}/`) && e.type !== "directory")) {
         throw new Error(`checkpoint conflicts with ignored host file: ${name}`);
       }
     }
@@ -175,7 +180,7 @@ export class WorkspaceCheckpoint {
       advanced = true;
       await fs.writeFile(index, newIndex);
       const verified = checkpointFiles(await exportWorkspaceSnapshot(this.workspacePath, { baseCommit: before.baseCommit }));
-      if (!equivalent(verified, pending.snapshot)) throw new Error("Git checkpoint verification failed");
+      if (!equivalent(verified, pending.snapshot!)) throw new Error("Git checkpoint verification failed");
       await this.write({ ...pending, imported: true });
     } catch (error) {
       // Preserve the original directory and journal if rollback itself fails.
