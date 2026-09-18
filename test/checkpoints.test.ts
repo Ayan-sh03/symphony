@@ -270,3 +270,73 @@ test("failed turns preserve recoverable work while the next attempt starts from 
   assert.deepEqual(await f.run(), { kind: "normal" });
   assert.equal(await f.state(), "todo");
 });
+
+test("host edits block import without losing either copy, and retry imports before rerunning work", async (t) => {
+  const f = await fixture(t);
+  const r = await remote(f);
+  await f.manager.createForIssue(f.issue.identifier);
+  await fs.writeFile(path.join(f.workspace, "work.txt"), "original");
+  f.behavior.turn = async (opts) => {
+    await opts.execution.writeFile!("work.txt", "remote change");
+    await opts.execution.writeFile!(RESULT_FILE, '{"state":"done"}');
+    await fs.writeFile(path.join(f.workspace, "work.txt"), "operator edit");
+  };
+  const first = await f.run();
+  assert.equal(first.kind, "abnormal");
+  assert.match(first.reason!, /host workspace changed/);
+  assert.equal(await f.state(), "todo");
+  await f.manager.cleanupForIssue(f.issue.identifier);
+  assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "operator edit");
+  await assert.rejects(fs.stat(r.runtimes[0]!), { code: "ENOENT" });
+  await fs.writeFile(path.join(f.workspace, "work.txt"), "original");
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  assert.equal(f.turns, 1);
+  assert.equal(await f.state(), "done");
+  assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "remote change");
+});
+
+test("a locked delivery ref rolls back Git publication, then a retry restores the checkpoint", async (t) => {
+  const f = await fixture(t);
+  const repo = await repository(f);
+  await remote(f);
+  const base = await git(f.workspace, "rev-parse", "HEAD");
+  const refLock = path.join(repo, ".git", "refs", "heads", "issue", "T-32.lock");
+  await fs.writeFile(path.join(f.workspace, ".env"), "host only");
+  f.behavior.turn = async (opts) => {
+    await git(opts.workspacePath, "config", "user.name", "test");
+    await git(opts.workspacePath, "config", "user.email", "test@example.com");
+    await opts.execution.writeFile!("tracked.txt", "remote commit\n");
+    await git(opts.workspacePath, "add", "tracked.txt");
+    await git(opts.workspacePath, "commit", "-qm", "remote work");
+    await opts.execution.writeFile!(RESULT_FILE, '{"state":"done"}');
+    await fs.writeFile(refLock, "another writer");
+  };
+  const first = await f.run();
+  assert.equal(first.kind, "abnormal");
+  assert.match(first.reason!, /cannot lock ref/);
+  assert.equal(await f.state(), "todo");
+  assert.equal(await git(f.workspace, "rev-parse", "HEAD"), base);
+  assert.equal(await git(f.workspace, "show", ":tracked.txt"), "base");
+  assert.equal(await fs.readFile(path.join(f.workspace, "tracked.txt"), "utf8"), "base\n");
+  assert.equal(await fs.readFile(path.join(f.workspace, ".env"), "utf8"), "host only");
+  await fs.rm(refLock);
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  assert.equal(f.turns, 1);
+  assert.equal(await f.state(), "done");
+  assert.equal(await git(f.workspace, "show", ":tracked.txt"), "remote commit");
+});
+
+test("a tracker retry rechecks imported work before marking it complete", async (t) => {
+  const f = await fixture(t);
+  await remote(f);
+  const apply = f.adapter.executeAgentTool.bind(f.adapter);
+  f.adapter.executeAgentTool = async () => ({ success: false, output: "tracker offline" });
+  assert.equal((await f.run()).kind, "abnormal");
+  await fs.writeFile(path.join(f.workspace, "work.txt"), "operator replacement");
+  f.adapter.executeAgentTool = apply;
+  const retry = await f.run();
+  assert.equal(retry.kind, "abnormal");
+  assert.equal(await f.state(), "todo");
+  assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "operator replacement");
+  assert.equal(f.turns, 1);
+});
