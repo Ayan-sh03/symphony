@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { buildConfig } from "../src/config/config.ts";
 import { parseWorkflow } from "../src/workflow/loader.ts";
 import { Logger } from "../src/logger.ts";
@@ -16,9 +18,13 @@ import { createExecutionSession, registerExecutionProviderFactory } from "../src
 import type { ExecutionSession } from "../src/execution/types.ts";
 
 const logger = new Logger([{ name: "null", write() {} }], "error");
+const exec = promisify(execFile);
+async function git(cwd: string, ...args: string[]) {
+  return (await exec("git", ["-c", "core.autocrlf=false", "-C", cwd, ...args], { encoding: "utf8" })).stdout.trimEnd();
+}
 let sequence = 0;
 async function fixture(t: TestContext) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sym-checkpoint-test-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cp-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = buildConfig(parseWorkflow("---\nagent:\n  max_turns: 1\n---\nWork"), path.join(root, "WORKFLOW.md"));
   const manager = new WorkspaceManager({ root: path.join(root, "workspaces"), hooks: config.hooks, logger });
@@ -99,4 +105,59 @@ test("remote work is verified on the host before the tracker can complete an iss
   assert.equal(await f.state(), "done");
   assert.equal(await fs.readFile(path.join(f.workspace, "work.txt"), "utf8"), "remote work\n");
   await assert.rejects(fs.stat(r.runtimes[0]!), { code: "ENOENT" });
+});
+
+async function repository(f: Awaited<ReturnType<typeof fixture>>) {
+  const repo = path.join(f.root, "repo");
+  await fs.mkdir(repo);
+  await git(repo, "init", "-q", "-b", "main");
+  await git(repo, "config", "user.name", "test");
+  await git(repo, "config", "user.email", "test@example.com");
+  await git(repo, "config", "core.autocrlf", "false");
+  await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+  await fs.writeFile(path.join(repo, "deleted.txt"), "remove me\n");
+  await fs.writeFile(path.join(repo, ".gitignore"), ".env\nignored/\n");
+  await git(repo, "add", ".");
+  await git(repo, "commit", "-qm", "base");
+  f.manager.update(path.dirname(f.workspace), f.deps.config.hooks, {
+    repository: repo, base_branch: "main", branch_template: "issue/{identifier}",
+  });
+  await f.manager.createForIssue(f.issue.identifier);
+  return repo;
+}
+
+test("Git checkpoint retains the delivery worktree, commits, index, dirty bytes, deletions, and ignored host files", async (t) => {
+  const f = await fixture(t);
+  const repo = await repository(f);
+  await remote(f);
+  const gitPointer = await fs.readFile(path.join(f.workspace, ".git"), "utf8");
+  await fs.writeFile(path.join(f.workspace, ".env"), "host secret");
+  let head = "";
+  f.behavior.turn = async (opts) => {
+    const dir = opts.workspacePath;
+    await git(dir, "config", "user.name", "test");
+    await git(dir, "config", "user.email", "test@example.com");
+    await fs.writeFile(path.join(dir, "committed.txt"), "remote commit\n");
+    await git(dir, "add", "committed.txt");
+    await git(dir, "commit", "-qm", "remote change");
+    head = await git(dir, "rev-parse", "HEAD");
+    await fs.writeFile(path.join(dir, "tracked.txt"), "staged\n");
+    await git(dir, "add", "tracked.txt");
+    await fs.writeFile(path.join(dir, "tracked.txt"), "unstaged\n");
+    await fs.rm(path.join(dir, "deleted.txt"));
+    await fs.writeFile(path.join(dir, "binary.bin"), Buffer.from([0, 255, 17]));
+    await opts.execution.writeFile!(RESULT_FILE, '{"state":"done"}');
+  };
+  const outcome = await f.run();
+  assert.deepEqual(outcome, { kind: "normal" });
+  assert.equal(await f.state(), "done");
+  assert.equal(await fs.readFile(path.join(f.workspace, ".git"), "utf8"), gitPointer);
+  assert.equal(await git(repo, "rev-parse", "issue/T-32"), head);
+  assert.equal(await git(f.workspace, "show", ":tracked.txt"), "staged");
+  assert.equal(await fs.readFile(path.join(f.workspace, "tracked.txt"), "utf8"), "unstaged\n");
+  await assert.rejects(fs.stat(path.join(f.workspace, "deleted.txt")), { code: "ENOENT" });
+  assert.deepEqual(await fs.readFile(path.join(f.workspace, "binary.bin")), Buffer.from([0, 255, 17]));
+  assert.equal(await fs.readFile(path.join(f.workspace, ".env"), "utf8"), "host secret");
+  assert.match(await git(repo, "worktree", "list", "--porcelain"), /branch refs\/heads\/issue\/T-32/);
+  assert.equal(await git(repo, "show", "main:tracked.txt"), "base");
 });
