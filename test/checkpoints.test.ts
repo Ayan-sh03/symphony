@@ -459,3 +459,15 @@ test("a failed publication and rollback retain ignored host files in staging for
   assert.ok(retained);
   assert.equal(await fs.readFile(path.join(retained, ".env"), "utf8"), "irreplaceable host secret");
 });
+
+test("a result left by a failed local turn cannot complete a later turn", async (t) => {
+  const f = await fixture(t);
+  f.behavior.turn = async (opts) => {
+    await opts.execution.writeFile!(RESULT_FILE, '{"state":"done"}');
+    throw new Error("turn failed");
+  };
+  assert.equal((await f.run()).kind, "abnormal");
+  f.behavior.turn = async () => {};
+  assert.deepEqual(await f.run(), { kind: "normal" });
+  assert.equal(await f.state(), "todo");
+});
