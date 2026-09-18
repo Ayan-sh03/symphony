@@ -62,16 +62,24 @@ export class WorkspaceCheckpoint {
     await this.write({ version: 1, issueId, expected: null, snapshot: null, result, imported: true });
   }
 
-  async commit(issueId: string, expected: WorkspaceSnapshot, snapshot: WorkspaceSnapshot, result: string | null): Promise<void> {
+  async commit(issueId: string, expected: WorkspaceSnapshot, snapshot: WorkspaceSnapshot, result: string | null, signal?: AbortSignal): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true });
     snapshot = checkpointFiles(snapshot);
     const staged = await stageWorkspaceSnapshot(snapshot, this.directory, { expectedBaseCommit: expected.git?.baseCommit ?? null });
     try {
-      const pending: PendingCheckpoint = { version: 1, issueId, expected, snapshot, result, imported: false };
+      const pending: PendingCheckpoint = { version: 1, issueId, expected, snapshot, result: signal?.aborted ? null : result, imported: false };
       await this.write(pending);
       this.saved = true;
       await this.publish(pending, staged);
-    } finally { await staged.dispose(); }
+    } finally {
+      if (signal?.aborted && this.saved) await this.discardResult();
+      await staged.dispose();
+    }
+  }
+
+  async discardResult(): Promise<void> {
+    const pending: PendingCheckpoint = JSON.parse(await fs.readFile(this.pendingPath, "utf8"));
+    await this.write({ ...pending, result: null });
   }
 
   /** Replay import before retrying the tracker, never before starting another agent. */

@@ -112,12 +112,15 @@ export async function runAgentAttempt(
   let outcome: WorkerExit = { kind: "normal" };
   // One stop operation shared by cancellation and final cleanup. Keep rejection
   // observed here; final cleanup reports it in the worker outcome.
-  const stop = (): Promise<void> => {
-    stopped = true;
-    cancellation.abort();
+  const stopAgent = (): Promise<void> => {
     stopping ??= Promise.resolve().then(() => session?.stop());
     void stopping.catch(() => {});
     return stopping;
+  };
+  const stop = (): Promise<void> => {
+    stopped = true;
+    cancellation.abort();
+    return stopAgent();
   };
   try {
     for (const method of ["spawn", "readFile", "writeFile", "removeFile"] as const) {
@@ -186,19 +189,19 @@ export async function runAgentAttempt(
       deps.logger.warn(`${phase} failed`, { issue_id: issue.id, error: String(err) });
       outcome = { kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
     };
-    const cancelled = stopped;
     let agentStopped = true;
-    try { await stop(); }
+    try { await stopAgent(); }
     catch (err) { agentStopped = false; cleanupError("agent stop", err); }
     // A hook must not race a process whose termination failed.
     if (afterRun && agentStopped) {
       try { await deps.workspaceManager.runAfterRun(wsPath, execution); }
       catch (err) { deps.logger.warn("after_run failed", { issue_id: issue.id, error: String(err) }); }
     }
-    if (remote && turnCompleted && agentStopped && !cancelled) {
+    if (remote && turnCompleted && agentStopped) {
       try {
         const snapshot = await execution.exportSnapshot!(initial!.git ? { baseCommit: initial!.git.baseCommit } : {});
-        await checkpoint.commit(issue.id, initial!, snapshot, result);
+        await checkpoint.commit(issue.id, initial!, snapshot, result, cancellation.signal);
+        if (stopped) throw new Error("session stopped");
         if (result !== null) await applyResult(result, issue, deps);
         await checkpoint.acknowledge();
       } catch (err) { cleanupError("checkpoint", err); }
