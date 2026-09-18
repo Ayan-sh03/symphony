@@ -142,7 +142,7 @@ function runnerFixture(t: { after: (fn: () => void) => void }, failure = "") {
     async removeFile(name: string) { events.push(`remove:${name}`); files.delete(name); },
     async close() { await Promise.resolve(); events.push("close"); if (failure === "close") throw new Error("close failed"); },
   };
-  registerExecutionProviderFactory({ kind, capabilities: ["process", "filesystem"], create(opts) {
+  registerExecutionProviderFactory({ kind, capabilities: ["process", "filesystem", "host-workspace"], create(opts) {
     events.push("create"); assert.deepEqual(opts.env, { AGENT_KEY: "allowed" }); return execution;
   } });
   registerAgentFactory({ kind, create(opts) {
@@ -257,7 +257,7 @@ test("orchestrator shutdown waits for a late runtime and prevents agent startup"
   const f = runnerFixture(t);
   const creating = deferred<void>();
   const created = deferred<ExecutionSession>();
-  registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem"], create() {
+  registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem", "host-workspace"], create() {
     creating.resolve(); return created.promise;
   } });
   const workflow = parseWorkflow(`---\ntracker:\n  kind: file\n  active_states: [todo]\n  terminal_states: [done]\n  provider:\n    dir: ./issues\nworkspace:\n  root: ./ws\nagent:\n  kind: ${f.deps.agentKind}\n---\nWork`);
