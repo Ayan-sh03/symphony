@@ -2,10 +2,22 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   exportWorkspaceSnapshot, stageWorkspaceSnapshot,
   type WorkspaceSnapshot, type StagedWorkspaceSnapshot,
 } from "./snapshot.ts";
+
+const exec = promisify(execFile);
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
+  return (await exec("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+    "-c", "core.longpaths=true", "-C", cwd, ...args], {
+    env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null" },
+    encoding: "utf8", timeout: 60_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+  })).stdout.trimEnd();
+}
 
 const SCRATCH = new Set(["SYMPHONY_ISSUE.json", "SYMPHONY_RESULT.json"]);
 export function checkpointFiles(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
@@ -99,7 +111,10 @@ export class WorkspaceCheckpoint {
       return;
     }
     if (!equivalent(current, pending.expected)) throw new Error("host workspace changed since dispatch; checkpoint retained for recovery");
-    if (current.git) throw new Error("Git checkpoint publication is not implemented");
+    if (current.git) {
+      await this.publishGit(pending, staged);
+      return;
+    }
     const backup = path.join(this.directory, "previous");
     await fs.rename(this.workspacePath, backup);
     try {
@@ -112,5 +127,72 @@ export class WorkspaceCheckpoint {
     if (!equivalent(imported, pending.snapshot)) throw new Error("checkpoint verification failed; previous workspace retained");
     await this.write({ ...pending, imported: true });
     await fs.rm(backup, { recursive: true, force: true });
+  }
+
+  private async publishGit(pending: PendingCheckpoint, staged: StagedWorkspaceSnapshot): Promise<void> {
+    const before = pending.expected.git!;
+    const after = pending.snapshot.git!;
+    const branch = await git(this.workspacePath, "symbolic-ref", "HEAD");
+    if (branch !== `refs/heads/${before.branch}`) throw new Error("host delivery branch changed since dispatch");
+    // Include staged-but-uncommitted blobs, which fetching HEAD alone would lose.
+    const tree = await git(staged.path, "write-tree");
+    const transfer = await git(staged.path, "-c", "user.name=Symphony", "-c", "user.email=symphony@localhost",
+      "commit-tree", tree, "-p", after.headCommit, "-m", "checkpoint index");
+    await git(this.workspacePath, "-c", "fetch.unpackLimit=1", "fetch", "--no-tags", "--no-write-fetch-head", staged.path, transfer);
+    const index = path.resolve(this.workspacePath, await git(this.workspacePath, "rev-parse", "--git-path", "index"));
+    const oldIndex = await fs.readFile(index);
+    const newIndex = await fs.readFile(path.join(staged.path, ".git", "index"));
+    const ignored = (await git(this.workspacePath, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"))
+      .split("\0").filter(Boolean).map((p) => p.replace(/\/$/, "")).filter((p) => !SCRATCH.has(p));
+    for (const name of ignored) {
+      if (pending.snapshot.entries.some((e) => e.path === name || e.path.startsWith(`${name}/`) || name.startsWith(`${e.path}/`) && e.type !== "directory")) {
+        throw new Error(`checkpoint conflicts with ignored host file: ${name}`);
+      }
+    }
+    const backup = path.join(this.directory, "previous");
+    const lock = await fs.open(`${index}.lock`, "wx");
+    await lock.close();
+    let moved = false;
+    let published = false;
+    let advanced = false;
+    const kept: string[] = [];
+    try {
+      await fs.writeFile(path.join(this.directory, "index.previous"), oldIndex);
+      await fs.rename(this.workspacePath, backup);
+      moved = true;
+      await fs.rm(path.join(staged.path, ".git"), { recursive: true });
+      await fs.rename(path.join(backup, ".git"), path.join(staged.path, ".git"));
+      kept.push(".git");
+      for (const name of ignored) {
+        await fs.mkdir(path.dirname(path.join(staged.path, name)), { recursive: true });
+        await fs.rename(path.join(backup, name), path.join(staged.path, name));
+        kept.push(name);
+      }
+      await fs.rename(staged.path, this.workspacePath);
+      published = true;
+      // Compare-and-swap prevents a concurrent branch move from being overwritten.
+      await git(this.workspacePath, "update-ref", branch, after.headCommit, before.headCommit);
+      advanced = true;
+      await fs.writeFile(index, newIndex);
+      const verified = checkpointFiles(await exportWorkspaceSnapshot(this.workspacePath, { baseCommit: before.baseCommit }));
+      if (!equivalent(verified, pending.snapshot)) throw new Error("Git checkpoint verification failed");
+      await this.write({ ...pending, imported: true });
+    } catch (error) {
+      // Preserve the original directory and journal if rollback itself fails.
+      if (advanced) await git(this.workspacePath, "update-ref", branch, before.headCommit, after.headCommit);
+      if (moved) {
+        const source = published ? this.workspacePath : staged.path;
+        for (const name of kept.reverse()) {
+          await fs.mkdir(path.dirname(path.join(backup, name)), { recursive: true });
+          await fs.rename(path.join(source, name), path.join(backup, name));
+        }
+        if (published) await fs.rename(this.workspacePath, staged.path);
+        await fs.rename(backup, this.workspacePath);
+        await fs.writeFile(index, oldIndex);
+      }
+      throw error;
+    } finally { await fs.rm(`${index}.lock`, { force: true }); }
+    await fs.rm(backup, { recursive: true, force: true });
+    await fs.rm(path.join(this.directory, "index.previous"), { force: true });
   }
 }
