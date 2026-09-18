@@ -149,7 +149,8 @@ export async function runAgentAttempt(
     session = createAgentSession(deps.agentKind, {
       execution, workspacePath: execution.workspacePath, issue, config: deps.config,
       logger: deps.logger, onUpdate: (u) => deps.onUpdate(issue.id, u),
-      adapter: deps.adapter, toolSpecs: deps.adapter.agentToolSpecs(), env: deps.childEnv,
+      adapter: remote ? checkpointAdapter(deps.adapter, execution, cancellation.signal) : deps.adapter,
+      toolSpecs: deps.adapter.agentToolSpecs().filter((tool) => !remote || !tool.mutates || tool.name === "set_issue_result"), env: deps.childEnv,
       ...(issue.model ? { model: issue.model } : {}),
     });
     await session.start();
@@ -240,6 +241,27 @@ async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: 
   await applyResult(text, issue, deps);
   await checkpoint.acknowledge();
   try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
+}
+
+/** Remote agents queue their handoff; tracker credentials and mutations stay on the host. */
+function checkpointAdapter(adapter: TrackerAdapter, execution: ExecutionSession, signal: AbortSignal): TrackerAdapter {
+  const readable = new Set(adapter.agentToolSpecs().filter((tool) => !tool.mutates).map((tool) => tool.name));
+  return {
+    kind: adapter.kind,
+    fetchIssuesByStates: adapter.fetchIssuesByStates.bind(adapter),
+    fetchIssuesByIds: adapter.fetchIssuesByIds.bind(adapter),
+    secretEnvironmentNames: adapter.secretEnvironmentNames.bind(adapter),
+    agentToolSpecs: () => adapter.agentToolSpecs().filter((tool) => !tool.mutates || tool.name === "set_issue_result"),
+    async executeAgentTool(name, args, ctx) {
+      if (signal.aborted) return { success: false, output: "session stopped" };
+      if (name === "set_issue_result") {
+        await execution.writeFile!(RESULT_FILE, JSON.stringify(args));
+        return { success: true, output: { pending_checkpoint: true } };
+      }
+      if (readable.has(name)) return adapter.executeAgentTool(name, args, ctx);
+      return { success: false, output: "Remote tracker mutations require set_issue_result or SYMPHONY_RESULT.json; completion follows a verified checkpoint." };
+    },
+  };
 }
 
 async function readResultFile(execution: ExecutionSession): Promise<string | null> {
