@@ -86,8 +86,9 @@ parent quiescent and exclusively controlled; these functions do not synchronize
 with arbitrary external processes.
 
 Updating an existing delivery branch, advancing tracker state, and retaining
-retry checkpoints belong to Phase 4. Use the staged API as the input to that
-transaction; do not replace a registered worktree with an independent repository.
+retry checkpoints are handled by the [checkpoint transaction](checkpoints.md).
+It consumes the staged API and preserves the registered worktree and its Git
+metadata instead of replacing them with an independent repository.
 
 ## Validation and limits
 

@@ -32,17 +32,23 @@ flowchart TD
    context, and starts the configured agent through that session. Protocol paths refer to
    the runtime workspace; host delivery paths remain with the workspace manager.
 4. Agent updates feed the activity log, usage counters, and stall detection.
-5. Host-side tracker tools apply comments and state changes without exposing tracker
-   credentials to the agent.
+5. Host-side tracker tools keep credentials on the host. Remote agents queue results;
+   their tracker mutations wait for a verified checkpoint.
 6. Symphony re-reads the issue after a turn and either continues, retries, or finalizes
    the run.
-7. The runner awaits agent termination, runs `after_run`, and closes the execution session.
+7. The runner awaits agent termination and runs `after_run`. Remote attempts then save
+   and verify a host checkpoint before applying their result and closing the runtime.
+   Export failure retains the runtime and halts the issue for recovery.
    Shutdown waits for this cleanup, and cancellation also covers pending runtime creation
    and `before_run` hooks.
 
 Repository-backed projects use git worktrees and preserve their delivery branches.
 Scratch projects use ordinary per-issue directories. Follow-up issues share the original
 work stream so review fixes land on the same branch.
+
+[Checkpoint journals](checkpoints.md) preserve pending imports and tracker handoffs
+outside disposable workspaces. Failed-turn archives remain separate from the successful
+checkpoint used for retries.
 
 See [`SPEC.md`](../SPEC.md) for the complete behavioral contract and
 [`INTEGRATION.md`](../INTEGRATION.md) for extension interfaces and tests.

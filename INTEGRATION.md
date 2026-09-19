@@ -326,6 +326,11 @@ starting an agent. Return the absolute **runtime** path as `session.workspacePat
 provider. File paths and process `cwd` overrides are workspace-relative. A missing file
 must reject with `code: "ENOENT"`; transport and permission failures must remain errors.
 
+Also advertise `host-workspace` when files already live in the supplied host workspace.
+Otherwise, advertise `workspace-snapshot`, implement both snapshot methods, and provide
+an empty runtime workspace for the runner's initial import. Do not infer sharing from
+equal path strings: two machines can use the same absolute path.
+
 `spawn` returns a `ProcessHandle` with Node stdin/stdout/stderr streams, a stable `exit`
 promise, and an awaited, idempotent `kill`. `close` must stop owned work and release runtime
 resources; every concurrent caller must await cleanup. Preserve errors so the runner can
@@ -339,7 +344,7 @@ The worker lifecycle is:
 3. Run `before_run` inside that session, then write `SYMPHONY_ISSUE.json` there.
 4. Start the agent using that same session; read result files there and execute tracker
    tools on the host. Cancellation during a result read prevents later write-back.
-5. Await agent stop, run `after_run`, then close the execution session on every exit path.
+5. Await agent stop, run `after_run`, then close the execution session once its work is safe.
    A failed `before_run` skips `after_run`. Failed agent termination also skips the hook
    to prevent it racing a process that may still be alive.
 
@@ -348,9 +353,12 @@ removal hooks retain the host environment; run hooks use the filtered agent envi
 Hook timeout/cancellation waits for process termination. Service shutdown waits for worker
 cleanup, including runtimes whose creation finishes after shutdown starts.
 
+Remote attempts run one turn, stop their writers, and checkpoint the workspace before
+applying the result. `set_issue_result` queues a handoff; other mutating tracker tools
+are withheld. If export fails, the runner retains the runtime and halts the issue instead
+of closing its only work copy. See [checkpoints and recovery](docs/checkpoints.md).
 Model/installation discovery and historical transcript lookup remain host-side advisory
-operations. Phase 2 does not transfer workspaces or provide transactional remote completion;
-those operations build on the snapshot contract below in Phase 4. E2B is a separate provider.
+operations. E2B is a separate provider.
 
 See [`test/executionSessions.test.ts`](test/executionSessions.test.ts) for an in-memory
 runtime, cancellation/failure cases, and both built-in agents running local protocol stubs.
