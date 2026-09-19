@@ -567,6 +567,10 @@ test("a timed-out hook script does not leak its descendant processes (#39)", asy
     await waitForFile(path.join(root, "child.pid"));
     childPid = treeFile(root, "child.pid");
     assert.equal(alive(childPid), false, "a timed-out script must not leave its descendants running");
+    const settled = fs.statSync(path.join(root, "heartbeat.txt")).size;
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(fs.statSync(path.join(root, "heartbeat.txt")).size, settled,
+      "timeout completion must mean the descendant has stopped writing");
   } finally {
     await forceKillTree(childPid);
     fs.rmSync(root, { recursive: true, force: true });
