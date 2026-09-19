@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Guidance for working in this repo. Read this before making changes.
 
@@ -6,8 +6,8 @@ Guidance for working in this repo. Read this before making changes.
 
 A long-running service that polls an issue tracker, creates a per-issue git-free
 workspace, and runs a coding-agent session (Codex or opencode) to work each issue.
-It ships with an operational web console. The full contract lives in `SPEC.md`;
-`WORKFLOW.md` is the runtime config, `INTEGRATION.md` covers adding backends.
+It ships with an operational web console. `WORKFLOW.md` is the runtime config;
+`docs/architecture.md` describes the layers and execution flow.
 
 ## Running & testing
 
@@ -59,15 +59,15 @@ backend by implementing the interface and registering it; no other layer changes
 **Projects (multi-project host layer, `src/project/`).** A project is one
 `WORKFLOW.md` anchored at a cwd (its issues + workspace resolve relative to that
 dir, so distinct dirs are isolated). `ProjectManager` (`manager.ts`) owns one
-independent, SPEC-conformant `Orchestrator` + `WorkflowWatcher` per project and
-runs them all concurrently. Projects come from a persistent manifest
-(`manifest.ts`, `symphony.projects.json` = `{id,name,workflow}[]`); the console can
-append one at runtime. With no `--projects` flag / manifest, the host runs a single
-`default` project (back-compat). This is a host extension above the single-workflow
-SPEC — the orchestrator itself is unchanged and unaware of projects.
+independent `Orchestrator` + `WorkflowWatcher` per project and runs them all
+concurrently. Projects come from a persistent manifest (`manifest.ts`,
+`symphony.projects.json` = `{id,name,workflow}[]`); the console can append one at
+runtime. With no `--projects` flag / manifest, the host runs a single `default`
+project (back-compat). This is a host extension above the single-workflow design —
+the orchestrator itself is unchanged and unaware of projects.
 
-**Repository delivery (extension, SPEC Appendix B).** Set `workspace.repository` and a
-project's workspaces become **git worktrees** of that repo on `issue/<identifier>`
+**Repository delivery (extension).** Set `workspace.repository` and a project's
+workspaces become **git worktrees** of that repo on `issue/<identifier>`
 (`workspace.branch_template`), cut from `workspace.base_branch` — the base is recorded
 in the repo's local config at creation, since HEAD moves. On completion the orchestrator
 records an `IssueDelivery` (branch, SHA, base, files, tests, summary) via the optional
@@ -78,31 +78,30 @@ Pushing (`workspace.delivery_mode: push|pr`) is a manual console action only. `W
 is the self-dev instance of this. **All git in `workspace/manager.ts` is async on purpose** —
 every project, agent and the console share one event loop.
 
-**Follow-ups / work streams (extension, SPEC Appendix B.5).** An issue may carry
-`follow_up_for` (lineage) and `stream_identifier` (the identifier whose branch and
-workspace it shares), both set at creation and immutable. The workspace manager is keyed
-by *stream*, not issue id — `Orchestrator.streamOf()` resolves it, and everything that
-touches a workspace passes the result. So a review follow-up lands on the branch it is
-answering instead of forking a second one from base. The invariant that falls out: one
-workspace per stream means **one member of a stream in flight at a time**, enforced in
-`shouldDispatch` and again in `onRetryTimer` (which bypasses it). `busyStreams()` is the
-whole rule and deliberately outlives `running` — it also covers finalizing, retrying and
-halted members, because each still owns the workspace; releasing at worker exit lets a
-sibling into a worktree that is about to be cleaned for someone else. Cleanup likewise
-refuses any stream that still has a member. Ordinary issues are their own stream and
-behave exactly as before.
+**Follow-ups / work streams (extension).** An issue may carry `follow_up_for` (lineage)
+and `stream_identifier` (the identifier whose branch and workspace it shares), both set
+at creation and immutable. The workspace manager is keyed by *stream*, not issue id —
+`Orchestrator.streamOf()` resolves it, and everything that touches a workspace passes the
+result. So a review follow-up lands on the branch it is answering instead of forking a
+second one from base. The invariant that falls out: one workspace per stream means **one
+member of a stream in flight at a time**, enforced in `shouldDispatch` and again in
+`onRetryTimer` (which bypasses it). `busyStreams()` is the whole rule and deliberately
+outlives `running` — it also covers finalizing, retrying and halted members, because each
+still owns the workspace; releasing at worker exit lets a sibling into a worktree that is
+about to be cleaned for someone else. Cleanup likewise refuses any stream that still has
+a member. Ordinary issues are their own stream and behave exactly as before.
 
-**Cost estimation (extension, SPEC Appendix B.6).** `agent.pricing` in `WORKFLOW.md` gives
-rates per million tokens, flat and/or per agent kind. `src/history/cost.ts` is a pure,
-import-free module that turns token counts into money **at read time — never stored**, so
-re-pricing reprices past runs too. `codex_totals` keeps a private `by_agent` breakdown
-because a project can mix backends (per-issue `agent` override) and each kind is priced at
-its own rate; an aggregate computed as `total × one rate` is silently wrong. `archiveLog`
-copies a finished run's final counts + kind onto the retained log so a completed issue's
-detail still shows what it cost.
+**Cost estimation (extension).** `agent.pricing` in `WORKFLOW.md` gives rates per million
+tokens, flat and/or per agent kind. `src/history/cost.ts` is a pure, import-free module
+that turns token counts into money **at read time — never stored**, so re-pricing reprices
+past runs too. `codex_totals` keeps a private `by_agent` breakdown because a project can
+mix backends (per-issue `agent` override) and each kind is priced at its own rate; an
+aggregate computed as `total × one rate` is silently wrong. `archiveLog` copies a finished
+run's final counts + kind onto the retained log so a completed issue's detail still shows
+what it cost.
 
-**Model selection (extension, SPEC Appendix B.7).** An issue may carry `model`, a free-text
-string passed to the backend verbatim on dispatch (`AgentSessionOptions.model` → codex's
+**Model selection (extension).** An issue may carry `model`, a free-text string passed to
+the backend verbatim on dispatch (`AgentSessionOptions.model` → codex's
 `thread/start.model`, opencode's `-m`). **Symphony is not the source of truth for model
 inventory** — every model name in the console comes from a CLI, and there is deliberately
 no model map in `WORKFLOW.md`. We never reject an unknown id: the CLI validates and errors
@@ -141,8 +140,8 @@ id (`#/<pid>`, `#/<pid>/issue/<id>`, `#/<pid>/new`, `#/<pid>/integrate`,
   tours, no test-plan checklists, no summary of a summary. Say what changed and
   why — nothing else. Same trailer rule as commits: no "Generated with", `🤖`,
   or `Co-Authored-By` lines in the body.
-- Match the surrounding code's style. Files carry a header comment citing the
-  relevant `SPEC.md` section — keep that pattern.
+- Match the surrounding code's style. Files carry a header comment describing their
+  role — keep that pattern.
 - Every change should keep `npm test` and `npm run typecheck` green.
 
 ## Windows notes (this is a Windows dev box)
