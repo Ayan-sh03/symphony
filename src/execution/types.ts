@@ -11,6 +11,8 @@ import type { SnapshotExportOptions, SnapshotImportOptions, WorkspaceSnapshot } 
 export type ExecutionCapability =
   | "process"
   | "filesystem"
+  /** Files are already in the host workspace; no snapshot transfer is necessary. */
+  | "host-workspace"
   | "workspace-snapshot"
   | "reconnect";
 

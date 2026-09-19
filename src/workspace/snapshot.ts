@@ -189,7 +189,7 @@ async function git(cwd: string, args: string[], limit: number, honorAutocrlf = f
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0" });
   // Forcing core.autocrlf=false keeps every explicit Git operation host-independent,
   // but interpreting existing working bytes must honor the repository's own setting.
-  const config = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+  const config = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.longpaths=true",
     ...(honorAutocrlf ? [] : ["-c", "core.autocrlf=false"]),
     "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true"];
   try {

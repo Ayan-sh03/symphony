@@ -177,7 +177,7 @@ class LocalExecutionSession implements ExecutionSession {
 
 export const localExecutionProvider: ExecutionProviderFactory = {
   kind: "local",
-  capabilities: ["process", "filesystem", "workspace-snapshot"],
+  capabilities: ["process", "filesystem", "host-workspace", "workspace-snapshot"],
   create(opts) {
     return new LocalExecutionSession(opts);
   },

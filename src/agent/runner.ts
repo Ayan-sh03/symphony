@@ -6,13 +6,15 @@
  *
  * Agent-backend-neutral: it depends only on the {@link AgentSession} interface.
  */
-import { createExecutionSession, requireExecutionCapabilities } from "../execution/registry.ts";
+import { createExecutionSession, requireExecutionCapabilities, supportsExecutionCapability } from "../execution/registry.ts";
 import type { ExecutionSession } from "../execution/types.ts";
 import type { Issue, AgentUpdate } from "../domain/types.ts";
 import type { Logger } from "../logger.ts";
 import type { ServiceConfigValues } from "../config/config.ts";
 import type { TrackerAdapter } from "../tracker/types.ts";
 import type { WorkspaceManager } from "../workspace/manager.ts";
+import { CheckpointRecoveryError } from "../workspace/checkpoint.ts";
+import type { WorkspaceSnapshot } from "../workspace/snapshot.ts";
 import { renderPrompt, PromptError } from "../prompt/render.ts";
 import { createAgentSession } from "./registry.ts";
 import type { AgentSession } from "./types.ts";
@@ -20,6 +22,8 @@ import type { AgentSession } from "./types.ts";
 export interface WorkerExit {
   kind: "normal" | "abnormal";
   reason?: string;
+  /** The runtime holds the only work copy and needs operator recovery. */
+  retryable?: false;
 }
 
 export interface RunnerDeps {
@@ -47,7 +51,8 @@ export interface RunnerDeps {
   onUpdate: (issueId: string, u: AgentUpdate) => void;
   /**
    * Hand the orchestrator a stop handle so reconciliation/stall detection can
-   * terminate this live session (SPEC §8.5). Called once, after the session exists.
+   * cancel this attempt (SPEC §8.5), including recovery and runtime creation.
+   * Called once, before workspace preparation.
    */
   onSessionReady: (stop: () => Promise<void>) => void;
 }
@@ -68,6 +73,23 @@ export async function runAgentAttempt(
   const log = (msg: string, extra: Record<string, unknown> = {}) =>
     deps.logger.info(msg, { issue_id: issue.id, issue_identifier: issue.identifier, ...extra });
 
+  let session: AgentSession | undefined;
+  let stopped = false;
+  let stopping: Promise<void> | undefined;
+  const cancellation = new AbortController();
+  const stopAgent = (): Promise<void> => {
+    stopping ??= Promise.resolve().then(() => session?.stop());
+    void stopping.catch(() => {});
+    return stopping;
+  };
+  const stop = (): Promise<void> => {
+    stopped = true;
+    cancellation.abort();
+    return stopAgent();
+  };
+  deps.onSessionReady(stop);
+  if (stopped) return { kind: "abnormal", reason: "session stopped" };
+
   // 1. Workspace (the stream's, which for a follow-up is the parent's worktree)
   let workspace;
   try {
@@ -77,10 +99,29 @@ export async function runAgentAttempt(
   }
   const wsPath = workspace.path;
   const branch = deps.workspaceManager.deliveryBranchFor(deps.stream);
+  let remote: boolean;
+  try {
+    remote = !supportsExecutionCapability(deps.config.execution.kind, "host-workspace");
+    requireExecutionCapabilities(deps.config.execution.kind, remote ? ["process", "filesystem", "workspace-snapshot"] : ["process", "filesystem"]);
+  } catch (err) { return { kind: "abnormal", reason: `execution startup error: ${String(err)}` }; }
+  const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
+  let initial: WorkspaceSnapshot | undefined;
+  try {
+    const pending = await checkpoint.recover(issue.id);
+    if (stopped) throw new Error("session stopped");
+    if (pending !== null) {
+      await applyResult(pending, issue, deps);
+      await checkpoint.acknowledge();
+      return { kind: "normal" };
+    }
+    await checkpoint.acknowledge();
+    if (remote) initial = await checkpoint.snapshot();
+    if (stopped) throw new Error("session stopped");
+  } catch (err) { return { kind: "abnormal", reason: `checkpoint recovery: ${String(err)}`, ...(err instanceof CheckpointRecoveryError ? { retryable: false as const } : {}) }; }
+  checkpoint.saved = false;
 
   let execution: ExecutionSession;
   try {
-    requireExecutionCapabilities(deps.config.execution.kind, ["process", "filesystem"]);
     execution = await createExecutionSession(deps.config.execution.kind, deps.config.execution.provider, {
       workspacePath: wsPath, env: deps.childEnv, logger: deps.logger,
     });
@@ -88,28 +129,25 @@ export async function runAgentAttempt(
     return { kind: "abnormal", reason: `execution startup error: ${String(err)}` };
   }
 
-  let session: AgentSession | undefined;
-  let stopped = false;
-  let stopping: Promise<void> | undefined;
   let afterRun = false;
-  const cancellation = new AbortController();
+  let turnCompleted = false;
+  let runtimeMayHaveWork = false;
+  let result: string | null = null;
   let outcome: WorkerExit = { kind: "normal" };
-  // One stop operation shared by cancellation and final cleanup. Keep rejection
-  // observed here; final cleanup reports it in the worker outcome.
-  const stop = (): Promise<void> => {
-    stopped = true;
-    cancellation.abort();
-    stopping ??= Promise.resolve().then(() => session?.stop());
-    void stopping.catch(() => {});
-    return stopping;
-  };
   try {
     for (const method of ["spawn", "readFile", "writeFile", "removeFile"] as const) {
       if (typeof execution[method] !== "function") throw new Error(`execution session lacks ${method}`);
     }
     if (!execution.workspacePath) throw new Error("execution session lacks workspacePath");
-    deps.onSessionReady(stop);
     if (stopped) throw new Error("session stopped");
+    if (initial) {
+      await execution.importSnapshot!(initial, { expectedBaseCommit: initial.git?.baseCommit ?? null });
+      if (stopped) throw new Error("session stopped");
+    }
+    // Only the host journal can carry a successful turn's result across attempts.
+    await execution.removeFile!(RESULT_FILE, { force: true });
+    if (stopped) throw new Error("session stopped");
+    runtimeMayHaveWork = true;
     if (!await deps.workspaceManager.runBeforeRun(wsPath, execution, cancellation.signal)) {
       throw new Error(stopped ? "session stopped" : "before_run hook error");
     }
@@ -126,7 +164,8 @@ export async function runAgentAttempt(
     session = createAgentSession(deps.agentKind, {
       execution, workspacePath: execution.workspacePath, issue, config: deps.config,
       logger: deps.logger, onUpdate: (u) => deps.onUpdate(issue.id, u),
-      adapter: deps.adapter, toolSpecs: deps.adapter.agentToolSpecs(), env: deps.childEnv,
+      adapter: remote ? checkpointAdapter(deps.adapter, execution, cancellation.signal) : deps.adapter,
+      toolSpecs: deps.adapter.agentToolSpecs().filter((tool) => !remote || !tool.mutates || tool.name === "set_issue_result"), env: deps.childEnv,
       ...(issue.model ? { model: issue.model } : {}),
     });
     await session.start();
@@ -142,6 +181,11 @@ export async function runAgentAttempt(
       if (stopped) throw new Error("session stopped");
       if (turnResult.status !== "completed") {
         throw new Error(`agent turn ${turnResult.status}: ${turnResult.error ?? ""}`);
+      }
+      if (remote) {
+        result = await readResultFile(execution);
+        turnCompleted = true;
+        break; // Checkpoint only after all runtime writers have stopped.
       }
       await applyResultFile(execution, issue, deps, cancellation.signal);
       if (stopped) throw new Error("session stopped");
@@ -159,18 +203,40 @@ export async function runAgentAttempt(
   } finally {
     const cleanupError = (phase: string, err: unknown) => {
       deps.logger.warn(`${phase} failed`, { issue_id: issue.id, error: String(err) });
-      outcome = { kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
+      outcome = { ...outcome, kind: "abnormal", reason: [outcome.reason, `${phase}: ${String(err)}`].filter(Boolean).join("; ") };
+      if (err instanceof CheckpointRecoveryError) outcome.retryable = false;
     };
     let agentStopped = true;
-    try { await stop(); }
+    try { await stopAgent(); }
     catch (err) { agentStopped = false; cleanupError("agent stop", err); }
     // A hook must not race a process whose termination failed.
     if (afterRun && agentStopped) {
       try { await deps.workspaceManager.runAfterRun(wsPath, execution); }
       catch (err) { deps.logger.warn("after_run failed", { issue_id: issue.id, error: String(err) }); }
     }
-    try { await execution.close(); }
-    catch (err) { cleanupError("execution close", err); }
+    if (remote && runtimeMayHaveWork && agentStopped) {
+      try {
+        const snapshot = await execution.exportSnapshot!(initial!.git ? { baseCommit: initial!.git.baseCommit } : {});
+        if (turnCompleted) {
+          await checkpoint.commit(issue.id, initial!, snapshot, result, cancellation.signal);
+          if (stopped) throw new Error("session stopped");
+          if (result !== null) await applyResult(result, issue, deps);
+          await checkpoint.acknowledge();
+        } else {
+          const location = await checkpoint.preserve(snapshot, initial!.git?.baseCommit ?? null);
+          deps.logger.warn("unfinished work saved for recovery", { issue_id: issue.id, path: location });
+        }
+      } catch (err) { cleanupError("checkpoint", err); }
+    }
+    if (!remote || !runtimeMayHaveWork || checkpoint.saved) {
+      try { await execution.close(); }
+      catch (err) { cleanupError("execution close", err); }
+    } else {
+      try { await checkpoint.retainRuntime(deps.config.execution.kind, execution.runtimeId); }
+      catch (err) { cleanupError("runtime recovery record", err); }
+      cleanupError("runtime preserved", `checkpoint unavailable; recover runtime ${execution.runtimeId}`);
+      outcome.retryable = false;
+    }
   }
   return outcome;
 }
@@ -190,31 +256,56 @@ function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number):
  */
 async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps, signal: AbortSignal): Promise<void> {
   const file = RESULT_FILE;
-  let text: string;
+  const text = await readResultFile(execution);
+  if (text === null) return;
+  if (signal.aborted) throw new Error("session stopped");
+  const checkpoint = deps.workspaceManager.checkpointFor(deps.stream);
+  await checkpoint.saveResult(issue.id, text);
+  if (signal.aborted) throw new Error("session stopped");
+  await applyResult(text, issue, deps);
+  await checkpoint.acknowledge();
+  await execution.removeFile!(file, { force: true });
+}
+
+/** Remote agents queue their handoff; tracker credentials and mutations stay on the host. */
+function checkpointAdapter(adapter: TrackerAdapter, execution: ExecutionSession, signal: AbortSignal): TrackerAdapter {
+  const readable = new Set(adapter.agentToolSpecs().filter((tool) => !tool.mutates).map((tool) => tool.name));
+  return {
+    kind: adapter.kind,
+    fetchIssuesByStates: adapter.fetchIssuesByStates.bind(adapter),
+    fetchIssuesByIds: adapter.fetchIssuesByIds.bind(adapter),
+    secretEnvironmentNames: adapter.secretEnvironmentNames.bind(adapter),
+    agentToolSpecs: () => adapter.agentToolSpecs().filter((tool) => !tool.mutates || tool.name === "set_issue_result"),
+    async executeAgentTool(name, args, ctx) {
+      if (signal.aborted) return { success: false, output: "session stopped" };
+      if (name === "set_issue_result") {
+        await execution.writeFile!(RESULT_FILE, JSON.stringify(args));
+        return { success: true, output: { pending_checkpoint: true } };
+      }
+      if (readable.has(name)) return adapter.executeAgentTool(name, args, ctx);
+      return { success: false, output: "Remote tracker mutations require set_issue_result or SYMPHONY_RESULT.json; completion follows a verified checkpoint." };
+    },
+  };
+}
+
+async function readResultFile(execution: ExecutionSession): Promise<string | null> {
   try {
-    text = Buffer.from(await execution.readFile!(file)).toString("utf8");
+    return Buffer.from(await execution.readFile!(RESULT_FILE)).toString("utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // no result this turn
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  if (signal.aborted) throw new Error("session stopped");
+}
+
+async function applyResult(text: string, issue: Issue, deps: RunnerDeps): Promise<void> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     deps.logger.warn("invalid result file ignored", { issue_id: issue.id, issue_identifier: issue.identifier });
-    try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
     return;
   }
-  try {
-    const res = await deps.adapter.executeAgentTool("set_issue_result", parsed, { issue });
-    deps.logger.info("applied agent result", {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      success: res.success,
-    });
-  } catch (err) {
-    deps.logger.warn("failed to apply agent result", { issue_id: issue.id, error: String(err) });
-  }
-  try { await execution.removeFile!(file, { force: true }); } catch { /* ignore */ }
+  const res = await deps.adapter.executeAgentTool("set_issue_result", parsed, { issue });
+  if (!res.success) throw new Error(`failed to apply agent result: ${JSON.stringify(res.output)}`);
+  deps.logger.info("applied agent result", { issue_id: issue.id, issue_identifier: issue.identifier });
 }

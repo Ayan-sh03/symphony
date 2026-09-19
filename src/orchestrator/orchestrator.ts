@@ -1305,7 +1305,9 @@ export class Orchestrator {
       return;
     }
 
-    if (exit.kind === "normal") {
+    if (exit.retryable === false) {
+      this.halt(issueId, entry.identifier, entry.stream, exit.reason ?? "runtime needs recovery", entry.retry_attempt ?? 0);
+    } else if (exit.kind === "normal") {
       this.completed.add(issueId); // bookkeeping only (SPEC §7.1)
       // Short continuation retry to re-check activity (SPEC §7.1, §8.4).
       this.scheduleRetry(issueId, 1, entry.identifier, entry.stream, null, /*continuation*/ true);

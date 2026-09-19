@@ -29,6 +29,7 @@ import { createExecutionSession } from "../execution/registry.ts";
 import { runExecutionHook } from "../execution/hooks.ts";
 import type { ExecutionSession } from "../execution/types.ts";
 import type { Workspace } from "../domain/types.ts";
+import { WorkspaceCheckpoint } from "./checkpoint.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -191,6 +192,11 @@ export class WorkspaceManager {
     return p;
   }
 
+  checkpointFor(stream: string): WorkspaceCheckpoint {
+    const key = crypto.createHash("sha256").update(stream).digest("hex");
+    return new WorkspaceCheckpoint(this.workspacePathFor(stream), path.join(this.opts.root, ".symphony-checkpoints", key));
+  }
+
   /** Invariant 2 (SPEC §9.5): workspace path MUST stay inside workspace root. */
   private assertInsideRoot(p: string): void {
     const root = path.resolve(this.opts.root);
@@ -348,6 +354,10 @@ export class WorkspaceManager {
    * issue still belongs to (SPEC Appendix B.5) — this class cannot see the tracker.
    */
   async cleanupForIssue(stream: string): Promise<void> {
+    if (await this.checkpointFor(stream).hasPending()) {
+      this.opts.logger.warn("workspace preserved because a checkpoint is pending", { stream });
+      return;
+    }
     const wsPath = this.workspacePathFor(stream);
     if (!fs.existsSync(wsPath)) return;
     if (this.opts.hooks.before_remove) {

@@ -144,7 +144,7 @@ function runnerFixture(t: { after: (fn: () => void) => void }, failure = "") {
     async removeFile(name: string) { events.push(`remove:${name}`); files.delete(name); },
     async close() { await Promise.resolve(); events.push("close"); if (failure === "close") throw new Error("close failed"); },
   };
-  registerExecutionProviderFactory({ kind, capabilities: ["process", "filesystem"], create(opts) {
+  registerExecutionProviderFactory({ kind, capabilities: ["process", "filesystem", "host-workspace"], create(opts) {
     events.push("create"); assert.deepEqual(opts.env, { AGENT_KEY: "allowed" }); return execution;
   } });
   registerAgentFactory({ kind, create(opts) {
@@ -179,7 +179,7 @@ function runnerFixture(t: { after: (fn: () => void) => void }, failure = "") {
 test("runner uses runtime files and awaits stop, after_run, and close", async (t) => {
   const f = runnerFixture(t);
   assert.deepEqual(await runAgentAttempt(issue, null, f.deps), { kind: "normal" });
-  assert.deepEqual(f.events, ["create", "before", "write:SYMPHONY_ISSUE.json", "agent", "start", "turn", "read:SYMPHONY_RESULT.json", "tracker", "remove:SYMPHONY_RESULT.json", "stop", "after", "close"]);
+  assert.deepEqual(f.events, ["create", "remove:SYMPHONY_RESULT.json", "before", "write:SYMPHONY_ISSUE.json", "agent", "start", "turn", "read:SYMPHONY_RESULT.json", "tracker", "remove:SYMPHONY_RESULT.json", "stop", "after", "close"]);
   assert.equal(JSON.parse(f.files.get("SYMPHONY_ISSUE.json")!).id, issue.id);
 });
 
@@ -259,7 +259,7 @@ test("orchestrator shutdown waits for a late runtime and prevents agent startup"
   const f = runnerFixture(t);
   const creating = deferred<void>();
   const created = deferred<ExecutionSession>();
-  registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem"], create() {
+  registerExecutionProviderFactory({ kind: f.deps.config.execution.kind, capabilities: ["process", "filesystem", "host-workspace"], create() {
     creating.resolve(); return created.promise;
   } });
   const workflow = parseWorkflow(`---\ntracker:\n  kind: file\n  active_states: [todo]\n  terminal_states: [done]\n  provider:\n    dir: ./issues\nworkspace:\n  root: ./ws\nagent:\n  kind: ${f.deps.agentKind}\n---\nWork`);

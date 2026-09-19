@@ -2546,3 +2546,24 @@ types and Git states MUST fail explicitly instead of silently dropping work.
 
 The version 1 format, supported states, platform behavior, resource limits, and
 staging ownership are specified in [Workspace snapshots](docs/workspace-snapshots.md).
+
+### B.9 Transactional Checkpoints (OPTIONAL)
+
+Execution providers operating directly on the supplied host workspace MUST advertise
+`host-workspace`. Other providers MUST support workspace snapshots. A remote attempt
+runs one turn and MUST stop its writers before exporting. Each successful remote turn
+MUST have a verified checkpoint on the host before its result changes tracker state.
+Direct mutating agent tools MUST NOT bypass this handoff.
+
+The host MUST retain a pending journal before publication and MUST verify imported
+files and Git state before acknowledging completion. Existing host edits MUST NOT be
+silently overwritten. Tracker failure after import MUST retain the pending result;
+retry MUST verify the import and retry the handoff before running another agent.
+
+Failed-turn work MUST remain recoverable without replacing the last successful retry
+baseline. If work cannot be exported, the runtime MUST be retained and the issue halted.
+Cleanup MUST preserve pending handoffs and incomplete recovery material. Cancellation
+before tracker write-back MUST suppress that attempt's result.
+
+The lifecycle, provider requirements, journal format, at-least-once tracker semantics,
+and manual recovery procedure are described in [Checkpoints](docs/checkpoints.md).
