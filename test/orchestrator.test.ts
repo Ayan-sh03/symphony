@@ -185,7 +185,7 @@ test("dispatches todo issue, applies self-tracking result, transitions to done",
     const drained = await waitFor(() => orch.snapshot().counts.running === 0);
     assert.ok(drained, "running set should drain after terminal transition");
 
-    // The activity log is retained after the run finishes (SPEC §13.7.2 recent_events).
+    // The activity log is retained after the run finishes.
     // The short continuation retry may briefly report "retrying" first; wait it out.
     const settled = await waitFor(() => orch.issueDetail("T-1")?.status === "completed");
     assert.ok(settled, "finished issue detail should settle to completed from history");
@@ -458,7 +458,7 @@ test("file-tracker completion capacity scales from five to twenty concurrent age
   t.diagnostic("file-tracker burst: 5 workers=4 waves, 20 workers=1 wave, capacity scaling=4x");
 });
 
-test("invalid workflow reload does not crash and keeps operating (SPEC 6.2)", async () => {
+test("invalid workflow reload does not crash and keeps operating", async () => {
   registerAgentFactory(makeFakeFactory("done"));
   const { wfPath, workflow, config } = setup("done");
   const orch = new Orchestrator({ config, workflow, workflowPath: wfPath, logger: silent });
@@ -1362,7 +1362,7 @@ test("an issue moved to terminal mid-turn finishes as delivered, not a failed/ca
   }
 });
 
-// ---- follow-up issues / work streams (SPEC Appendix B.5) ----
+// ---- follow-up issues / work streams ----
 
 /**
  * Backend that holds each turn open for `holdMs` and records, per workspace path,

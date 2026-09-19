@@ -1,8 +1,8 @@
 /**
- * Project manifest (multi-project host extension; not part of the single-workflow
- * SPEC). A manifest is a JSON array of `{ id, name, workflow }` entries, each naming
- * one WORKFLOW.md that becomes an independent, SPEC-conformant orchestrator. The set
- * is stable across restarts; the console can append to it at runtime. `workflow`
+ * Project manifest (multi-project host extension). A manifest is a JSON array of
+ * `{ id, name, workflow }` entries, each naming one WORKFLOW.md that becomes an
+ * independent orchestrator. The set is stable across restarts; the console can
+ * append to it at runtime. `workflow`
  * paths are resolved relative to the manifest file's own directory.
  */
 import fs from "node:fs";

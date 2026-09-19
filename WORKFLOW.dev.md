@@ -75,8 +75,8 @@ milestone spec for a feature of this very project.
 - No runtime-typed syntax: no `enum`, no TS parameter properties, no namespaces.
 - ESM only; import Node builtins as `node:*`. Do **not** add dependencies —
   prefer the Node stdlib.
-- Read `CLAUDE.md` and the relevant `SPEC.md` sections before changing code, and
-  match the surrounding style (files carry a SPEC-citing header comment).
+- Read `AGENTS.md` before changing code, and match the surrounding style (files
+  carry a header comment describing their role).
 
 {% if issue.follow_up_for %}
 ## This is a follow-up on {{ issue.follow_up_for }}

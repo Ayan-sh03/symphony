@@ -1,5 +1,5 @@
 /**
- * Orchestrator (SPEC §7, §8, §16). The single authority that mutates scheduling
+ * Orchestrator. The single authority that mutates scheduling
  * state. Node's single-threaded event loop serializes these mutations; all worker
  * outcomes are reported back here and converted into explicit transitions.
  */
@@ -35,7 +35,7 @@ export class OrchestratorError extends Error {
   }
 }
 
-/** One entry in an agent's activity log (SPEC §13.7.2 recent_events). */
+/** One entry in an agent's activity log. */
 interface LogEvent {
   at: string;
   event: string;
@@ -44,7 +44,7 @@ interface LogEvent {
 
 interface RunningEntry {
   identifier: string;
-  /** Work stream (SPEC Appendix B.5): the identifier owning this run's workspace/branch. */
+  /** Work stream: the identifier owning this run's workspace/branch. */
   stream: string;
   issue: Issue;
   session: LiveSession;
@@ -110,7 +110,7 @@ const AGENT_DETECTION_TTL_MS = 60000;
 const AGENT_DETECTION_FORCE_MIN_MS = 1000;
 
 /**
- * How long a model listing is trusted (extension, Appendix B.7). Far longer than agent
+ * How long a model listing is trusted (extension). Far longer than agent
  * detection: a model list changes when a provider ships or credentials change, not
  * minute to minute, and each probe costs a spawned CLI (~1.4 s for codex, ~3.7 s for
  * opencode). The console has an explicit refresh for the impatient case.
@@ -157,14 +157,14 @@ export interface HaltedEntry {
   halted_at: string;
 }
 
-/** Token counts as reported to operators (SPEC §13.3). */
+/** Token counts as reported to operators. */
 interface TokenTotals {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
 }
 
-/** Token counts plus their read-time cost estimate (extension, SPEC Appendix B). */
+/** Token counts plus their read-time cost estimate (extension). */
 interface TokensView extends TokenTotals {
   estimated_cost: EstimatedCost | null;
 }
@@ -234,7 +234,7 @@ export class Orchestrator {
   private adapter: TrackerAdapter;
   private workspaceManager: WorkspaceManager;
 
-  // Runtime state (SPEC §4.1.8).
+  // Runtime state.
   private running = new Map<string, RunningEntry>();
   private claimed = new Set<string>();
   private retry_attempts = new Map<string, RetryEntry>();
@@ -252,7 +252,7 @@ export class Orchestrator {
   private agentDetection: AgentDetection[] = [];
   private agentDetectionAt = 0;
   private agentDetectionInFlight: Promise<AgentDetection[]> | null = null;
-  /** Per-kind model listings (extension, Appendix B.7). Never read on the dispatch path. */
+  /** Per-kind model listings (extension). Never read on the dispatch path. */
   private agentModelCache = new Map<string, { models: AgentModel[]; at: number; fetched_at: string }>();
   private agentModelsInFlight = new Map<string, Promise<AgentModel[]>>();
   private agentDiscoveryCache: AgentDiscoveryCache;
@@ -317,7 +317,7 @@ export class Orchestrator {
     const n = this.normState(state);
     return this.config.tracker.terminal_states.some((s) => this.normState(s) === n);
   }
-  /** SPEC §8.2: dispatchable + all required labels present (state/claims checked separately). */
+  /** Dispatchable + all required labels present (state/claims checked separately). */
   private isRoutable(issue: Issue): boolean {
     if (!issue.dispatchable) return false;
     const want = this.config.tracker.required_labels.map((l) => this.normState(l));
@@ -328,7 +328,7 @@ export class Orchestrator {
     return true;
   }
 
-  // ---- work streams (SPEC Appendix B.5) ----
+  // ---- work streams ----
 
   /**
    * The work stream an issue belongs to: the identifier whose workspace and branch it
@@ -411,7 +411,7 @@ export class Orchestrator {
     });
   }
 
-  // ---- config validation (SPEC §6.3) ----
+  // ---- config validation ----
 
   validateDispatchConfig(): ValidationResult {
     try {
@@ -435,7 +435,7 @@ export class Orchestrator {
 
   // ---- lifecycle ----
 
-  /** Startup: validate, startup cleanup, immediate tick, then repeat (SPEC §8.1, §16.1). */
+  /** Startup: validate, startup cleanup, immediate tick, then repeat. */
   async start(): Promise<void> {
     const v = this.validateDispatchConfig();
     if (!v.ok) throw new Error(`startup validation failed: ${v.error}`);
@@ -504,9 +504,9 @@ export class Orchestrator {
   }
 
   /**
-   * Resolve a create request's follow-up link into a frozen work stream (SPEC Appendix
-   * B.5). The parent must exist now, and the stream stored is the parent's *own* stream,
-   * so a chain of follow-ups all name the branch the first issue opened. Requests without
+   * Resolve a create request's follow-up link into a frozen work stream. The parent
+   * must exist now, and the stream stored is the parent's *own* stream, so a chain of
+   * follow-ups all name the branch the first issue opened. Requests without
    * `follow_up_for` pass through untouched — including the stream field, which callers
    * never set directly: it is derived here or not at all.
    */
@@ -606,7 +606,7 @@ export class Orchestrator {
     this.releaseHalt(id); // a deleted issue holds nothing
     this.claimed.delete(id);
     // Deleting one member of a work stream must not take the shared workspace with
-    // it — its siblings still deliver onto that branch (SPEC Appendix B.5).
+    // it — its siblings still deliver onto that branch.
     await this.cleanupStream(stream, id);
     this.logger.info("issue deleted", { issue_id: id, issue_identifier: identifier });
     this.scheduleTick(0);
@@ -628,7 +628,7 @@ export class Orchestrator {
 
   // ---- agent selection ----
 
-  /** This project's configured server.port (SPEC §13.7), or null. Used only for the host's default bind. */
+  /** This project's configured server.port, or null. Used only for the host's default bind. */
   serverPort(): number | null {
     return this.config.server_port;
   }
@@ -701,7 +701,7 @@ export class Orchestrator {
   }
 
   /**
-   * Models a backend reports it can run (extension, Appendix B.7). `kind` defaults to
+   * Models a backend reports it can run (extension). `kind` defaults to
    * the effective default backend; the console passes an explicit one when an issue
    * pins its own agent, so the dropdown lists that backend's models rather than another's.
    *
@@ -947,7 +947,7 @@ export class Orchestrator {
         agent_override: i.agent,          // explicit per-task choice, or null
         // Per-task model, or null for the backend default. There is no "effective"
         // counterpart to agent above: the default lives inside the CLI, so claiming
-        // one here would be a guess (Appendix B.7).
+        // one here would be a guess.
         model: i.model,
         needs_attention: i.delivery?.needs_attention === true,
         follow_up_for: i.follow_up_for,
@@ -1006,7 +1006,7 @@ export class Orchestrator {
     return issue;
   }
 
-  /** Force an out-of-band poll+reconcile cycle (SPEC §13.7.2 /refresh). */
+  /** Force an out-of-band poll+reconcile cycle. */
   requestRefresh(): { queued: boolean; coalesced: boolean } {
     if (this.refreshQueued) return { queued: true, coalesced: true };
     this.refreshQueued = true;
@@ -1014,7 +1014,7 @@ export class Orchestrator {
     return { queued: true, coalesced: false };
   }
 
-  /** Poll-and-dispatch tick (SPEC §8.1, §16.2). */
+  /** Poll-and-dispatch tick. */
   async tick(): Promise<void> {
     if (this.stopped) return;
     const generation = this.lifecycleGeneration;
@@ -1089,7 +1089,7 @@ export class Orchestrator {
     }
   }
 
-  // ---- candidate selection (SPEC §8.2) ----
+  // ---- candidate selection ----
 
   private shouldDispatch(issue: Issue, busy: Set<string>, runningByState: Map<string, number>): boolean {
     if (!issue.id || !issue.identifier || !issue.title || !issue.state) return false;
@@ -1100,7 +1100,7 @@ export class Orchestrator {
     if (this.claimed.has(issue.id)) return false;
     if (!this.stateSlotAvailable(issue.state, runningByState)) return false;
     // One workspace and one branch per stream: a sibling follow-up runs next tick,
-    // not concurrently (SPEC Appendix B.5). No claim is taken — the issue stays a
+    // not concurrently. No claim is taken — the issue stays a
     // plain candidate, so whichever member is ready first simply goes first.
     if (busy.has(this.streamOf(issue))) return false;
     return true;
@@ -1120,7 +1120,7 @@ export class Orchestrator {
     });
   }
 
-  // ---- concurrency (SPEC §8.3) ----
+  // ---- concurrency ----
 
   private availableSlots(): number {
     return Math.max(this.config.max_concurrent_agents - this.running.size, 0);
@@ -1139,7 +1139,7 @@ export class Orchestrator {
     return (runningByState.get(n) ?? 0) < limit;
   }
 
-  // ---- dispatch (SPEC §16.4) ----
+  // ---- dispatch ----
 
   private dispatch(issue: Issue, attempt: number | null): void {
     if (this.stopped) {
@@ -1203,14 +1203,14 @@ export class Orchestrator {
     })();
   }
 
-  /** Build child env with tracker secrets removed (SPEC §15.3, §10.5). */
+  /** Build child env with tracker secrets removed. */
   private buildChildEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
     for (const name of this.adapter.secretEnvironmentNames()) delete env[name];
     return env;
   }
 
-  // ---- agent updates (SPEC §7.3, §13.5) ----
+  // ---- agent updates ----
 
   private onAgentUpdate(issueId: string, u: AgentUpdate): void {
     const entry = this.running.get(issueId);
@@ -1234,7 +1234,7 @@ export class Orchestrator {
       if (entry.events.length > MAX_EVENTS) entry.events.splice(0, entry.events.length - MAX_EVENTS);
     }
 
-    // Token accounting: absolute totals, dedup via deltas (SPEC §13.5).
+    // Token accounting: absolute totals, dedup via deltas.
     if (u.usage && (u as { absolute?: boolean }).absolute) {
       const inp = u.usage.input_tokens ?? 0;
       const out = u.usage.output_tokens ?? 0;
@@ -1263,7 +1263,7 @@ export class Orchestrator {
     this.notify(false);
   }
 
-  // ---- worker exit + retry (SPEC §7.3, §16.6) ----
+  // ---- worker exit + retry ----
 
   private onWorkerExit(issueId: string, exit: WorkerExit): void {
     const entry = this.running.get(issueId);
@@ -1308,8 +1308,8 @@ export class Orchestrator {
     if (exit.retryable === false) {
       this.halt(issueId, entry.identifier, entry.stream, exit.reason ?? "runtime needs recovery", entry.retry_attempt ?? 0);
     } else if (exit.kind === "normal") {
-      this.completed.add(issueId); // bookkeeping only (SPEC §7.1)
-      // Short continuation retry to re-check activity (SPEC §7.1, §8.4).
+      this.completed.add(issueId); // bookkeeping only
+      // Short continuation retry to re-check activity.
       this.scheduleRetry(issueId, 1, entry.identifier, entry.stream, null, /*continuation*/ true);
       this.logger.info("worker completed", { issue_id: issueId, issue_identifier: entry.identifier });
     } else {
@@ -1320,7 +1320,7 @@ export class Orchestrator {
     this.notify();
   }
 
-  /** SPEC §8.4 backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
+  /** Backoff. Continuation = fixed 1s; failure = 10s * 2^(attempt-1) capped. */
   private scheduleRetry(issueId: string, attempt: number, identifier: string, stream: string, error: string | null, continuation: boolean): void {
     if (this.stopped) {
       this.claimed.delete(issueId);
@@ -1348,7 +1348,7 @@ export class Orchestrator {
       timer,
       error,
     });
-    this.claimed.add(issueId); // remains claimed while retry pending (SPEC §7.1)
+    this.claimed.add(issueId); // remains claimed while retry pending
   }
 
   private cancelRetry(issueId: string): void {
@@ -1404,7 +1404,7 @@ export class Orchestrator {
 
   /**
    * Clean a stream's workspace, unless another issue still belongs to that stream
-   * (SPEC Appendix B.5). Follow-ups share one worktree, so one member finishing must
+   * Follow-ups share one worktree, so one member finishing must
    * not delete the workspace its siblings are queued to work in. `finishedId` is the
    * issue that just ended — it is excluded from the check whatever state it is in.
    *
@@ -1567,7 +1567,7 @@ export class Orchestrator {
     });
   }
 
-  /** SPEC §16.6 on_retry_timer, coalesced once per event-loop turn. */
+  /** on_retry_timer, coalesced once per event-loop turn. */
   private async drainRetries(generation = this.lifecycleGeneration): Promise<void> {
     const dueIds = [...this.dueRetries];
     this.dueRetries.clear();
@@ -1633,7 +1633,7 @@ export class Orchestrator {
         continue;
       }
       // This path bypasses shouldDispatch, so it repeats the one-run-per-stream rule
-      // (SPEC Appendix B.5). Waiting on a sibling is not a failure, so it does not
+      // Waiting on a sibling is not a failure, so it does not
       // become another backoff attempt: the claim is released and the ordinary poll
       // loop re-dispatches this issue once the stream is free.
       if (busy.has(stream)) {
@@ -1676,7 +1676,7 @@ export class Orchestrator {
     this.notify();
   }
 
-  // ---- reconciliation (SPEC §8.5, §16.3) ----
+  // ---- reconciliation ----
 
   private async reconcile(): Promise<void> {
     this.reconcileStalled();
@@ -1727,7 +1727,7 @@ export class Orchestrator {
   }
 
   /**
-   * Terminate a running worker (SPEC §8.5). cleanupWorkspace only for terminal state.
+   * Terminate a running worker. cleanupWorkspace only for terminal state.
    *
    * A terminal state is normally the agent's own doing (it moved the issue mid-turn
    * and is still committing/verifying), so that case is given a grace window: the
@@ -1793,13 +1793,13 @@ export class Orchestrator {
     }
   }
 
-  // ---- startup cleanup (SPEC §8.6) ----
+  // ---- startup cleanup ----
 
   private async startupTerminalCleanup(): Promise<void> {
     try {
       const terminal = await this.adapter.fetchIssuesByStates(this.config.tracker.terminal_states);
       // Deduplicated by stream: several terminal follow-ups name one workspace, and
-      // cleanupStream still refuses any stream with a live member (Appendix B.5).
+      // cleanupStream still refuses any stream with a live member.
       const streams = new Set(terminal.map((i) => this.streamOf(i)));
       for (const stream of streams) {
         await this.cleanupStream(stream, "");
@@ -1809,7 +1809,7 @@ export class Orchestrator {
     }
   }
 
-  // ---- dynamic reload (SPEC §6.2) ----
+  // ---- dynamic reload ----
 
   /** Re-apply a reloaded workflow to future behavior. Never throws on bad input. */
   reload(def: WorkflowDefinition): void {
@@ -1850,7 +1850,7 @@ export class Orchestrator {
     this.notify();
   }
 
-  // ---- snapshot (SPEC §13.3, §13.7.2) ----
+  // ---- snapshot ----
 
   /**
    * Token counts plus their cost under the *current* pricing config (extension).
@@ -1945,7 +1945,7 @@ export class Orchestrator {
   }
 
   /**
-   * Per-issue detail for GET /api/v1/<identifier> (SPEC §13.7.2). Tries the live/
+   * Per-issue detail for GET /api/v1/<identifier>. Tries the live/
    * retrying/finished views synchronously; for an issue that has never run (e.g. one
    * sitting in backlog) it falls back to the tracker so the console shows an idle
    * detail instead of a spurious 404. Returns null only when the tracker has no such issue.
@@ -2035,7 +2035,7 @@ export class Orchestrator {
     return view;
   }
 
-  /** Per-issue detail for GET /api/v1/<identifier> (SPEC §13.7.2). Returns null if unknown. */
+  /** Per-issue detail for GET /api/v1/<identifier>. Returns null if unknown. */
   issueDetail(identifier: string): IssueDetailView | null {
     for (const [id, e] of this.running) {
       if (e.identifier === identifier) {
@@ -2198,7 +2198,7 @@ export interface BoardIssueView {
   agent_override: string | null;
   /** Delivery was recorded but flagged unsafe (uncommitted work / missing branch). */
   needs_attention: boolean;
-  /** Issue this one follows up on, or null (SPEC Appendix B.5). */
+  /** Issue this one follows up on, or null. */
   follow_up_for: string | null;
   /** Work stream owning this issue's branch/workspace; its own identifier when it leads one. */
   stream: string;
@@ -2270,12 +2270,12 @@ export interface IssueDetailView {
   /** Effective agent backend that would run this issue. */
   agent?: string;
   /**
-   * Per-task model, or null for the backend's own default (extension, Appendix B.7).
+   * Per-task model, or null for the backend's own default (extension).
    * Unlike `agent` there is no effective counterpart — the default lives inside the
    * CLI, so naming one here would be a guess.
    */
   model?: string | null;
-  /** Issue this one follows up on (SPEC Appendix B.5), when the tracker record is available. */
+  /** Issue this one follows up on, when the tracker record is available. */
   follow_up_for?: string | null;
   /** Work stream owning the workspace/branch shown here. Absent on views built before it is known. */
   stream?: string;

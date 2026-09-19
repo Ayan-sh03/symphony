@@ -1,5 +1,5 @@
 /**
- * OPTIONAL HTTP server extension (SPEC §13.7). Observability/control surface only;
+ * OPTIONAL HTTP server extension. Observability/control surface only;
  * never required for orchestrator correctness. Binds loopback by default.
  *
  * Multi-project (host extension): routes are scoped by project id. `/api/v1/projects`
@@ -80,8 +80,7 @@ export class SymphonyHttpServer {
     this.opts = opts;
     this.port = opts.port;
     // A blank/whitespace-only host is treated as unset: Node binds "" to `::`,
-    // which would silently expose the unauthenticated console. Default loopback
-    // (SPEC §13.7).
+    // which would silently expose the unauthenticated console. Default loopback.
     const trimmed = opts.host != null ? opts.host.trim() : "";
     this.host = trimmed || "127.0.0.1";
     this.server = http.createServer((req, res) => this.handle(req, res));
@@ -246,7 +245,7 @@ export class SymphonyHttpServer {
       return;
     }
     // Open a follow-up on an existing issue: same branch, same workspace, so review
-    // work does not diverge onto a second branch (SPEC Appendix B.5). The parent comes
+    // work does not diverge onto a second branch. The parent comes
     // from the path, never the body, so the console cannot mis-address one.
     const followUpMatch = rest.match(/^\/issues\/([^/]+)\/follow-up$/);
     if (followUpMatch) {
@@ -312,7 +311,7 @@ export class SymphonyHttpServer {
         .catch((err) => this.json(res, 500, { error: { code: "detect_failed", message: String(err) } }));
       return;
     }
-    // Model discovery (extension, Appendix B.7). Above the issue lookup for the same
+    // Model discovery (extension). Above the issue lookup for the same
     // reason as /agents: otherwise "models" is read as an issue identifier.
     if (rest === "/models" || rest === "/models/refresh") {
       const refresh = rest.endsWith("/refresh");
@@ -513,7 +512,7 @@ export class SymphonyHttpServer {
   /**
    * Create an issue. `parent` (from the `/issues/<id>/follow-up` route) makes it a
    * follow-up: it joins that issue's work stream and delivers onto the same branch
-   * instead of cutting its own (SPEC Appendix B.5).
+   * instead of cutting its own.
    */
   private async createIssue(orch: Orchestrator, req: http.IncomingMessage, res: http.ServerResponse, parent?: string): Promise<void> {
     let body: Record<string, unknown>;
@@ -579,7 +578,7 @@ export class SymphonyHttpServer {
       }
       patch.labels = body.labels.map(String);
     }
-    // Free text on purpose — the backend validates model ids, we do not (Appendix B.7).
+    // Free text on purpose — the backend validates model ids, we do not.
     // Blank means "clear it", which is how the form's default option comes back.
     if ("model" in body) {
       patch.model = typeof body.model === "string" && body.model.trim() !== "" ? body.model.trim() : null;

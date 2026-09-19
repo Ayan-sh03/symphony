@@ -1,5 +1,5 @@
 /**
- * Workflow Loader (SPEC §5.1, §5.2). Reads WORKFLOW.md, splits YAML front matter
+ * Workflow Loader. Reads WORKFLOW.md, splits YAML front matter
  * from the prompt body, and returns {config, prompt_template}.
  */
 import fs from "node:fs";
@@ -21,11 +21,11 @@ export class WorkflowError extends Error {
   }
 }
 
-/** Default fallback prompt when the body is empty (SPEC §5.4). */
+/** Default fallback prompt when the body is empty. */
 export const DEFAULT_PROMPT = "You are working on an issue from the configured tracker.";
 
 /**
- * Resolve the workflow file path (SPEC §5.1 precedence):
+ * Resolve the workflow file path (precedence):
  * 1. explicit path (CLI startup) 2. `WORKFLOW.md` in cwd.
  */
 export function resolveWorkflowPath(explicit?: string | null): string {
@@ -35,7 +35,7 @@ export function resolveWorkflowPath(explicit?: string | null): string {
 
 /**
  * Load and parse a WORKFLOW.md file. Throws WorkflowError on read/parse/shape
- * failures (SPEC §5.2, §5.5).
+ * failures.
  */
 export function loadWorkflow(filePath: string): WorkflowDefinition {
   let raw: string;
@@ -50,13 +50,13 @@ export function loadWorkflow(filePath: string): WorkflowDefinition {
   return parseWorkflow(raw);
 }
 
-/** Pure parse (SPEC §5.2), separated from IO so it is directly testable. */
+/** Pure parse, separated from IO so it is directly testable. */
 export function parseWorkflow(raw: string): WorkflowDefinition {
   // Normalize line endings so `---` fences match on Windows too.
   const text = raw.replace(/\r\n/g, "\n");
 
   if (!text.startsWith("---\n")) {
-    // No front matter: the whole file is the prompt body (SPEC §5.2).
+    // No front matter: the whole file is the prompt body.
     return { config: {}, prompt_template: text.trim() };
   }
 

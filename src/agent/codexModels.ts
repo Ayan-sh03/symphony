@@ -1,5 +1,5 @@
 /**
- * Codex model discovery (extension, SPEC Appendix B.7). Symphony is not the source of
+ * Codex model discovery (extension). Symphony is not the source of
  * truth for model inventory — codex is — so this asks the app-server what it can run
  * and renders the answer. Nothing model-related lives in `WORKFLOW.md`.
  *

@@ -1,5 +1,5 @@
 /**
- * opencode model discovery (extension, SPEC Appendix B.7). Asks the CLI what it can
+ * opencode model discovery (extension). Asks the CLI what it can
  * run rather than carrying a curated list; see `codexModels.ts` for the same contract
  * on the other backend.
  *

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Symphony CLI / host lifecycle (SPEC §5.1, §17.7). Usage:
+ * Symphony CLI / host lifecycle. Usage:
  *   symphony [path-to-WORKFLOW.md] [--port N]
  *   symphony --projects <manifest.json> [--port N]   # multi-project (host extension)
  * With no --projects flag it uses ./symphony.projects.json if present, else falls
@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   const level = (process.env.SYMPHONY_LOG_LEVEL as LogLevel) || "info";
   const logger = new Logger([new StderrSink()], level);
 
-  // Choose the project source (SPEC §5.1 extended for multi-project):
+  // Choose the project source (extended for multi-project):
   //   1. --projects <manifest>  2. ./symphony.projects.json if present  3. single WORKFLOW.md.
   const explicitManifest = args.manifestPath ? path.resolve(args.manifestPath) : null;
   const defaultManifest = path.resolve(process.cwd(), DEFAULT_MANIFEST);
@@ -97,12 +97,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // OPTIONAL HTTP server: CLI --port overrides per-project server.port (SPEC §13.7).
+  // OPTIONAL HTTP server: CLI --port overrides per-project server.port.
   const effectivePort = args.port ?? manager.get(manager.firstId())?.orchestrator.serverPort() ?? null;
   let httpServer: SymphonyHttpServer | null = null;
   if (effectivePort !== null && effectivePort !== undefined) {
     // Bind address: --host flag overrides SYMPHONY_HOST env, default loopback
-    // (SPEC §13.7). A blank/whitespace-only value is treated as unset so that
+    // A blank/whitespace-only value is treated as unset so that
     // `SYMPHONY_HOST=` in an env file can't silently widen the bind to `::`.
     const hostFlag = args.host != null ? args.host.trim() : "";
     const hostEnv = process.env.SYMPHONY_HOST != null ? process.env.SYMPHONY_HOST.trim() : "";

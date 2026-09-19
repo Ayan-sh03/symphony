@@ -1,5 +1,5 @@
 /**
- * Config Layer (SPEC §5.3, §6). Typed getters over WorkflowDefinition.config with
+ * Config Layer. Typed getters over WorkflowDefinition.config with
  * built-in defaults, `$VAR` indirection, and path normalization. Coercion errors
  * are surfaced as ConfigError.
  */
@@ -57,7 +57,7 @@ export interface CodexConfig {
 }
 
 /**
- * opencode backend config (SPEC §10 generalized; see src/agent/opencodeSession.ts).
+ * opencode backend config (see src/agent/opencodeSession.ts).
  * `command` is the opencode executable base (the ` run …` subcommand + flags are
  * appended by the session); `model` is an optional `provider/model` override; the
  * turn timeout bounds a single `opencode run` invocation.
@@ -93,7 +93,7 @@ export interface ServiceConfigValues {
   workspace_branch_template: string;
   workspace_delivery_mode: string;
   hooks: HooksConfig;
-  /** Selected agent backend (SPEC §10 generalized). Default "codex". */
+  /** Selected agent backend. Default "codex". */
   agent_kind: string;
   /** Selected execution backend. Existing workflows default to host-local execution. */
   execution: ExecutionConfig;
@@ -117,7 +117,7 @@ function asObject(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
-/** Expand `$VAR` / `${VAR}` from the environment. Empty resolution => missing (SPEC §5.3.1). */
+/** Expand `$VAR` / `${VAR}` from the environment. Empty resolution => missing. */
 export function expandVars(value: string): string {
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_m, a, b) => {
     const name = a ?? b;
@@ -125,7 +125,7 @@ export function expandVars(value: string): string {
   });
 }
 
-/** Expand `~` home and `$VAR` for filesystem path values only (SPEC §6.1). */
+/** Expand `~` home and `$VAR` for filesystem path values only. */
 export function expandPath(value: string): string {
   let v = expandVars(value);
   if (v === "~") v = os.homedir();
@@ -141,7 +141,7 @@ function coerceInt(value: unknown, field: string): number {
   throw new ConfigError(`${field} must be an integer, got ${JSON.stringify(value)}`);
 }
 
-/** Like coerceInt but without truncation — prices are fractional (SPEC Appendix B). */
+/** Like coerceInt but without truncation — prices are fractional. */
 function coerceNumber(value: unknown, field: string): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
@@ -205,7 +205,7 @@ function parsePricing(raw: unknown): PricingTable {
 
 /**
  * Build the typed ServiceConfig from a parsed workflow, resolving relative to the
- * directory that contains the WORKFLOW.md file (SPEC §5.3.3, §6.1).
+ * directory that contains the WORKFLOW.md file.
  */
 export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): ServiceConfigValues {
   const cfg = def.config;
@@ -280,7 +280,7 @@ export function buildConfig(def: WorkflowDefinition, workflowFilePath: string): 
     try {
       n = coerceInt(v, "x");
     } catch {
-      continue; // ignore non-numeric (SPEC §5.3.5)
+      continue; // ignore non-numeric
     }
     if (n > 0) max_concurrent_agents_by_state[key] = n;
   }

@@ -1,5 +1,5 @@
 /**
- * Read-time cost estimation over token counts (extension, SPEC Appendix B).
+ * Read-time cost estimation over token counts (extension).
  *
  * Pure: this module imports nothing and holds no state, so both the live snapshot
  * path and (later) a persisted run-history read path can share it.

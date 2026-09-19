@@ -1,4 +1,4 @@
-/** Portable workspace snapshots (SPEC §9 safety; extension, issue #35). */
+/** Portable workspace snapshots (extension, issue #35). */
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";

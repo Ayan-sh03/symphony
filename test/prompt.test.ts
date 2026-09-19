@@ -31,7 +31,7 @@ test("unknown filter fails rendering (strict)", () => {
   assert.throws(() => renderPrompt("{{ issue.title | no_such_filter }}", issue(), null), (e) => e instanceof PromptError);
 });
 
-test("branch and follow-up fields are in scope (SPEC Appendix B.5)", () => {
+test("branch and follow-up fields are in scope", () => {
   const tpl = "{{ branch }} follows {{ issue.follow_up_for }} on {{ issue.stream_identifier }}";
   const followUp = issue({ identifier: "ABC-2", follow_up_for: "ABC-1", stream_identifier: "ABC-1" });
   assert.equal(renderPrompt(tpl, followUp, null, "issue/ABC-1"), "issue/ABC-1 follows ABC-1 on ABC-1");

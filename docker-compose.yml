@@ -1,4 +1,4 @@
-# One-command containerized deploy (SPEC §13.7). Brings up the console on :8420
+# One-command containerized deploy. Brings up the console on :8420
 # with the file tracker. State (per-issue workspaces) persists in a named volume;
 # issues/ and WORKFLOW.md are bind-mounted from the host so you can edit them
 # without rebuilding the image. Agent CLIs are not in the image — see README.

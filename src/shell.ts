@@ -1,8 +1,7 @@
 /**
- * Platform-aware shell execution (SPEC §9.4 "a local shell context appropriate to
- * the host OS", §10.1 launch contract).
+ * Platform-aware shell execution.
  *
- * On POSIX we honor the spec default `bash -lc <script>` (falling back to `sh -lc`).
+ * On POSIX we honor the default `bash -lc <script>` (falling back to `sh -lc`).
  * On Windows we run through the default shell (`cmd.exe`) via `shell: true`, because
  * a POSIX login shell is not guaranteed and, on some hosts, wrapping Node CLIs in
  * `bash -lc` breaks their launcher shims. `codex.command` still runs verbatim.
@@ -59,7 +58,7 @@ export interface HookRunResult {
   stderr: string;
 }
 
-/** Run a one-shot shell script to completion with a timeout (SPEC §9.4). */
+/** Run a one-shot shell script to completion with a timeout. */
 export function runScript(
   script: string,
   cwd: string,
@@ -71,7 +70,7 @@ export function runScript(
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const cap = 64 * 1024; // truncate hook output in memory/logs (SPEC §15.4)
+    const cap = 64 * 1024; // truncate hook output in memory/logs
     child.stdout.on("data", (d) => {
       if (stdout.length < cap) stdout += d.toString("utf8");
     });

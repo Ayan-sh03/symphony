@@ -95,7 +95,7 @@ function issueActions(d) {
   </div>`;
 }
 
-// Work stream (SPEC Appendix B.5): who this issue continues, and who continues it.
+// Work stream: who this issue continues, and who continues it.
 // Everything in one stream shares a branch and a workspace, so it reads as one thread
 // of work rather than a set of unrelated issues.
 function streamPanel(d) {
@@ -125,7 +125,7 @@ export function detailPage(d) {
   const tok = d.tokens || (run && run.tokens) || null;
 
   // Pinned model, or none — there is no "effective" model to show: the fallback lives
-  // inside the CLI, so naming one here would be a guess (SPEC Appendix B.7).
+  // inside the CLI, so naming one here would be a guess.
   const model = issueModelOf(d);
 
   const rows = [["Issue id", mono(d.issue_id)]];

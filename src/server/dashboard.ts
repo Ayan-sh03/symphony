@@ -1,5 +1,5 @@
 /**
- * Symphony operational console (SPEC §13.7.1). Server sends a minimal app shell
+ * Symphony operational console. Server sends a minimal app shell
  * with the first snapshot embedded for instant paint; the client app (`./ui/`,
  * plain ES modules rendered with lit-html, served at `/ui/*`) then opens an SSE
  * stream for live updates, degrading to polling when the stream is unavailable.

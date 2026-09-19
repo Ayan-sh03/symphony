@@ -599,7 +599,7 @@ test("a stream that rebases what it already delivered is caught; adding to it is
   assert.equal(added.parent_delivery_sha, first);
   assert.equal(added.history_rewritten, false, "building on the branch is not a rewrite");
 
-  // A follow-up that squashes it away — the shape SPEC B.5 forbids. (Amending the
+  // A follow-up that squashes it away — the shape work streams forbid. (Amending the
   // tip would not qualify: the delivered commit stays an ancestor underneath it.)
   git(ws.path, ["reset", "-q", "--soft", `${first}~1`]);
   git(ws.path, ["commit", "-qm", "squashed history"]);
@@ -773,7 +773,7 @@ test("a base recorded at creation is never overwritten by recovery", async () =>
   assert.equal((await wm.deliveryInfo("REC-1"))!.base_branch, cutFrom);
 });
 
-// ---- work streams / follow-ups (SPEC Appendix B.5) ----
+// ---- work streams / follow-ups ----
 
 test("a follow-up reuses the stream's worktree and lands on the same branch", async () => {
   const repo = initRepo();

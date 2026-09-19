@@ -46,9 +46,6 @@ Repository-backed projects use git worktrees and preserve their delivery branche
 Scratch projects use ordinary per-issue directories. Follow-up issues share the original
 work stream so review fixes land on the same branch.
 
-[Checkpoint journals](checkpoints.md) preserve pending imports and tracker handoffs
-outside disposable workspaces. Failed-turn archives remain separate from the successful
-checkpoint used for retries.
-
-See [`SPEC.md`](../SPEC.md) for the complete behavioral contract and
-[`INTEGRATION.md`](../INTEGRATION.md) for extension interfaces and tests.
+Checkpoint journals preserve pending imports and tracker handoffs outside disposable
+workspaces. Failed-turn archives remain separate from the successful checkpoint used for
+retries. See [`AGENTS.md`](../AGENTS.md) for extension interfaces and working conventions.

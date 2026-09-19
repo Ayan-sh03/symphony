@@ -1,6 +1,6 @@
 /**
- * Structured logging (SPEC §13.1, §13.2). Emits stable `key=value` lines to one
- * or more sinks. A failing sink never crashes orchestration (SPEC §13.2, §14.2);
+ * Structured logging. Emits stable `key=value` lines to one
+ * or more sinks. A failing sink never crashes orchestration;
  * remaining sinks still receive the record and a warning is surfaced once.
  */
 
@@ -15,7 +15,7 @@ export interface Sink {
   write(line: string, level: LogLevel): void;
 }
 
-/** Default sink: stderr, so operators see failures without a debugger (SPEC §13.2). */
+/** Default sink: stderr, so operators see failures without a debugger. */
 export class StderrSink implements Sink {
   name = "stderr";
   write(line: string): void {
@@ -32,7 +32,7 @@ function formatValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** Redact obvious secret-bearing keys so tokens never reach a sink (SPEC §15.3). */
+/** Redact obvious secret-bearing keys so tokens never reach a sink. */
 const SECRET_KEY_RE = /(token|secret|password|api[_-]?key|authorization)/i;
 
 export class Logger {
@@ -70,7 +70,7 @@ export class Logger {
       } catch (err) {
         if (!this.failedSinks.has(sink.name)) {
           this.failedSinks.add(sink.name);
-          // Surface once through any remaining sink (SPEC §13.2).
+          // Surface once through any remaining sink.
           const warn = `ts=${ts} level=warn msg="log sink failed" sink=${sink.name} error=${formatValue(String(err))}`;
           for (const other of this.sinks) {
             if (other === sink) continue;

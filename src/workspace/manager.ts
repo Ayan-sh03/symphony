@@ -1,5 +1,5 @@
 /**
- * Workspace Manager (SPEC §4.2, §9). Deterministic per-issue workspaces with
+ * Workspace Manager. Deterministic per-issue workspaces with
  * sanitized, collision-resistant keys; lifecycle hooks; safety invariants;
  * terminal cleanup.
  *
@@ -9,10 +9,10 @@
  * remove a worktree that still holds uncommitted work or whose branch is gone.
  *
  * Every method here is keyed by a *work stream* identifier, not by an issue id.
- * For an ordinary issue the two are the same string; for a follow-up (SPEC
- * Appendix B.5) the stream is the issue it continues, which is how several issues
- * come to share one branch and one worktree. Resolving an issue to its stream is
- * the orchestrator's job — this class never talks to a tracker.
+ * For an ordinary issue the two are the same string; for a follow-up the stream is
+ * the issue it continues, which is how several issues come to share one branch and
+ * one worktree. Resolving an issue to its stream is the orchestrator's job — this
+ * class never talks to a tracker.
  *
  * Every git call here is async: the host runs all projects, their agents' stdio
  * and the console on one event loop, so a synchronous `worktree add` (or worse,
@@ -43,7 +43,7 @@ export class WorkspaceError extends Error {
 const ALLOWED = /[^A-Za-z0-9._-]/g;
 
 /**
- * Derive a collision-resistant workspace key (SPEC §4.2, Invariant 3). If
+ * Derive a collision-resistant workspace key (Invariant 3). If
  * sanitization changes the identifier, append a stable hash of the *original*
  * identifier (>=64 bits, allowed chars) so distinct identifiers that sanitize to
  * the same text get distinct keys.
@@ -88,7 +88,7 @@ export function refKey(stream: string): string {
 }
 
 /**
- * Whether a string is safe to use as a work stream key (SPEC Appendix B.5). A stream
+ * Whether a string is safe to use as a work stream key. A stream
  * feeds both the branch template and the workspace path, so it is checked before it is
  * ever stored: no leading dash (git would read the branch as an option), no `..`, and
  * nothing outside the characters a branch name and a path can both carry.
@@ -165,7 +165,7 @@ export class WorkspaceManager {
     this.opts = opts;
   }
 
-  /** Update effective hooks/root/repo after a config reload (SPEC §6.2). */
+  /** Update effective hooks/root/repo after a config reload. */
   update(root: string, hooks: HooksConfig, repo: WorkspaceRepoSettings): void {
     this.opts.root = root;
     this.opts.hooks = hooks;
@@ -197,7 +197,7 @@ export class WorkspaceManager {
     return new WorkspaceCheckpoint(this.workspacePathFor(stream), path.join(this.opts.root, ".symphony-checkpoints", key));
   }
 
-  /** Invariant 2 (SPEC §9.5): workspace path MUST stay inside workspace root. */
+  /** Invariant 2: workspace path MUST stay inside workspace root. */
   private assertInsideRoot(p: string): void {
     const root = path.resolve(this.opts.root);
     const abs = path.resolve(p);
@@ -209,9 +209,9 @@ export class WorkspaceManager {
 
   /**
    * Ensure the stream's workspace exists, running `after_create` only on fresh
-   * creation (SPEC §9.2). Returns the logical Workspace record.
+   * creation. Returns the logical Workspace record.
    *
-   * `requireExistingBranch` (follow-ups, SPEC Appendix B.5) forbids creating the
+   * `requireExistingBranch` (follow-ups) forbids creating the
    * branch: a follow-up joins work that already exists, so a missing branch means
    * the stream was merged away or renamed. Cutting a fresh one from the base would
    * silently fork the work — the exact divergence follow-ups exist to prevent — so
@@ -239,7 +239,7 @@ export class WorkspaceManager {
       stat = null;
     }
     if (stat && !stat.isDirectory()) {
-      // Existing non-directory at the workspace location: fail safely (SPEC §17.2).
+      // Existing non-directory at the workspace location: fail safely.
       throw new WorkspaceError(`workspace path ${wsPath} exists but is not a directory`);
     }
     if (stat && this.opts.repository) {
@@ -321,7 +321,7 @@ export class WorkspaceManager {
     if (created_now && this.opts.hooks.after_create) {
       const res = await this.runHook("after_create", this.opts.hooks.after_create, wsPath);
       if (!res.ok) {
-        // after_create failure is fatal to creation: remove the partial dir (SPEC §9.3, §9.4).
+        // after_create failure is fatal to creation: remove the partial dir.
         try {
           fs.rmSync(wsPath, { recursive: true, force: true });
         } catch {
@@ -334,14 +334,14 @@ export class WorkspaceManager {
     return { path: wsPath, workspace_key: key, created_now };
   }
 
-  /** `before_run`: fatal to the attempt on failure/timeout (SPEC §9.4). */
+  /** `before_run`: fatal to the attempt on failure/timeout. */
   async runBeforeRun(wsPath: string, execution?: ExecutionSession, signal?: AbortSignal): Promise<boolean> {
     if (!this.opts.hooks.before_run) return true;
     const res = await this.runHook("before_run", this.opts.hooks.before_run, wsPath, execution, signal);
     return res.ok;
   }
 
-  /** `after_run`: logged and ignored on failure/timeout (SPEC §9.4). */
+  /** `after_run`: logged and ignored on failure/timeout. */
   async runAfterRun(wsPath: string, execution?: ExecutionSession): Promise<void> {
     if (!this.opts.hooks.after_run) return;
     if (!execution && !fs.existsSync(wsPath)) return;
@@ -349,9 +349,9 @@ export class WorkspaceManager {
   }
 
   /**
-   * Remove a stream's workspace, running `before_remove` first (SPEC §9.4). Used for
+   * Remove a stream's workspace, running `before_remove` first. Used for
    * terminal issues. The caller is responsible for not cleaning a stream that another
-   * issue still belongs to (SPEC Appendix B.5) — this class cannot see the tracker.
+   * issue still belongs to — this class cannot see the tracker.
    */
   async cleanupForIssue(stream: string): Promise<void> {
     if (await this.checkpointFor(stream).hasPending()) {
@@ -486,7 +486,7 @@ export class WorkspaceManager {
       if (out) filesChanged = out.split(/\r?\n/).filter((l) => l !== "" && !SCRATCH_FILES.includes(l));
     }
     // A follow-up continues its stream's branch and must only ever add to it
-    // (SPEC Appendix B.5). Git can settle that in one call: if what the stream
+    // Git can settle that in one call: if what the stream
     // delivered last time is no longer reachable from the branch, the history
     // under it was rewritten and the earlier, already-reviewed work is gone.
     const previous = await this.lastDelivery(stream);
@@ -510,7 +510,7 @@ export class WorkspaceManager {
   }
 
   /**
-   * Anchor a delivery in git itself (extension, SPEC Appendix B).
+   * Anchor a delivery in git itself (extension).
    *
    * Until this, `IssueDelivery.commit_sha` was a JSON claim *about* git that git
    * did not corroborate: once the worktree is cleaned its reflog goes with it, and
@@ -872,7 +872,7 @@ export class WorkspaceManager {
    * recorded half-way — the tag and the base it is meaningful against always agree.
    *
    * `update` with an empty old-oid, not `create`: a stream re-delivers every time
-   * a follow-up lands on it (SPEC Appendix B.5), and `create` fails on a ref that
+   * a follow-up lands on it, and `create` fails on a ref that
    * already exists — which, the transaction being atomic, would silently discard
    * the whole record from the second delivery onwards.
    */

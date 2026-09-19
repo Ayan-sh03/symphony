@@ -38,7 +38,7 @@ export function integratePage() {
     <div class="detail-grid"><div>
       <div class="log-head">Add a backend in 5 steps</div>
       <div class="isteps">${STEPS.map((s, i) => html`<div class="istep"><div class="inum">${i + 1}</div><div><div class="ititle">${s[0]}</div><div class="idesc">${s[1]}</div></div></div>`)}</div>
-      <p class="sub" style="margin-top:18px">Full walkthrough, the event vocabulary, and the tracker-adapter contract are in <code>INTEGRATION.md</code> in the repo.</p>
+      <p class="sub" style="margin-top:18px">The event vocabulary and the tracker-adapter contract live alongside the code in the repo.</p>
     </div><div>
       <div class="aside-card"><div class="field" style="margin:0"><label>Default agent</label>${defSelect}</div></div>
       <div class="aside-card"><div class="log-head" style="margin-top:0">Agents on this machine</div>${agentStatusList(m)}
