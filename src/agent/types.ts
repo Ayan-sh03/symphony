@@ -1,5 +1,5 @@
 /**
- * Agent abstraction (generalizes SPEC §10). Symphony's Execution Layer talks to a
+ * Agent abstraction. Symphony's Execution Layer talks to a
  * coding agent only through `AgentSession`; Codex is one backend behind this
  * interface. Adding another agent means implementing `AgentSession` + `AgentFactory`
  * and registering it (see agent/registry.ts) — the orchestrator, runner, workspace,
@@ -14,13 +14,13 @@ import type { ExecutionSession } from "../execution/types.ts";
 
 export type { AgentDetection, AgentDetectDeps };
 
-/** Terminal outcome of one agent turn (SPEC §10.3 completion conditions). */
+/** Terminal outcome of one agent turn (completion conditions). */
 export interface AgentTurnResult {
   status: "completed" | "failed" | "cancelled" | "timeout";
   error?: string;
 }
 
-/** Session identity exposed after start (SPEC §10.2). */
+/** Session identity exposed after start. */
 export interface AgentSessionIdentity {
   /** Stable per-run thread identity reused across continuation turns. */
   threadId: string;
@@ -58,16 +58,16 @@ export interface AgentSessionOptions {
   logger: Logger;
   onUpdate: (u: AgentUpdate) => void;
   /**
-   * Tracker adapter bound to this session snapshot (SPEC §10.5). Used to execute
+   * Tracker adapter bound to this session snapshot. Used to execute
    * advertised provider-native tools host-side. A reload MUST NOT swap it mid-session.
    */
   adapter: TrackerAdapter;
   /** Provider-native tool specs advertised for this session, bound to the snapshot. */
   toolSpecs: ToolSpec[];
-  /** Child environment (tracker secrets already stripped — SPEC §15.3). */
+  /** Child environment (tracker secrets already stripped). */
   env: NodeJS.ProcessEnv;
   /**
-   * OPTIONAL per-run model (extension, SPEC Appendix B.7), taken from `issue.model`.
+   * OPTIONAL per-run model (extension), taken from `issue.model`.
    * Passed to the backend verbatim — Symphony never validates it, because the CLI is
    * the authority and reports a bad id better than we can. A backend free to ignore
    * this runs on its own default, which is also what absent means.
@@ -83,7 +83,7 @@ export interface TranscriptEvent {
 }
 
 /**
- * One model a backend reports it can run (extension, SPEC Appendix B.7). `id` is the
+ * One model a backend reports it can run (extension). `id` is the
  * string handed back to the backend verbatim — Symphony never interprets it.
  *
  * `default` means the model this backend would *actually* use for a run with no
@@ -139,7 +139,7 @@ export interface AgentFactory {
   readonly kind: string;
   create(opts: AgentSessionOptions): AgentSession;
   /**
-   * Optional capability (SPEC §13.7.2): read the backend's own persisted transcript
+   * Optional capability: read the backend's own persisted transcript
    * for a finished run, so the console can show activity after Symphony's in-memory
    * history is gone (e.g. a restart). Best-effort — these are internal on-disk formats;
    * return `[]` (never throw) when nothing is found. Newest-last ordering.
@@ -159,7 +159,7 @@ export interface AgentFactory {
    */
   availabilityCacheKey?(config: ServiceConfigValues): string;
   /**
-   * Optional capability (extension, SPEC Appendix B.7): enumerate the models this
+   * Optional capability (extension): enumerate the models this
    * backend can run on this host. Symphony is not the source of truth for model
    * inventory — the CLI is — so every model name in the console originates here.
    *

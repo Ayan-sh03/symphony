@@ -1,5 +1,5 @@
 /**
- * Model discovery (extension, SPEC Appendix B.7). Covers the registry passthrough and
+ * Model discovery (extension). Covers the registry passthrough and
  * the two pure parsers. Nothing here spawns a real `codex`/`opencode` — discovery that
  * shells out is exercised only through fake factories and raw payloads.
  */

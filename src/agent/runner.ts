@@ -1,5 +1,5 @@
 /**
- * Agent Runner (SPEC §10.7, §16.5). Wraps workspace + prompt + agent session for
+ * Agent Runner. Wraps workspace + prompt + agent session for
  * one worker attempt: prepares the workspace, runs hooks, drives the turn loop with
  * in-worker continuation on the same live thread, refreshes issue state between
  * turns, applies the self-tracking result write-back, and reports the exit outcome.
@@ -31,7 +31,7 @@ export interface RunnerDeps {
   /** Resolved agent backend for this run (per-issue override → default → config). */
   agentKind: string;
   /**
-   * Work stream this run belongs to (SPEC Appendix B.5): the identifier whose
+   * Work stream this run belongs to: the identifier whose
    * workspace and branch it uses. Equals the issue's own identifier for ordinary
    * issues; a follow-up names the issue it continues.
    */
@@ -42,16 +42,16 @@ export interface RunnerDeps {
   adapter: TrackerAdapter;
   workspaceManager: WorkspaceManager;
   logger: Logger;
-  /** Child environment with tracker secrets removed (SPEC §15.3). */
+  /** Child environment with tracker secrets removed. */
   childEnv: NodeJS.ProcessEnv;
   isActiveState: (state: string) => boolean;
   isTerminalState: (state: string) => boolean;
   isRoutable: (issue: Issue) => boolean;
-  /** Emit an agent update to the orchestrator, keyed by issue id (SPEC §10.4). */
+  /** Emit an agent update to the orchestrator, keyed by issue id. */
   onUpdate: (issueId: string, u: AgentUpdate) => void;
   /**
    * Hand the orchestrator a stop handle so reconciliation/stall detection can
-   * cancel this attempt (SPEC §8.5), including recovery and runtime creation.
+   * cancel this attempt, including recovery and runtime creation.
    * Called once, before workspace preparation.
    */
   onSessionReady: (stop: () => Promise<void>) => void;
@@ -61,7 +61,7 @@ export interface RunnerDeps {
 export const RESULT_FILE = "SYMPHONY_RESULT.json";
 
 /**
- * Run one full worker attempt (SPEC §16.5). Returns how the worker exited so the
+ * Run one full worker attempt. Returns how the worker exited so the
  * orchestrator can schedule a continuation retry (normal) or backoff retry (abnormal).
  */
 export async function runAgentAttempt(
@@ -252,7 +252,7 @@ function continuationPrompt(issue: Issue, turnNumber: number, maxTurns: number):
 /**
  * Apply the agent's self-tracking result file if present, then remove it so it is
  * not reapplied. This is the credible channel by which the coding agent transitions
- * the tracked issue (SPEC §11.5 "ticket writes ... performed by the coding agent").
+ * the tracked issue.
  */
 async function applyResultFile(execution: ExecutionSession, issue: Issue, deps: RunnerDeps, signal: AbortSignal): Promise<void> {
   const file = RESULT_FILE;

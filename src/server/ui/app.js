@@ -1,5 +1,5 @@
 /**
- * Console entry (SPEC §13.7.1). Boots from the inlined snapshot, then uses SSE
+ * Console entry. Boots from the inlined snapshot, then uses SSE
  * for live updates and bounded polling only while reconnecting. All painting goes through one
  * unconditional lit-html render — lit diffs the DOM in place, so background polls
  * never wipe focus, open menus, or in-flight form input.

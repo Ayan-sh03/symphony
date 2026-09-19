@@ -1,5 +1,5 @@
 /**
- * Process-tree termination (issue #39, SPEC §10.1 launch contract, §16.5 cleanup).
+ * Process-tree termination (issue #39).
  *
  * A single `child.kill()` only reaches the process Node spawned. On Windows the
  * command runs behind a `cmd.exe` wrapper (`shell: true` in `shell.ts`), so killing

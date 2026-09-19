@@ -61,7 +61,7 @@ function agentField(m) {
 
 /**
  * Whatever the model control currently holds, list-picked or hand-typed. Never checked
- * against the listing: the backend owns model validation (SPEC Appendix B.7).
+ * against the listing: the backend owns model validation.
  */
 function modelValue(f) {
   return f.model ? String(f.model.value || "").trim() : "";

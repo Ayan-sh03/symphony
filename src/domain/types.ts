@@ -1,6 +1,6 @@
 /**
- * Core domain model (SPEC §4). These types are provider-neutral; adapters map
- * provider payloads into `Issue` (SPEC §4.1.1, §11.3).
+ * Core domain model. These types are provider-neutral; adapters map
+ * provider payloads into `Issue`.
  */
 
 export interface BlockerRef {
@@ -29,7 +29,7 @@ export interface IssueDelivery {
   base_branch: string | null;
   /**
    * The commit this stream delivered last time; null on a stream's first delivery
-   * (extension, SPEC Appendix B.5).
+   * (extension).
    */
   parent_delivery_sha: string | null;
   /**
@@ -56,7 +56,7 @@ export interface IssueDelivery {
   pushed_at: string | null;
 }
 
-/** Normalized schedulable work item (SPEC §4.1.1). */
+/** Normalized schedulable work item. */
 export interface Issue {
   id: string;
   native_ref: Record<string, unknown> | null;
@@ -77,20 +77,20 @@ export interface Issue {
    */
   agent: string | null;
   /**
-   * OPTIONAL per-task model override (extension, SPEC Appendix B.7). Free text, passed
+   * OPTIONAL per-task model override (extension). Free text, passed
    * to the backend verbatim: the CLI owns model validation and errors better than we
    * could, so an id Symphony has never heard of is never rejected here. Null means the
    * backend's own default.
    */
   model: string | null;
   /**
-   * Identifier of the issue this one follows up on (extension, SPEC Appendix B.5).
+   * Identifier of the issue this one follows up on (extension).
    * Lineage only — it records who asked for the follow-up; the branch and workspace
    * come from `stream_identifier`.
    */
   follow_up_for: string | null;
   /**
-   * Work stream this issue belongs to (extension, SPEC Appendix B.5): the identifier
+   * Work stream this issue belongs to (extension): the identifier
    * whose branch and workspace it shares. Null means the issue is its own stream,
    * which is every ordinary issue. Frozen at creation from the parent's own stream,
    * so a chain of follow-ups all name the original — no walk, no cycles, and deleting
@@ -103,20 +103,20 @@ export interface Issue {
   updated_at: string | null;
 }
 
-/** Parsed WORKFLOW.md payload (SPEC §4.1.2). */
+/** Parsed WORKFLOW.md payload. */
 export interface WorkflowDefinition {
   config: Record<string, unknown>;
   prompt_template: string;
 }
 
-/** Logical workspace record (SPEC §4.1.4). */
+/** Logical workspace record. */
 export interface Workspace {
   path: string;
   workspace_key: string;
   created_now: boolean;
 }
 
-/** Live agent session metadata (SPEC §4.1.6). */
+/** Live agent session metadata. */
 export interface LiveSession {
   session_id: string | null;
   thread_id: string | null;
@@ -135,9 +135,9 @@ export interface LiveSession {
 }
 
 /**
- * Emitted runtime event from an agent session to the orchestrator (SPEC §10.4).
+ * Emitted runtime event from an agent session to the orchestrator.
  * Agent-implementation-neutral; the `codex_*`-named fields are kept because the
- * spec's observable LiveSession schema (§4.1.6) uses them, but any agent backend
+ * observable LiveSession schema uses them, but any agent backend
  * populates them.
  */
 export interface AgentUpdate {

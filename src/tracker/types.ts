@@ -1,5 +1,5 @@
 /**
- * Issue Tracker Adapter contract (SPEC §11). A portable read kernel plus OPTIONAL
+ * Issue Tracker Adapter contract. A portable read kernel plus OPTIONAL
  * provider-native agent tools.
  */
 import type { Issue, IssueDelivery } from "../domain/types.ts";
@@ -25,7 +25,7 @@ export class AdapterError extends Error {
   }
 }
 
-/** Agent tool spec advertised to the coding agent (SPEC §10.5, §11 extension). */
+/** Agent tool spec advertised to the coding agent (extension). */
 export interface ToolSpec {
   name: string;
   description: string;
@@ -33,7 +33,7 @@ export interface ToolSpec {
   mutates: boolean;
 }
 
-/** Result of a provider-native tool execution (SPEC §10.5). */
+/** Result of a provider-native tool execution. */
 export interface ToolResult {
   success: boolean;
   output: unknown;
@@ -77,7 +77,7 @@ export interface IssuePatch {
   priority?: number | null;
   labels?: string[];
   /**
-   * Per-task model override (extension, Appendix B.7). Unlike `agent`, this has no
+   * Per-task model override (extension). Unlike `agent`, this has no
    * dedicated endpoint: it is free text with nothing to validate against, so the edit
    * form is the whole interface. `null` clears it back to the backend default.
    */
@@ -87,13 +87,13 @@ export interface IssuePatch {
 export interface TrackerAdapter {
   readonly kind: string;
 
-  /** SPEC §11.1: candidate polling + startup terminal cleanup. Empty list => empty, no request. */
+  /** Candidate polling + startup terminal cleanup. Empty list => empty, no request. */
   fetchIssuesByStates(stateNames: string[]): Promise<Issue[]>;
 
-  /** SPEC §11.1: reconciliation/refresh. Empty list => empty, no request. Malformed requested record MUST fail. */
+  /** Reconciliation/refresh. Empty list => empty, no request. Malformed requested record MUST fail. */
   fetchIssuesByIds(issueIds: string[]): Promise<Issue[]>;
 
-  /** OPTIONAL provider-native agent tools (SPEC §10.5). */
+  /** OPTIONAL provider-native agent tools. */
   agentToolSpecs(): ToolSpec[];
   secretEnvironmentNames(): string[];
   executeAgentTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult>;
@@ -106,7 +106,7 @@ export interface TrackerAdapter {
   createIssue?(input: NewIssueInput): Promise<Issue>;
 
   /**
-   * OPTIONAL follow-up capability (extension, SPEC Appendix B.5): the adapter persists
+   * OPTIONAL follow-up capability (extension): the adapter persists
    * and returns `follow_up_for`/`stream_identifier`, so a new issue can join an existing
    * issue's branch instead of cutting its own. Requires `supportsCreate`. Adapters
    * without it simply never offer follow-ups; nothing else changes.

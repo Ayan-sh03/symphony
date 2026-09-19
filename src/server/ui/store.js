@@ -1,5 +1,5 @@
 /**
- * Console client state (SPEC §13.7.1). One mutable store shared by every module,
+ * Console client state. One mutable store shared by every module,
  * plus a rerender hook registered by the app entry so any module can trigger a
  * repaint without importing it (keeps the module graph cycle-free).
  */
@@ -20,7 +20,7 @@ export const store = {
   detailErr: null,   // error string if the detail fetch failed
   projMenuOpen: false,
   armDelete: null,   // issue id whose Delete button is armed (two-click confirm)
-  // Model discovery (extension, SPEC Appendix B.7), keyed by agent kind:
+  // Model discovery (extension), keyed by agent kind:
   // { kind, models, fetched_at, stale, loading, error }. Advisory only — the list
   // never gates what an operator may type, so a missing entry is not an error state.
   models: {},

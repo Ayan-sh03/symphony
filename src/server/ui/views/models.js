@@ -1,5 +1,5 @@
 /**
- * Per-task model views (extension, SPEC Appendix B.7): the form picker, the board
+ * Per-task model views (extension): the form picker, the board
  * badge and mix tile, and the Integrate-page listing.
  *
  * The through-line everywhere below: Symphony never validates a model id. The list is

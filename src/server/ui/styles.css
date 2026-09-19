@@ -189,7 +189,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   cursor: pointer; max-width: 150px; transition: border-color .15s var(--ease); }
 .agent-select:hover { border-color: var(--faint); }
 .agent-select:focus { outline: none; border-color: var(--accent); }
-/* Pinned model (Appendix B.7): quieter than the agent tag — most rows have none, and
+/* Pinned model: quieter than the agent tag — most rows have none, and
    the ones that do are the exception worth spotting, not the headline. */
 .model-tag { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--panel-2);
   border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; white-space: nowrap;
@@ -351,7 +351,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
   margin-top: 5px; padding-top: 11px; }
 .proj-item.add:hover { color: var(--ink); background: none; }
 
-/* Model picker (Appendix B.7) — built like the project switcher above, and for the
+/* Model picker — built like the project switcher above, and for the
    same reasons: the open menu is store state (a background poll repaints through it),
    and one backend names several hundred models, which no native select can filter. */
 .model-pick { position: relative; }

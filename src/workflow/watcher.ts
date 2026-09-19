@@ -1,5 +1,5 @@
 /**
- * Workflow watch/reload (SPEC §6.2). Detects WORKFLOW.md changes and re-applies
+ * Workflow watch/reload. Detects WORKFLOW.md changes and re-applies
  * without restart. Uses polling (fs.watchFile) for cross-platform reliability;
  * the orchestrator also re-validates defensively each tick in case an event is
  * missed. Invalid reloads never crash the service — they keep the last good config.

@@ -4,7 +4,7 @@
  * "track itself": its own work items live on disk and the coding agent transitions
  * them via provider-native agent tools executed host-side.
  *
- * Adapter profile (SPEC §11.2):
+ * Adapter profile:
  * - tracker.kind: "file"
  * - tracker.provider keys:
  *     - `dir` (string path, default "./issues", relative to WORKFLOW.md dir; supports ~ and $VAR)
@@ -13,10 +13,10 @@
  * - id mapping: issue.id, defaulting to identifier when absent. native_ref preserved verbatim if a JSON object.
  * - dispatchable: from the file's `dispatchable` field, defaulting to true.
  * - Malformed record = missing/blank required id/identifier/title/state, or unreadable/!object JSON.
- *   State-list reads log+omit malformed records; ID refresh fails them (SPEC §11.1).
+ *   State-list reads log+omit malformed records; ID refresh fails them.
  * - Errors map to AdapterError{category,message}: invalid_tracker_config, tracker_request, tracker_response.
  *
- * Provider-native tools (SPEC §10.5, mutate tracker state):
+ * Provider-native tools (mutate tracker state):
  * - `update_issue_state({state, comment?})`  -> sets the issue's state (+ optional comment)
  * - `add_issue_comment({comment})`           -> appends a comment
  * - `set_issue_result({state?, comment?, pr_url?, tests?})` -> convenience terminal handoff
@@ -25,7 +25,7 @@
  * and the per-task `model` in place, and `deleteIssue` removes the issue's file; the
  * identifier keys the record and is immutable (a rename is a delete + create).
  *
- * Follow-ups (extension, SPEC Appendix B.5): `follow_up_for` and `stream_identifier`
+ * Follow-ups (extension): `follow_up_for` and `stream_identifier`
  * are carried verbatim on the record and written at creation only — `stream_identifier`
  * picks the branch and workspace, so `updateIssue` never touches either.
  *
@@ -81,7 +81,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
   }
 
   /**
-   * Build the adapter from effective tracker.provider config (SPEC §11.2 construction).
+   * Build the adapter from effective tracker.provider config (construction).
    * @param provider adapter-owned config
    * @param workflowDir directory containing WORKFLOW.md, for relative `dir`
    */
@@ -92,7 +92,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return new FileTrackerAdapter({ dir, logger });
   }
 
-  /** Validate config eagerly for dispatch preflight (SPEC §6.3). */
+  /** Validate config eagerly for dispatch preflight. */
   static validate(provider: Record<string, unknown>): void {
     if (provider.dir !== undefined && typeof provider.dir !== "string") {
       throw new AdapterError("invalid_tracker_config", "tracker.provider.dir must be a string path");
@@ -310,14 +310,14 @@ export class FileTrackerAdapter implements TrackerAdapter {
     }
   }
 
-  /** Normalize a raw record into an Issue, or null if it is malformed (SPEC §11.3). */
+  /** Normalize a raw record into an Issue, or null if it is malformed. */
   private normalize(raw: Record<string, unknown> | null): Issue | null {
     if (!raw) return null;
     const identifier = str(raw.identifier);
     const title = str(raw.title);
     const state = str(raw.state);
     const id = str(raw.id) || identifier; // id defaults to identifier
-    if (!identifier || !title || !state || !id) return null; // required non-empty (SPEC §11.3)
+    if (!identifier || !title || !state || !id) return null; // required non-empty
 
     const labels = normalizeLabels(raw.labels);
     const priority = normalizePriority(raw.priority);
@@ -352,13 +352,13 @@ export class FileTrackerAdapter implements TrackerAdapter {
   }
 
   async fetchIssuesByStates(stateNames: string[]): Promise<Issue[]> {
-    if (stateNames.length === 0) return []; // SPEC §11.1: empty => empty, no request
+    if (stateNames.length === 0) return []; // empty => empty, no request
     await this.refreshIndex();
     const wanted = new Set(stateNames.map((s) => s.trim().toLowerCase()));
     const out: Issue[] = [];
     for (const record of [...this.records.values()].sort((a, b) => a.file.localeCompare(b.file))) {
       if (!record.issue) {
-        // State-list read: log and omit malformed record (SPEC §11.1).
+        // State-list read: log and omit malformed record.
         this.logger.warn("tracker omitted malformed record", { adapter: this.kind, file: record.file });
         continue;
       }
@@ -368,17 +368,17 @@ export class FileTrackerAdapter implements TrackerAdapter {
   }
 
   async fetchIssuesByIds(issueIds: string[]): Promise<Issue[]> {
-    if (issueIds.length === 0) return []; // SPEC §11.1: empty => empty, no request
+    if (issueIds.length === 0) return []; // empty => empty, no request
     await this.refreshIndex();
     const byId = new Map<string, Issue>();
     for (const id of issueIds) {
       const record = this.recordForId(id, true);
       if (!record) continue;
       if (!record.issue) {
-        // ID refresh: a malformed requested record MUST fail (SPEC §11.1).
+        // ID refresh: a malformed requested record MUST fail.
         throw new AdapterError("tracker_response", `requested issue record is malformed: ${record.file}`);
       }
-      byId.set(record.issue.id, record.issue); // each dispatch id at most once (SPEC §11.1)
+      byId.set(record.issue.id, record.issue); // each dispatch id at most once
     }
     return [...byId.values()];
   }
@@ -451,7 +451,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
     return issue;
   }
 
-  // ---- Provider-native agent tools (SPEC §10.5) ----
+  // ---- Provider-native agent tools ----
 
   agentToolSpecs(): ToolSpec[] {
     return [
@@ -638,7 +638,7 @@ export class FileTrackerAdapter implements TrackerAdapter {
         }, { result_recorded: true })).result;
       }
       default:
-        // Unsupported tool name -> structured failure (SPEC §10.5).
+        // Unsupported tool name -> structured failure.
         return fail(`unsupported tool: ${name}`);
     }
   }

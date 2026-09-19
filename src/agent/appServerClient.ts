@@ -1,5 +1,5 @@
 /**
- * Codex app-server client (SPEC §10). Speaks newline-delimited JSON-RPC 2.0 over
+ * Codex app-server client. Speaks newline-delimited JSON-RPC 2.0 over
  * the subprocess stdio, per the codex app-server v2 protocol (verified against
  * codex-cli 0.144.5). Symphony-specific responsibilities: launch in the per-issue
  * workspace, run the first turn with the rendered prompt and continuation turns on
@@ -25,7 +25,7 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
-const MAX_LINE = 10 * 1024 * 1024; // 10 MB safe buffering (SPEC §10.1)
+const MAX_LINE = 10 * 1024 * 1024; // 10 MB safe buffering
 
 /** Codex app-server backend implementing the generic {@link AgentSession}. */
 export class CodexAppServerClient implements AgentSession {
@@ -76,7 +76,7 @@ export class CodexAppServerClient implements AgentSession {
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (d: string) => this.onData(d));
-    // Keep diagnostic stderr separate from the protocol stream (SPEC §10.3).
+    // Keep diagnostic stderr separate from the protocol stream.
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (d: string) => {
       const t = d.trim();
@@ -94,7 +94,7 @@ export class CodexAppServerClient implements AgentSession {
         approvalPolicy: this.codex.approval_policy,
         sandbox: this.codex.thread_sandbox,
       };
-      // Per-run model override (extension, Appendix B.7). `ThreadStartParams.model` is
+      // Per-run model override (extension). `ThreadStartParams.model` is
       // `string|null` in the v2 protocol; omitted entirely when unset so codex applies
       // its own configured default exactly as before.
       //
@@ -116,9 +116,9 @@ export class CodexAppServerClient implements AgentSession {
   }
 
   /**
-   * Run one turn on the live thread and resolve when it terminates (SPEC §10.3).
+   * Run one turn on the live thread and resolve when it terminates.
    * @param input rendered prompt (first turn) or continuation guidance (later turns)
-   * @param title optional issue-identifying thread title (SPEC §10.2). Set once,
+   * @param title optional issue-identifying thread title. Set once,
    *   best-effort, via `thread/name/set`; codex's `summary` field is a summary MODE
    *   enum, not a free-text title, so it is deliberately not used for this.
    */
@@ -162,7 +162,7 @@ export class CodexAppServerClient implements AgentSession {
     });
   }
 
-  /** Stop the app-server subprocess at the end of a worker run (SPEC §10.3). */
+  /** Stop the app-server subprocess at the end of a worker run. */
   stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
@@ -260,7 +260,7 @@ export class CodexAppServerClient implements AgentSession {
     const method = typeof msg.method === "string" ? msg.method : null;
 
     if (hasId && method) {
-      // Server -> client request (approvals, tool calls, user input) (SPEC §10.5).
+      // Server -> client request (approvals, tool calls, user input).
       this.handleServerRequest(msg.id as number | string, method, msg.params);
       return;
     }
@@ -290,13 +290,13 @@ export class CodexAppServerClient implements AgentSession {
         this.respond(id, { decision: "approved" });
         return;
       case "item/fileChange/requestApproval":
-        // FileChangeApprovalDecision uses a different enum (SPEC §10.5 documented policy).
+        // FileChangeApprovalDecision uses a different enum.
         this.emit("approval_auto_approved", { method });
         this.respond(id, { decision: "accept" });
         return;
       case "item/tool/requestUserInput":
         // High-trust policy: user-input-required is a hard failure, but we must
-        // respond so the protocol does not stall (SPEC §10.5).
+        // respond so the protocol does not stall.
         this.emit("turn_input_required", { method });
         this.respond(id, { answers: {} });
         if (this.activeTurn && !this.activeTurn.settled) {
@@ -318,7 +318,7 @@ export class CodexAppServerClient implements AgentSession {
     const toolName = typeof params.tool === "string" ? params.tool : "";
     const known = this.opts.toolSpecs.some((t) => t.name === toolName);
     if (!known) {
-      // Unsupported dynamic tool call: structured failure, continue session (SPEC §10.5).
+      // Unsupported dynamic tool call: structured failure, continue session.
       this.emit("unsupported_tool_call", { tool: toolName });
       this.respond(id, {
         success: false,
@@ -395,7 +395,7 @@ export class CodexAppServerClient implements AgentSession {
         return;
       }
       case "item/completed": {
-        // Turn item output into readable activity-log events (SPEC §13.6).
+        // Turn item output into readable activity-log events.
         const item = params.item as Record<string, unknown> | undefined;
         const type = typeof item?.type === "string" ? item.type : "";
         if (type === "agentMessage") {

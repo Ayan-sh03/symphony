@@ -1,5 +1,5 @@
 /**
- * Installed-agent discovery (extension, generalizes SPEC §10). Registered backends
+ * Installed-agent discovery (extension). Registered backends
  * say what they *can* run; this module answers whether the machine can actually run
  * them — i.e. whether the executable named by `codex.command` / `opencode.command`
  * exists on this host's PATH.

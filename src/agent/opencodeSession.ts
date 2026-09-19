@@ -1,5 +1,5 @@
 /**
- * opencode backend (SPEC §10, generalized per INTEGRATION.md §1–3). opencode has no
+ * opencode backend. opencode has no
  * long-lived JSON-RPC protocol like the Codex app-server; instead each Symphony turn
  * maps to exactly one `opencode run --format json` invocation that runs to completion
  * and streams newline-delimited JSON events on stdout. Symphony-specific
@@ -29,7 +29,7 @@ import type {
 
 const MAX_LINE = 10 * 1024 * 1024; // 10 MB safe buffering, matches the Codex client.
 
-/** Running per-session token accumulator; totals only ever increase (SPEC §13.5). */
+/** Running per-session token accumulator; totals only ever increase. */
 export interface OcTokenState {
   cumInput: number;
   cumOutput: number;
@@ -91,7 +91,7 @@ export function mapOpencodeEvent(evt: Record<string, unknown>, tokens: OcTokenSt
     case "step_finish": {
       const tok = (part.tokens ?? {}) as Record<string, unknown>;
       // opencode reports per-step input/output; accumulate into monotonic totals so
-      // the orchestrator's max()-based delta de-dup stays correct (SPEC §13.5).
+      // the orchestrator's max()-based delta de-dup stays correct.
       tokens.cumInput += num(tok.input);
       tokens.cumOutput += num(tok.output);
       updates.push({
@@ -158,7 +158,7 @@ export class OpencodeSession implements AgentSession {
 
   /**
    * opencode has no persistent server to launch: the session is created lazily by the
-   * first `opencode run` (which mints the `ses_…` id). Per INTEGRATION.md §1 we defer
+   * first `opencode run` (which mints the `ses_…` id). We defer
    * `session_started` to the first turn once the id is known. Returns a placeholder
    * identity (the runner ignores the return; identity is surfaced via emitted updates).
    */
@@ -169,7 +169,7 @@ export class OpencodeSession implements AgentSession {
   }
 
   /**
-   * Run exactly one `opencode run` turn to completion (SPEC §10.3). `input` is the
+   * Run exactly one `opencode run` turn to completion. `input` is the
    * rendered prompt (first turn) or continuation guidance (later turns); it is written
    * to the child's stdin to avoid shell quoting. `title` names the session on the first
    * turn only (best-effort metadata).
@@ -233,7 +233,7 @@ export class OpencodeSession implements AgentSession {
     return result;
   }
 
-  /** Kill any in-flight `opencode run` and settle its turn (SPEC §10.3). Idempotent. */
+  /** Kill any in-flight `opencode run` and settle its turn. Idempotent. */
   stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
@@ -254,7 +254,7 @@ export class OpencodeSession implements AgentSession {
   private buildCommand(title?: string): string {
     const parts = [this.oc.command, "run", "--format", "json", "--auto"];
     parts.push("--dir", quote(this.opts.workspacePath));
-    // Per-issue override first, then the workflow default (extension, Appendix B.7).
+    // Per-issue override first, then the workflow default (extension).
     const model = this.opts.model ?? this.oc.model;
     if (model) parts.push("-m", quote(model));
     if (this._threadId) parts.push("-s", quote(this._threadId));
@@ -287,7 +287,7 @@ export class OpencodeSession implements AgentSession {
   private handleEvent(evt: Record<string, unknown>): void {
     const { sessionId, updates } = mapOpencodeEvent(evt, this.tokens);
     // First time we learn the opencode session id: adopt it as the thread and
-    // announce the live session (INTEGRATION.md §1 lazy-id path).
+    // announce the live session (lazy-id path).
     if (sessionId && !this._threadId) {
       this._threadId = sessionId;
       this.emit("session_started", { thread_id: sessionId });

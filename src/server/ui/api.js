@@ -1,4 +1,4 @@
-/** Fetch layer for the project-scoped JSON API (SPEC §13.7.2). Mutates the store and rerenders. */
+/** Fetch layer for the project-scoped JSON API. Mutates the store and rerenders. */
 import { store, apiBase, rerender } from "./store.js";
 import { toast } from "./toast.js";
 
@@ -227,7 +227,7 @@ export function refreshAgents(btn) {
 }
 
 /**
- * Model discovery for one backend (extension, SPEC Appendix B.7). Advisory: the model
+ * Model discovery for one backend (extension). Advisory: the model
  * field is free text and the CLI is the authority, so a failed listing degrades the
  * dropdown and nothing else. `loading` is set without a rerender on purpose — views
  * call `ensureModels` while painting, and repainting mid-render would re-enter.

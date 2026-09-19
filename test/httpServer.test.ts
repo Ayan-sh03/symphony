@@ -477,7 +477,7 @@ test("a blank or whitespace host is treated as unset (binds loopback, not ::)", 
     try {
       // Node binds "" to `::` (all interfaces); a blank host must NOT survive as
       // "" — it must fall back to loopback so the unauthenticated console is
-      // never silently exposed (SPEC §13.7).
+      // never silently exposed.
       const addr = server.address() as AddressInfo;
       assert.ok(addr, "server should be listening");
       assert.equal(addr.address, "127.0.0.1", `blank host "${JSON.stringify(bad)}" should bind loopback, not ::`);

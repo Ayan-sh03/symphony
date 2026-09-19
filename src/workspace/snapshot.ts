@@ -1,5 +1,5 @@
 /**
- * Portable workspace snapshots (SPEC §9 safety; extension, issue #35).
+ * Portable workspace snapshots (extension, issue #35).
  * A JSON manifest carries file bytes and a self-contained Git bundle, never a
  * worktree's .git pointer, config, hooks, credentials, or object alternates.
  * Imports are validated in a private staging directory before publication.

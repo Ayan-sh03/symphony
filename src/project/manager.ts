@@ -1,8 +1,8 @@
 /**
- * Project manager (multi-project host extension; not part of the single-workflow
- * SPEC). Owns one independent, SPEC-conformant Orchestrator + WorkflowWatcher per
- * registered project. All projects poll and run agents concurrently in the
- * background; selecting a project in the console changes only the view. The set is
+ * Project manager (multi-project host extension). Owns one independent Orchestrator
+ * + WorkflowWatcher per registered project. All projects poll and run agents
+ * concurrently in the background; selecting a project in the console changes only
+ * the view. The set is
  * loaded from a persistent manifest and can be appended to at runtime.
  */
 import fs from "node:fs";

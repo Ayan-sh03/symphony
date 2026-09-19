@@ -1,4 +1,4 @@
-/** Formatting helpers shared across console views (SPEC §13.7.1). */
+/** Formatting helpers shared across console views. */
 import { html, nothing } from "./vendor/lit-html/lit-html.js";
 
 export function nfmt(n) { return (n == null ? 0 : n).toLocaleString(); }

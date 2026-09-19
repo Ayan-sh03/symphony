@@ -1,5 +1,5 @@
 /**
- * Tracker adapter registry (SPEC §5.3.1, §6.3). Selects a supported adapter by
+ * Tracker adapter registry. Selects a supported adapter by
  * `tracker.kind` and validates its provider config for dispatch preflight.
  */
 import type { Logger } from "../logger.ts";
@@ -13,7 +13,7 @@ export function isSupportedKind(kind: string): boolean {
   return (SUPPORTED_KINDS as readonly string[]).includes(kind);
 }
 
-/** Validate tracker.kind + provider without constructing side effects (SPEC §6.3). */
+/** Validate tracker.kind + provider without constructing side effects. */
 export function validateTracker(kind: string, provider: Record<string, unknown>): void {
   if (!kind || kind.trim() === "") {
     throw new AdapterError("invalid_tracker_config", "tracker.kind is required");
@@ -25,7 +25,7 @@ export function validateTracker(kind: string, provider: Record<string, unknown>)
   if (kind === "github") GitHubTrackerAdapter.validate(provider);
 }
 
-/** Construct the adapter for the effective config (SPEC §11.2 construction). */
+/** Construct the adapter for the effective config (construction). */
 export function createAdapter(
   kind: string,
   provider: Record<string, unknown>,

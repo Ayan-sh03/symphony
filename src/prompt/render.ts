@@ -1,5 +1,5 @@
 /**
- * Prompt Construction (SPEC §5.4, §12). Strict Liquid rendering: unknown variables
+ * Prompt Construction. Strict Liquid rendering: unknown variables
  * and unknown filters MUST fail rendering.
  */
 import { Liquid } from "liquidjs";
@@ -25,13 +25,13 @@ const engine = new Liquid({
 
 /**
  * Render the per-issue prompt. `attempt` is null on the first run, a 1-based
- * integer on retries/continuations (SPEC §12.3). `branch` is the branch the run
- * delivers on (SPEC Appendix B), null on scratch projects — it is not always
+ * integer on retries/continuations. `branch` is the branch the run
+ * delivers on when the project is repository-backed, null on scratch projects — it is not always
  * `issue/<identifier>`, since a follow-up delivers on the branch it continues.
  */
 export function renderPrompt(template: string, issue: Issue, attempt: number | null, branch: string | null = null): string {
   // Convert issue keys to string-keyed plain object; preserve nested arrays/maps
-  // so templates can iterate labels/blockers (SPEC §12.2).
+  // so templates can iterate labels/blockers.
   const scope = { issue: issueToScope(issue), attempt: attempt, branch };
   let parsed;
   try {

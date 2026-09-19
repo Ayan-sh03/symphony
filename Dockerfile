@@ -1,4 +1,4 @@
-# One-command containerized deploy (SPEC §13.7). Symphony is a no-build TypeScript
+# One-command containerized deploy. Symphony is a no-build TypeScript
 # app run directly under Node's type-stripping mode, so the image is just Node +
 # the source tree + production deps. The container serves the file-tracker
 # console on :8420; agent CLIs (codex/opencode) are NOT bundled — see README.
@@ -30,5 +30,5 @@ EXPOSE 8420
 
 # Bind loopback by default. The image sets no SYMPHONY_HOST; operators opt in to
 # exposing the unauthenticated console (e.g. SYMPHONY_HOST=0.0.0.0 via compose
-# or --host) when they publish the port (SPEC §13.7).
+# or --host) when they publish the port.
 ENTRYPOINT ["node", "src/index.ts", "./WORKFLOW.md", "--port", "8420"]

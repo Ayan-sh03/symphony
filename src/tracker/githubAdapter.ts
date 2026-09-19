@@ -2,7 +2,7 @@
  * GitHub Tracker Adapter (`kind: "github"`). Issues live in a GitHub repository and
  * are read/written over the REST API with the global stdlib `fetch` — no SDK.
  *
- * Adapter profile (SPEC §11.2):
+ * Adapter profile:
  * - tracker.kind: "github"
  * - tracker.provider keys:
  *     - `owner` (string, required)      — repository owner (user or org)
@@ -10,7 +10,7 @@
  *     - `token_env` (string, required)  — name of the env var holding the PAT
  *     - `api_base` (string, optional)   — default "https://api.github.com"
  *   `secretEnvironmentNames()` returns [token_env], so the PAT is stripped from the
- *   child agent's environment (SPEC §10.4) — tools run host-side, never in the agent.
+ *   child agent's environment — tools run host-side, never in the agent.
  *
  * State model. GitHub has no per-issue state field beyond open/closed, so a Symphony
  * state is represented by **exactly one label named `sym:<state>`** — `sym:todo`,
@@ -26,12 +26,12 @@
  *
  * Terminal detection is adapter-local (`TERMINAL_STATES`): the adapter only receives
  * `tracker.provider`, never the surrounding `tracker.terminal_states`, and the
- * registry/orchestrator signatures are fixed by the SPEC. The local set is
+ * registry/orchestrator signatures are fixed. The local set is
  * conservative — done/canceled/cancelled/closed — and only decides open-vs-closed on
  * write plus the closed-issue fallback; the orchestrator still applies the workflow's
  * own state lists to everything it reads.
  *
- * Normalization (SPEC §11.3):
+ * Normalization:
  * - `GH-<number>` -> identifier; `node_id` (falling back to the number) -> id.
  * - Labels are lowercased; the `sym:*` state label is *not* carried in `labels` —
  *   it is state, and Symphony models those separately.
@@ -40,7 +40,7 @@
  * - native_ref: { owner, repo, number, node_id, html_url }.
  * - A malformed provider payload raises `tracker_response`.
  *
- * Provider-native tools (SPEC §10.5, mutate tracker state, executed host-side):
+ * Provider-native tools (mutate tracker state, executed host-side):
  * - `update_issue_state({state, comment?})`
  * - `add_issue_comment({comment})`
  * - `set_issue_result({state?, comment?, pr_url?, tests?})`
@@ -99,7 +99,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     this.logger = opts.logger;
   }
 
-  /** Build the adapter from effective tracker.provider config (SPEC §11.2 construction). */
+  /** Build the adapter from effective tracker.provider config (construction). */
   static create(provider: Record<string, unknown>, _workflowDir: string, logger: Logger): GitHubTrackerAdapter {
     GitHubTrackerAdapter.validate(provider);
     const apiBase = str(provider.api_base) || DEFAULT_API_BASE;
@@ -112,7 +112,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     });
   }
 
-  /** Validate config eagerly for dispatch preflight (SPEC §6.3). */
+  /** Validate config eagerly for dispatch preflight. */
   static validate(provider: Record<string, unknown>): void {
     for (const key of ["owner", "repo", "token_env"]) {
       const value = provider[key];
@@ -231,7 +231,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
   }
 
   /**
-   * Map a GitHub issue payload onto the domain model (SPEC §11.3). A payload that
+   * Map a GitHub issue payload onto the domain model. A payload that
    * cannot yield the required fields is a provider fault, not a skippable record.
    */
   private normalize(raw: Record<string, unknown>): Issue {
@@ -295,10 +295,10 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     };
   }
 
-  // ---- read kernel (SPEC §11.1) ----
+  // ---- read kernel ----
 
   async fetchIssuesByStates(stateNames: string[]): Promise<Issue[]> {
-    if (stateNames.length === 0) return []; // SPEC §11.1: empty => empty, no request
+    if (stateNames.length === 0) return []; // empty => empty, no request
     const wanted = new Set(stateNames.map((s) => s.trim().toLowerCase()));
     return (await this.listIssues()).filter((i) => wanted.has(i.state.trim().toLowerCase()));
   }
@@ -308,7 +308,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
    * place of an issue number, so this lists and filters rather than fetching each one.
    */
   async fetchIssuesByIds(issueIds: string[]): Promise<Issue[]> {
-    if (issueIds.length === 0) return []; // SPEC §11.1: empty => empty, no request
+    if (issueIds.length === 0) return []; // empty => empty, no request
     const wanted = new Set(issueIds);
     return (await this.listIssues()).filter((i) => wanted.has(i.id));
   }
@@ -416,7 +416,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
     return created;
   }
 
-  // ---- Provider-native agent tools (SPEC §10.5) ----
+  // ---- Provider-native agent tools ----
 
   agentToolSpecs(): ToolSpec[] {
     return [
@@ -493,7 +493,7 @@ export class GitHubTrackerAdapter implements TrackerAdapter {
           return { success: true, output: { issue_id: ctx.issue.id, state: state || ctx.issue.state, result_recorded: true } };
         }
         default:
-          // Unsupported tool name -> structured failure (SPEC §10.5).
+          // Unsupported tool name -> structured failure.
           return fail(`unsupported tool: ${name}`);
       }
     } catch (err) {

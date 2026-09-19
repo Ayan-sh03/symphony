@@ -1,4 +1,4 @@
-/** Host checkpoint journal and publication boundary (issue #32; SPEC §9 safety). */
+/** Host checkpoint journal and publication boundary (issue #32). */
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
