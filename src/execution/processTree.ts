@@ -10,11 +10,12 @@
  * still await the process's own exit for the authoritative outcome.
  */
 import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 
 const isWindows = process.platform === "win32";
 
-/** How long a forced Windows tree kill (`taskkill /T /F`) may take before we give up. */
-const TASKKILL_TIMEOUT_MS = 5000;
+/** Bound platform cleanup waits, including taskkill and POSIX process reaping. */
+const TERMINATION_TIMEOUT_MS = 5000;
 
 /**
  * Force-terminate `pid` and every descendant it owns.
@@ -35,10 +36,20 @@ export async function terminateProcessTree(
     await runTaskkill(pid);
     return;
   }
+  let target = -pid;
   try {
-    process.kill(-pid, signal);
+    process.kill(target, signal);
   } catch {
-    try { process.kill(pid, signal); } catch { /* already gone */ }
+    target = pid;
+    try { process.kill(target, signal); } catch { return; }
+  }
+  // kill(2) only queues a signal. Even SIGKILL can leave descendants running until
+  // the scheduler delivers it; awaiting the wrapper's exit alone is insufficient.
+  // Bound the wait because an orphaned zombie can remain until its parent reaps it.
+  const deadline = Date.now() + TERMINATION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try { process.kill(target, 0); } catch { return; }
+    await delay(10);
   }
 }
 
@@ -65,7 +76,7 @@ function runTaskkill(pid: number): Promise<void> {
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* already gone */ }
       done();
-    }, TASKKILL_TIMEOUT_MS);
+    }, TERMINATION_TIMEOUT_MS);
     child.once("error", done);
     child.once("exit", done);
   });
